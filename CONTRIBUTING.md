@@ -2,7 +2,7 @@
 
 ## Checks
 
-CI runs these on every pull request, so run them before you push:
+CI runs these on every pull request, so run them before you push.
 
 ```sh
 cargo fmt --check
@@ -48,4 +48,4 @@ AVR is a tier 3 target. Pick a nightly at least a week old, change `rust-toolcha
 
 ## Commits
 
-Single-line [Conventional Commits](https://www.conventionalcommits.org): `feat(ui): add battery check on 3C`.
+Single-line [Conventional Commits](https://www.conventionalcommits.org), such as `feat(ui): add battery check on 3C`.
