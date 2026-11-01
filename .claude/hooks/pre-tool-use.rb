@@ -7,7 +7,9 @@
 
 require 'json'
 require 'open3'
-require_relative 'commit_msg'
+
+TYPES = %w[feat fix docs refactor test ci build perf style chore revert].freeze
+CONVENTIONAL = /\A(?:#{TYPES.join('|')})(?:\([a-z0-9._\/-]+\))?!?: \S/
 
 COMMIT = /(?:\A|[;&|(]\s*)git\s+(?:-\S+\s+(?:\S+\s+)?)*commit\b/
 HEREDOC = /<<-?\s*['"]?(\w+)['"]?\n(.*?)\n\s*\1\b/m
@@ -21,6 +23,16 @@ def message(command)
   quoted && (quoted[1] || quoted[2])
 end
 
+# Returns nil when the subject line is fine, or a reason when it isn't.
+def problem(msg)
+  subject = msg.lines.first.to_s.chomp
+  return 'the commit message is empty' if subject.strip.empty?
+  return nil if CONVENTIONAL.match?(subject)
+
+  "#{subject.inspect} isn't a Conventional Commit. Use `type(scope): summary` " \
+    "with a type from: #{TYPES.join(', ')}."
+end
+
 def block(reason)
   warn(reason)
   exit 2
@@ -30,11 +42,10 @@ input = JSON.parse($stdin.read)
 command = input.dig('tool_input', 'command').to_s
 exit 0 unless COMMIT.match?(command)
 
-# No inline message (-F, --amend --no-edit, the editor): nothing to check
-# here, and CI checks every commit on the PR anyway.
+# No inline message (-F, --amend --no-edit, the editor): nothing to check.
 msg = message(command)
 if msg
-  reason = CommitMsg.problem(msg)
+  reason = problem(msg)
   block(reason) if reason
 end
 

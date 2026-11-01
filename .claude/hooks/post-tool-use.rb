@@ -7,6 +7,7 @@
 #   .rs  rustfmt --check, then clippy (fw-clippy for hw.rs and rt.rs, which
 #        the host never compiles)
 #   .rb  ruby -wc
+#   .github/workflows/*.yml  gh actions-lock --verify-local (lockfile coverage)
 
 require 'json'
 require 'open3'
@@ -36,9 +37,13 @@ exit 0 if path.empty? || !File.file?(path)
 
 dir = ENV.fetch('CLAUDE_PROJECT_DIR', Dir.pwd)
 problem =
-  case File.extname(path)
-  when '.rs' then rust(path, dir)
-  when '.rb' then run('ruby', '-wc', path, chdir: dir)
+  if path.start_with?("#{dir}/.github/workflows/") && path.end_with?('.yml', '.yaml')
+    run('gh', 'actions-lock', '--verify-local', chdir: dir)
+  else
+    case File.extname(path)
+    when '.rs' then rust(path, dir)
+    when '.rb' then run('ruby', '-wc', path, chdir: dir)
+    end
   end
 
 exit 0 unless problem

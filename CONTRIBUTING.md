@@ -48,11 +48,15 @@ AVR is a tier 3 target. Pick a nightly at least a week old, change `rust-toolcha
 
 ## Commits
 
-Single-line [Conventional Commits](https://www.conventionalcommits.org): `feat(ui): add battery check on 3C`. PRs merge by rebase only, so every commit on a branch lands on main, and CI checks each subject with `.claude/hooks/commit_msg.rb`.
+Single-line [Conventional Commits](https://www.conventionalcommits.org): `feat(ui): add battery check on 3C`. PRs merge by rebase only, so every commit on a branch lands on main.
+
+## Workflows
+
+Actions are pinned in `.github/workflows/actions.lock`, a [workflow lockfile](https://docs.github.com/actions/concepts/security/workflow-dependency-lockfiles) that records the commit each `uses:` resolves to. Rerun `gh actions-lock` (`gh extension install github/gh-actions-lock`) after adding a workflow or changing any `uses:`, and commit the lockfile with it. Dependabot updates the lockfile in its own PRs.
 
 ## Claude Code hooks
 
 `.claude/settings.json` wires up two Ruby hooks (standard library only):
 
-- `.claude/hooks/post-tool-use.rb` runs after every Edit or Write: `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files.
+- `.claude/hooks/post-tool-use.rb` runs after every Edit or Write: `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files, and `gh actions-lock --verify-local` for workflows.
 - `.claude/hooks/pre-tool-use.rb` runs before any `git commit`: it rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
