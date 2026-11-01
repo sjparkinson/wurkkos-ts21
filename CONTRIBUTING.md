@@ -28,13 +28,14 @@ src/rt.rs         vector table and startup (AVR only)
 link.x            memory layout for the linker
 xtask/            hex, size and the UPDI programmer (ping, backup, flash, restore)
 docs/             hardware, flashing, toolchain, UI spec, roadmap
+vendor/           Microchip's ATDF for the part (Apache-2.0)
 ```
 
 Keep logic in the library, where `cargo test` can reach it. `src/main.rs` should stay a loop that moves values between `hw` and the library.
 
 ## Registers
 
-There's no PAC. When you add a register to `src/hw.rs`, take its address and bit masks from the ATtiny1617 ATDF (same register map as the 1616), and say which register and bitfield each magic number is in a comment. Then have someone, or the `register-checker` agent in `.claude/agents/`, check it against the ATDF again. A wrong address compiles fine and does something to the hardware you didn't ask for.
+There's no PAC. When you add a register to `src/hw.rs`, take its address and bit masks from the ATtiny1617 ATDF in `vendor/attiny1617.atdf` (same register map as the 1616), and say which register and bitfield each magic number is in a comment. Then have someone, or the `register-checker` agent in `.claude/agents/`, check it against the ATDF again. A wrong address compiles fine and does something to the hardware you didn't ask for.
 
 Never write fuses. Changing `SYSCFG0` can disable UPDI, and then the light needs a high-voltage programmer to recover.
 
