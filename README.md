@@ -13,19 +13,7 @@ The v2, from about 2023 on: ATtiny1616 inside, three pads labelled **R G V** on 
 
 ## Using it
 
-Anduril users will feel at home: same click notation, fewer modes.
-
-| From | Action | Does |
-|---|---|---|
-| Off | 1C | On at the last level |
-| Off | 1H | Moonlight |
-| Off | 2C | Turbo |
-| Off | 4C | Lockout |
-| On | 1C | Off |
-| On | 1H / 2H | Ramp up / down |
-| On | 2C | Turbo and back |
-| Lockout | 1H | Moonlight while held |
-| Lockout | 4C | Unlock |
+For now it's one click on, one click off, at a single level on the linear channel. That's enough to prove the switch, the PWM and the pin map on a real torch. The full UI (ramping, turbo, lockout) is waiting on the `fancy-ui` branch.
 
 [docs/ui.md](docs/ui.md) is the full spec, including what's still to come.
 

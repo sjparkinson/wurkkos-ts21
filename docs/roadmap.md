@@ -8,10 +8,11 @@ Roughly in order. Each step should leave a torch that's no worse than the step b
 - [x] Pin map and registers for the TS21 v2 driver
 - [x] Switch sampling at 64 Hz and a click/hold decoder
 - [x] Two-channel ramp (linear then FET), 150 levels
-- [x] On, off, ramp up and down, turbo, lockout
+- [x] Click on, click off, at one level on the linear channel
 - [x] A built-in UPDI programmer in `xtask` (ping, backup, flash, restore), tested against a fake chip
 - [ ] Ping, back up and flash a real TS21, which is also the first real test of the programmer
 - [ ] Check PB5 is the button LED and decide what it does
+- [ ] Bring back the full UI from the `fancy-ui` branch: ramp up and down, moonlight, turbo, lockout
 
 ## 2. It's safe to leave a cell in
 
