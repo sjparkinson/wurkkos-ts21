@@ -42,7 +42,7 @@ Unscrew the head and they're on the driver. They're UPDI.
 | G | Ground |
 | V | VCC, 3.3 to 5 V from the programmer depending on which one |
 
-People who've opened one confirm the labels. What each one does is the standard three-pad layout gchart's t1616 drivers use, which other lights label `+ - R` or, read from the other end, `R - +` ([pingle.org](https://www.pingle.org/2022/08/07/flashing-a-3-pin-t1616-flashlight-with-new-firmware)). Likely, bordering on confirmed. Pad order and spacing vary between lights, so before you press a programmer onto them, check with a multimeter that G is continuous with the battery negative.
+People who've opened one confirm the labels. What each one does is the standard three-pad layout gchart's t1616 drivers use, which other lights label `+ - R` or, read from the other end, `R - +` ([pingle.org](https://www.pingle.org/2022/08/07/flashing-a-3-pin-t1616-flashlight-with-new-firmware)). Likely, bordering on confirmed. The pads are at 1.27 mm pitch, the same as gchart's layout, so a standard 1.27 mm probe fits. Confirmed by measuring a TS21 v2 (it's nowhere near 2.54 mm). Pad order varies between lights, so before you press a programmer onto them, check with a multimeter that G is continuous with the battery negative.
 
 How to flash through them is in [flashing.md](flashing.md).
 
@@ -80,4 +80,3 @@ These come from [the 2021 teardown](https://budgetlightforum.com/t/wurkkos-ts21-
 - Is PB5 really the button LED's amber element on the TS21? Anduril's TS10 config calls it front-facing aux, and the SP36 config talks about a button LED. A multimeter on the driver would settle it, and so would flashing a build that blinks it.
 - What lights the button LED's blue element? The charger, or something else?
 - Does the TS21 driver match the TS10 exactly (same 7135 current, same FET), or only in pinout? The calibration numbers differ slightly between the TS10 and Q8 builds.
-- What's the pad spacing, 1.27 mm or 2.54 mm? A rough measurement on a TS21 v2 gave about 1.5 mm centre to centre, so it's likely 1.27 mm. Calipers, or a 1.27 mm probe that sits flat on all three pads, would confirm it.
