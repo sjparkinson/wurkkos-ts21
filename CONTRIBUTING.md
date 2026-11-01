@@ -48,4 +48,11 @@ AVR is a tier 3 target. Pick a nightly at least a week old, change `rust-toolcha
 
 ## Commits
 
-Single-line [Conventional Commits](https://www.conventionalcommits.org): `feat(ui): add battery check on 3C`.
+Single-line [Conventional Commits](https://www.conventionalcommits.org): `feat(ui): add battery check on 3C`. PRs merge by rebase only, so every commit on a branch lands on main, and CI checks each subject with `.claude/hooks/commit_msg.rb`.
+
+## Claude Code hooks
+
+`.claude/settings.json` wires up two Ruby hooks (standard library only):
+
+- `.claude/hooks/lint.rb` runs after every Edit or Write: `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files.
+- `.claude/hooks/pre_commit.rb` runs before any `git commit`: it rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
