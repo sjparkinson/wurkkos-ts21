@@ -84,8 +84,14 @@ mod tests {
             Event::Click(2),
             Event::Click(3),
             Event::Click(4),
-            Event::Hold { clicks: 0, ticks: 0 },
-            Event::Hold { clicks: 1, ticks: 40 },
+            Event::Hold {
+                clicks: 0,
+                ticks: 0,
+            },
+            Event::Hold {
+                clicks: 1,
+                ticks: 40,
+            },
             Event::Release { clicks: 0 },
         ];
         for start in [Mode::Off, Mode::On] {
