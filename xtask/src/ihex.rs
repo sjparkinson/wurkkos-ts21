@@ -49,7 +49,7 @@ pub fn decode(text: &str) -> Result<Vec<u8>, String> {
         if bytes.len() != len + 5 {
             return Err(at("length doesn't match"));
         }
-        if bytes.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0 {
+        if sum(&bytes) != 0 {
             return Err(at("bad checksum"));
         }
         let address = usize::from(u16::from_be_bytes([bytes[1], bytes[2]]));
@@ -76,16 +76,18 @@ pub fn decode(text: &str) -> Result<Vec<u8>, String> {
 fn record(out: &mut String, address: u16, kind: u8, data: &[u8]) {
     let [hi, lo] = address.to_be_bytes();
     let header = [data.len() as u8, hi, lo, kind];
-    let sum = header
-        .iter()
-        .chain(data)
-        .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+    let checksum = sum(&header).wrapping_add(sum(data)).wrapping_neg();
 
     out.push(':');
     for byte in header.iter().chain(data) {
         let _ = write!(out, "{byte:02X}");
     }
-    let _ = writeln!(out, "{:02X}", sum.wrapping_neg());
+    let _ = writeln!(out, "{checksum:02X}");
+}
+
+/// Byte sum, mod 256. A valid record, checksum included, sums to zero.
+fn sum(bytes: &[u8]) -> u8 {
+    bytes.iter().fold(0, |sum, b| sum.wrapping_add(*b))
 }
 
 #[cfg(test)]

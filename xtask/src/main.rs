@@ -10,6 +10,7 @@ mod serial;
 mod updi;
 
 use std::env;
+use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -35,15 +36,12 @@ or /dev/ttyUSB0 on Linux.
 const ELF: &str = "target/avr-none/release/ts21.elf";
 const HEX: &str = "target/ts21.hex";
 
-const FLASH_BYTES: u32 = 16 * 1024;
-const RAM_BYTES: u32 = 2 * 1024;
-
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let result = match args.as_slice() {
-        ["hex"] => hex().map(|_| ()),
+        ["hex"] => hex(),
         ["size"] => size(),
         ["ping", port] => ping(port),
         ["backup", port] => backup(port),
@@ -77,29 +75,30 @@ fn build() -> Result<elf::Elf, String> {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     run(Command::new(cargo).current_dir(root()).arg("fw"))?;
     let path = root().join(ELF);
-    let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    elf::Elf::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    let bytes = fs::read(&path).map_err(at(&path))?;
+    elf::Elf::parse(&bytes).map_err(at(&path))
 }
 
-fn hex() -> Result<PathBuf, String> {
+fn hex() -> Result<(), String> {
     let image = build()?.flash_image();
-    let path = root().join(HEX);
-    write(&path, &ihex::encode(&image))?;
+    write(&root().join(HEX), &ihex::encode(&image))?;
     eprintln!("wrote {HEX} ({} bytes of flash)", image.len());
-    Ok(path)
+    Ok(())
 }
 
 fn size() -> Result<(), String> {
     let elf = build()?;
     let flash = elf.flash_image().len() as u32;
+    let flash_size = map::FLASH_SIZE as u32;
     let ram = elf.ram_bytes();
+    let ram_size = elf::RAM.end - elf::RAM.start;
     println!(
-        "flash {flash:>5} / {FLASH_BYTES} bytes ({}%)",
-        flash * 100 / FLASH_BYTES
+        "flash {flash:>5} / {flash_size} bytes ({}%)",
+        flash * 100 / flash_size
     );
     println!(
-        "ram   {ram:>5} / {RAM_BYTES} bytes ({}%), plus the stack",
-        ram * 100 / RAM_BYTES
+        "ram   {ram:>5} / {ram_size} bytes ({}%), plus the stack",
+        ram * 100 / ram_size
     );
     Ok(())
 }
@@ -107,6 +106,15 @@ fn size() -> Result<(), String> {
 fn connect(port: &str) -> Result<Programmer<Port>, String> {
     eprintln!("connecting on {port}");
     Programmer::connect(Port::open(port)?)
+}
+
+/// Connects, enters programming mode and refuses anything but an ATtiny1616.
+/// Every command that reads or writes memory starts here.
+fn connect_for_programming(port: &str) -> Result<Programmer<Port>, String> {
+    let mut p = connect(port)?;
+    p.enter_progmode()?;
+    p.check_signature()?;
+    Ok(p)
 }
 
 fn ping(port: &str) -> Result<(), String> {
@@ -128,9 +136,7 @@ fn backup(port: &str) -> Result<(), String> {
         ));
     }
 
-    let mut p = connect(port)?;
-    p.enter_progmode()?;
-    p.check_signature()?;
+    let mut p = connect_for_programming(port)?;
     eprintln!("reading flash");
     let flash = p.read(map::FLASH, map::FLASH_SIZE)?;
     eprintln!("reading EEPROM and fuses");
@@ -138,7 +144,7 @@ fn backup(port: &str) -> Result<(), String> {
     let fuses = p.read(map::FUSES, map::FUSES_SIZE)?;
     p.leave()?;
 
-    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    fs::create_dir_all(&dir).map_err(at(&dir))?;
     write(&flash_path, &ihex::encode(&flash))?;
     write(&dir.join("eeprom.hex"), &ihex::encode(&eeprom))?;
     write(&dir.join("fuses.hex"), &ihex::encode(&fuses))?;
@@ -168,12 +174,13 @@ fn program(port: &str, flash: &[u8], eeprom: Option<&[u8]>) -> Result<(), String
         ));
     }
     if eeprom.is_some_and(|e| e.len() > map::EEPROM_SIZE) {
-        return Err("the EEPROM image is bigger than 256 bytes".into());
+        return Err(format!(
+            "the EEPROM image is bigger than {} bytes",
+            map::EEPROM_SIZE
+        ));
     }
 
-    let mut p = connect(port)?;
-    p.enter_progmode()?;
-    p.check_signature()?;
+    let mut p = connect_for_programming(port)?;
     eprintln!("erasing");
     p.chip_erase()?;
     eprintln!("writing {} bytes of flash", flash.len());
@@ -190,12 +197,17 @@ fn program(port: &str, flash: &[u8], eeprom: Option<&[u8]>) -> Result<(), String
 }
 
 fn read_hex(path: &Path) -> Result<Vec<u8>, String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    ihex::decode(&text).map_err(|e| format!("{}: {e}", path.display()))
+    let text = fs::read_to_string(path).map_err(at(path))?;
+    ihex::decode(&text).map_err(at(path))
 }
 
 fn write(path: &Path, contents: &str) -> Result<(), String> {
-    fs::write(path, contents).map_err(|e| format!("{}: {e}", path.display()))
+    fs::write(path, contents).map_err(at(path))
+}
+
+/// Prefixes an error with the file it came from.
+fn at<E: Display>(path: &Path) -> impl Fn(E) -> String + '_ {
+    move |e| format!("{}: {e}", path.display())
 }
 
 fn run(command: &mut Command) -> Result<(), String> {

@@ -178,8 +178,9 @@ impl<W: Wire> Programmer<W> {
             Ok(())
         } else {
             Err(format!(
-                "expected an ATtiny1616 (signature 1E 94 21) but found {:02X} {:02X} {:02X}",
-                signature[0], signature[1], signature[2]
+                "expected an ATtiny1616 (signature {}) but found {}",
+                hex(&map::ATTINY1616),
+                hex(&signature)
             ))
         }
     }
@@ -189,8 +190,9 @@ impl<W: Wire> Programmer<W> {
         let mut out = vec![0; len];
         for (i, chunk) in out.chunks_mut(MAX_BLOCK).enumerate() {
             self.st_ptr(offset(addr, i * MAX_BLOCK)?)?;
-            self.repeat(chunk.len())?;
-            self.send(&[SYNC, LD | PTR_INC | DATA_8])?;
+            let mut frame = repeat(chunk.len());
+            frame.extend([SYNC, LD | PTR_INC | DATA_8]);
+            self.send(&frame)?;
             self.recv(chunk)?;
         }
         Ok(out)
@@ -206,6 +208,9 @@ impl<W: Wire> Programmer<W> {
     /// Writes `data` page by page from `addr`, skipping pages that are all
     /// 0xFF (already erased). `addr` must be page aligned.
     pub fn write(&mut self, addr: u16, page: usize, data: &[u8]) -> Result<()> {
+        // Each page write ends by waiting for the NVM controller, so this is
+        // the only wait needed before the next one starts.
+        self.wait_nvm()?;
         for (i, chunk) in data.chunks(page).enumerate() {
             if chunk.iter().all(|&b| b == 0xFF) {
                 continue;
@@ -242,20 +247,21 @@ impl<W: Wire> Programmer<W> {
         Ok(self.wire)
     }
 
+    /// Expects the NVM controller to be idle, as [`Self::write`] leaves it.
     fn write_page(&mut self, addr: u16, data: &[u8]) -> Result<()> {
-        self.wait_nvm()?;
         self.nvm_command(NVM_PAGE_BUFFER_CLEAR)?;
         self.wait_nvm()?;
 
         // Fill the page buffer in one burst, with the per-byte ACKs turned
-        // off so it doesn't take a round trip per byte.
+        // off so it doesn't take a round trip per byte. Nothing in the
+        // burst replies, so it goes out as a single frame.
         self.st_ptr(addr)?;
-        self.stcs(CS_CTRLA, CTRLA_IBDLY | CTRLA_RSD)?;
-        self.repeat(data.len())?;
-        let mut frame = vec![SYNC, ST | PTR_INC | DATA_8];
+        let mut frame = vec![SYNC, STCS | CS_CTRLA, CTRLA_IBDLY | CTRLA_RSD];
+        frame.extend(repeat(data.len()));
+        frame.extend([SYNC, ST | PTR_INC | DATA_8]);
         frame.extend(data);
+        frame.extend([SYNC, STCS | CS_CTRLA, CTRLA_IBDLY]);
         self.send(&frame)?;
-        self.stcs(CS_CTRLA, CTRLA_IBDLY)?;
 
         self.nvm_command(NVM_PAGE_ERASE_WRITE)?;
         self.wait_nvm()
@@ -312,11 +318,6 @@ impl<W: Wire> Programmer<W> {
         self.ack()
     }
 
-    fn repeat(&mut self, count: usize) -> Result<()> {
-        assert!((1..=MAX_BLOCK).contains(&count), "REPEAT covers 1 to 256");
-        self.send(&[SYNC, REPEAT, (count - 1) as u8])
-    }
-
     fn ack(&mut self) -> Result<()> {
         match self.recv1()? {
             ACK => Ok(()),
@@ -343,6 +344,18 @@ impl<W: Wire> Programmer<W> {
 
 fn offset(addr: u16, by: usize) -> Result<u16> {
     u16::try_from(usize::from(addr) + by).map_err(|_| "address out of range".to_string())
+}
+
+/// A REPEAT instruction, to be sent ahead of the one it repeats.
+fn repeat(count: usize) -> Vec<u8> {
+    assert!((1..=MAX_BLOCK).contains(&count), "REPEAT covers 1 to 256");
+    vec![SYNC, REPEAT, (count - 1) as u8]
+}
+
+/// `[0x1E, 0x94]` as `1E 94`.
+fn hex(bytes: &[u8]) -> String {
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+    hex.join(" ")
 }
 
 fn io_error(error: io::Error) -> String {
@@ -454,6 +467,21 @@ mod tests {
     mod fake {
         use super::super::*;
         use std::collections::VecDeque;
+
+        const FLASH_END: u16 = map::FLASH + (map::FLASH_SIZE - 1) as u16;
+        const EEPROM_END: u16 = map::EEPROM + (map::EEPROM_SIZE - 1) as u16;
+        const SIGNATURE_END: u16 = map::SIGNATURE + (map::ATTINY1616.len() - 1) as u16;
+        /// FUSE.OSCCFG, the third fuse byte.
+        const OSCCFG: u16 = map::FUSES + 2;
+
+        /// The base address and page size of whichever NVM `addr` is in.
+        fn region(addr: u16) -> (u16, usize) {
+            if addr >= map::FLASH {
+                (map::FLASH, map::FLASH_PAGE)
+            } else {
+                (map::EEPROM, map::EEPROM_PAGE)
+            }
+        }
 
         enum Expect {
             Sync,
@@ -656,12 +684,13 @@ mod tests {
             }
 
             fn load(&self, addr: u16) -> u8 {
-                let a = usize::from(addr);
                 match addr {
-                    0x8000..=0xBFFF => self.flash[a - 0x8000],
-                    0x1400..=0x14FF => self.eeprom[a - 0x1400],
-                    0x1100..=0x1102 => self.signature[a - 0x1100],
-                    0x1282 => 0x02,
+                    map::FLASH..=FLASH_END => self.flash[usize::from(addr - map::FLASH)],
+                    map::EEPROM..=EEPROM_END => self.eeprom[usize::from(addr - map::EEPROM)],
+                    map::SIGNATURE..=SIGNATURE_END => {
+                        self.signature[usize::from(addr - map::SIGNATURE)]
+                    }
+                    OSCCFG => 0x02,
                     _ => 0,
                 }
             }
@@ -673,12 +702,8 @@ mod tests {
                 );
                 match addr {
                     map::NVMCTRL_CTRLA => self.nvm(value),
-                    0x8000..=0xBFFF | 0x1400..=0x14FF => {
-                        let page = if addr >= 0x8000 {
-                            map::FLASH_PAGE
-                        } else {
-                            map::EEPROM_PAGE
-                        };
+                    map::FLASH..=FLASH_END | map::EEPROM..=EEPROM_END => {
+                        let (_, page) = region(addr);
                         self.page_addr = Some(addr - addr % page as u16);
                         self.page_buffer[usize::from(addr) % page] = value;
                     }
@@ -694,12 +719,13 @@ mod tests {
                     }
                     NVM_PAGE_ERASE_WRITE => {
                         let addr = self.page_addr.take().expect("a page to write");
-                        let (mem, base, page) = if addr >= 0x8000 {
-                            (&mut self.flash, 0x8000, map::FLASH_PAGE)
+                        let (base, page) = region(addr);
+                        let mem = if base == map::FLASH {
+                            &mut self.flash
                         } else {
-                            (&mut self.eeprom, 0x1400, map::EEPROM_PAGE)
+                            &mut self.eeprom
                         };
-                        let start = usize::from(addr) - base;
+                        let start = usize::from(addr - base);
                         mem[start..start + page].copy_from_slice(&self.page_buffer[..page]);
                         self.page_buffer.fill(0xFF);
                         self.page_writes += 1;
