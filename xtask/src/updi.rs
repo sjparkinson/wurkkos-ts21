@@ -372,6 +372,93 @@ mod tests {
     use super::*;
     use fake::Tiny;
 
+    /// The memory map and NVM constants against the vendored ATDF. The
+    /// UPDI instruction set isn't in the ATDF, so those stay checked by
+    /// review against the datasheet and pymcuprog.
+    #[test]
+    fn map_and_nvm_constants_match_the_atdf() {
+        let atdf = crate::atdf::Atdf::load();
+
+        let flash = atdf.segment("MAPPED_PROGMEM");
+        assert_eq!(u32::from(map::FLASH), flash.start, "flash window");
+        assert_eq!(map::FLASH_SIZE as u32, flash.size, "flash size");
+        assert_eq!(
+            map::FLASH_SIZE as u32,
+            atdf.segment("PROGMEM").size,
+            "PROGMEM size"
+        );
+        assert_eq!(Some(map::FLASH_PAGE as u32), flash.page, "flash page");
+
+        let eeprom = atdf.segment("EEPROM");
+        assert_eq!(u32::from(map::EEPROM), eeprom.start, "EEPROM");
+        assert_eq!(map::EEPROM_SIZE as u32, eeprom.size, "EEPROM size");
+        assert_eq!(Some(map::EEPROM_PAGE as u32), eeprom.page, "EEPROM page");
+
+        let signatures = atdf.segment("SIGNATURES");
+        assert_eq!(u32::from(map::SIGNATURE), signatures.start, "signature");
+        assert_eq!(
+            map::ATTINY1616.len() as u32,
+            signatures.size,
+            "signature size"
+        );
+        // The ATDF is the 1617's, so only the first two bytes (Atmel, 16 KB
+        // flash) are shared. The third comes from the 1614 and 1617 ATDFs,
+        // see `map::ATTINY1616`.
+        assert_eq!(u32::from(map::ATTINY1616[0]), atdf.property("SIGNATURE0"));
+        assert_eq!(u32::from(map::ATTINY1616[1]), atdf.property("SIGNATURE1"));
+
+        // FUSES_SIZE covers the fuses and the lock byte straight after them.
+        let fuses = atdf.segment("FUSES");
+        let lock = atdf.segment("LOCKBITS");
+        assert_eq!(u32::from(map::FUSES), fuses.start, "fuses");
+        assert_eq!(
+            fuses.start + fuses.size,
+            lock.start,
+            "lock byte follows the fuses"
+        );
+        assert_eq!(
+            map::FUSES_SIZE as u32,
+            fuses.size + lock.size,
+            "fuses and lock size"
+        );
+
+        let ctrla = atdf.register("NVMCTRL", None, "CTRLA");
+        let status = atdf.register("NVMCTRL", None, "STATUS");
+        assert_eq!(
+            u32::from(map::NVMCTRL_CTRLA),
+            ctrla.address,
+            "NVMCTRL.CTRLA"
+        );
+        assert_eq!(
+            u32::from(map::NVMCTRL_STATUS),
+            status.address,
+            "NVMCTRL.STATUS"
+        );
+
+        for (ours, theirs, label) in [
+            (
+                NVM_PAGE_ERASE_WRITE,
+                ctrla.value("CMD", "PAGEERASEWRITE"),
+                "CMD=PAGEERASEWRITE",
+            ),
+            (
+                NVM_PAGE_BUFFER_CLEAR,
+                ctrla.value("CMD", "PAGEBUFCLR"),
+                "CMD=PAGEBUFCLR",
+            ),
+            (
+                NVM_CHIP_ERASE,
+                ctrla.value("CMD", "CHIPERASE"),
+                "CMD=CHIPERASE",
+            ),
+            (NVM_FBUSY, status.mask("FBUSY"), "STATUS.FBUSY"),
+            (NVM_EEBUSY, status.mask("EEBUSY"), "STATUS.EEBUSY"),
+            (NVM_WRERROR, status.mask("WRERROR"), "STATUS.WRERROR"),
+        ] {
+            assert_eq!(u32::from(ours), theirs, "NVMCTRL.{label}");
+        }
+    }
+
     #[test]
     fn reads_the_sib() {
         let mut p = Programmer::connect(Tiny::new()).unwrap();

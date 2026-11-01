@@ -7,8 +7,9 @@
 
 use core::arch::global_asm;
 
-// ATtiny1616 has 31 vectors (reset plus 30 interrupts, see the ATDF or the
-// datasheet's interrupt vector table). With 16 KB of flash each one is a
+use crate::regs;
+
+// ATtiny1616 has 31 vectors (reset plus 30 interrupts, `regs::VECTORS`). With 16 KB of flash each one is a
 // two-word `jmp`. Nothing enables interrupts yet, so every slot but reset
 // lands on a bare `reti`.
 global_asm!(
@@ -16,7 +17,7 @@ global_asm!(
     ".global __vectors",
     "__vectors:",
     "  jmp __reset",
-    "  .rept 30",
+    "  .rept {irqs}",
     "  jmp __unhandled_interrupt",
     "  .endr",
     "",
@@ -30,7 +31,7 @@ global_asm!(
     // r1 is the zero register in the AVR ABI. SREG starts cleared on reset,
     // but say so anyway. SP already points at the top of SRAM.
     "  clr r1",
-    "  out 0x3f, r1",
+    "  out {sreg}, r1",
     // Copy .data's initial values from flash (read through the mapped-flash
     // window, see link.x) into SRAM.
     "  ldi r26, lo8(__data_start)",
@@ -62,4 +63,6 @@ global_asm!(
     "  call main",
     "5:",
     "  rjmp 5b",
+    irqs = const regs::VECTORS - 1,
+    sreg = const regs::addr::CPU_SREG,
 );

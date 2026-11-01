@@ -4,6 +4,8 @@
 //! small enough to do by hand, which saves needing avr-objcopy, avrdude or
 //! pymcuprog.
 
+#[cfg(test)]
+mod atdf;
 mod elf;
 mod ihex;
 mod serial;

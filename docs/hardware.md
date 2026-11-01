@@ -59,7 +59,7 @@ These are the bits that matter for this firmware.
 - **There's no hardware multiplier.** See [toolchain.md](toolchain.md#32-bit-multiplication) for what that means for 32-bit maths.
 - **The factory fuses are fine.** Anduril never writes fuses on the t1616, so the defaults (20 MHz oscillator, UPDI enabled on the reset pin, EESAVE off) are what's on a stock TS21. Don't change `SYSCFG0` to turn the UPDI pin into a GPIO or reset pin unless you own a high-voltage programmer, because that's the only way back.
 
-I checked the register addresses in `src/hw.rs` and the vector count in `src/rt.rs` against the ATtiny1617 ATDF in [`vendor/`](../vendor/README.md), copied from [avr-device](https://github.com/Rahix/avr-device/tree/0bdf99ce7fa92a128de2bbb5d0303b8f0e633c7f/vendor). Microchip's own `ATtiny1616.atdf` is in their ATtiny device pack at packs.download.microchip.com if you want to check against the exact part. None of it has met a real board yet.
+The register addresses, bit values and vector count in `src/regs.rs`, and the memory map and NVM constants in `xtask/src/updi.rs`, are checked by `cargo test` (`xtask/src/atdf.rs`) against the ATtiny1617 ATDF in [`vendor/`](../vendor/README.md), copied from [avr-device](https://github.com/Rahix/avr-device/tree/0bdf99ce7fa92a128de2bbb5d0303b8f0e633c7f/vendor). Microchip's own `ATtiny1616.atdf` is in their ATtiny device pack at packs.download.microchip.com if you want to check against the exact part. None of it has met a real board yet.
 
 ## The rest of the light
 
