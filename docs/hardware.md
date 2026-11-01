@@ -6,7 +6,7 @@ What's inside a TS21 v2, and how sure I am about each bit. "Confirmed" means a p
 
 It has an ATtiny1616 and three pads labelled R, G and V on the driver. A version check from off (15 or more clicks in Anduril 2) blinks out the build date and then the model number, which is 0614. Confirmed.
 
-Anduril's [`MODELS`](https://github.com/ToyKeeper/anduril/blob/trunk/MODELS) file maps 0614 to `sofirn-sp36-t1616`. The [reflash reference](https://budgetlightforum.com/t/anduril-flashlight-reflash-reference-updated-for-2024/216942) lists the revised TS21 as ATtiny1616, "similar or same as SP10 Pro", and [post 6](https://budgetlightforum.com/t/anduril-flashlight-reflash-reference-updated-for-2024/216942/6) of that thread has a January 2023 TS21 with R-G-V pads reading "2022-02-08 0614".
+Anduril's [`MODELS`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/MODELS) file maps 0614 to `sofirn-sp36-t1616`. The [reflash reference](https://budgetlightforum.com/t/anduril-flashlight-reflash-reference-updated-for-2024/216942) lists the revised TS21 as ATtiny1616, "similar or same as SP10 Pro", and [post 6](https://budgetlightforum.com/t/anduril-flashlight-reflash-reference-updated-for-2024/216942/6) of that thread has a January 2023 TS21 with R-G-V pads reading "2022-02-08 0614".
 
 ## The driver
 
@@ -30,7 +30,7 @@ Anduril sets the CPU clock to 10 MHz (the 20 MHz oscillator divided by 2) in `hw
 
 Temperature comes from the MCU's internal sensor, using the factory calibration in `SIGROW.TEMPSENSE0` and `TEMPSENSE1`.
 
-All of this comes from [`hw/wurkkos/ts10/hwdef.h`](https://github.com/ToyKeeper/anduril/blob/trunk/hw/wurkkos/ts10/hwdef.h), [`hw/sofirn/blf-q8-t1616/hwdef.h`](https://github.com/ToyKeeper/anduril/blob/trunk/hw/sofirn/blf-q8-t1616/hwdef.h), [`hw/sofirn/blf-q8-t1616/anduril.h`](https://github.com/ToyKeeper/anduril/blob/trunk/hw/sofirn/blf-q8-t1616/anduril.h) for the ramp tables, and [`arch/attiny1616.c`](https://github.com/ToyKeeper/anduril/blob/trunk/arch/attiny1616.c) for voltage and temperature. Anduril is GPL-3.0, so this repo takes facts about the board from it and no code.
+All of this comes from [`hw/wurkkos/ts10/hwdef.h`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/hw/wurkkos/ts10/hwdef.h), [`hw/sofirn/blf-q8-t1616/hwdef.h`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/hw/sofirn/blf-q8-t1616/hwdef.h), [`hw/sofirn/blf-q8-t1616/anduril.h`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/hw/sofirn/blf-q8-t1616/anduril.h) for the ramp tables, and [`arch/attiny1616.c`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/arch/attiny1616.c) for voltage and temperature. Anduril is GPL-3.0, so this repo takes facts about the board from it and no code.
 
 ## The R, G, V pads
 
@@ -59,7 +59,7 @@ These are the bits that matter for this firmware.
 - **There's no hardware multiplier.** See [toolchain.md](toolchain.md#32-bit-multiplication) for what that means for 32-bit maths.
 - **The factory fuses are fine.** Anduril never writes fuses on the t1616, so the defaults (20 MHz oscillator, UPDI enabled on the reset pin, EESAVE off) are what's on a stock TS21. Don't change `SYSCFG0` to turn the UPDI pin into a GPIO or reset pin unless you own a high-voltage programmer, because that's the only way back.
 
-I checked the register addresses in `src/hw.rs` and the vector count in `src/rt.rs` against the ATtiny1617 ATDF that [avr-device](https://github.com/Rahix/avr-device/tree/main/vendor) vendors. Microchip's own `ATtiny1616.atdf` is in their ATtiny device pack at packs.download.microchip.com if you want to check against the exact part. None of it has met a real board yet.
+I checked the register addresses in `src/hw.rs` and the vector count in `src/rt.rs` against the ATtiny1617 ATDF in [`vendor/`](../vendor/README.md), copied from [avr-device](https://github.com/Rahix/avr-device/tree/0bdf99ce7fa92a128de2bbb5d0303b8f0e633c7f/vendor). Microchip's own `ATtiny1616.atdf` is in their ATtiny device pack at packs.download.microchip.com if you want to check against the exact part. None of it has met a real board yet.
 
 ## The rest of the light
 
