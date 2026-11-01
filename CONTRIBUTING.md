@@ -54,5 +54,5 @@ Single-line [Conventional Commits](https://www.conventionalcommits.org): `feat(u
 
 `.claude/settings.json` wires up two Ruby hooks (standard library only):
 
-- `.claude/hooks/lint.rb` runs after every Edit or Write: `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files.
-- `.claude/hooks/pre_commit.rb` runs before any `git commit`: it rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
+- `.claude/hooks/post-tool-use.rb` runs after every Edit or Write: `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files.
+- `.claude/hooks/pre-tool-use.rb` runs before any `git commit`: it rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
