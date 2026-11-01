@@ -1,0 +1,48 @@
+[workspace]
+members = ["xtask"]
+
+[workspace.package]
+edition = "2024"
+authors = ["Samuel Parkinson <samuel.parkinson@hey.com>"]
+repository = "https://github.com/sjparkinson/wurkkos-ts21"
+license = "MIT"
+
+[workspace.lints.rust]
+# Only src/hw.rs, src/rt.rs and the #[unsafe(no_mangle)] on main may opt back in.
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[package]
+name = "ts21"
+description = "Firmware for the Wurkkos TS21 torch."
+readme = "README.md"
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ts21"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+# Panics can't unwind on AVR. Size beats speed on 16 KB of flash, and debug
+# info only lands in the ELF, never in the hex.
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = true
+
+[profile.dev]
+panic = "abort"
+opt-level = "s"

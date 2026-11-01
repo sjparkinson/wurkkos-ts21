@@ -1,0 +1,22 @@
+[alias]
+# Build the firmware ELF: target/avr-none/release/ts21.elf
+fw = "build --package ts21 --release --target avr-none -Zbuild-std=core"
+# Lint the firmware as the AVR sees it (the host only sees the stub main).
+fw-clippy = "clippy --package ts21 --release --target avr-none -Zbuild-std=core -- -D warnings"
+# Hex conversion, size report, flashing and backups. See xtask/src/main.rs.
+xtask = "run --quiet --package xtask --"
+
+[target.avr-none]
+rustflags = [
+  "-C", "target-cpu=attiny1616",
+  # Link with the rust-lld that ships with the toolchain, against our own
+  # linker script and vector table (link.x, src/rt.rs), so there's no avr-gcc
+  # or avr-libc anywhere in the build. build.rs passes -Tlink.x.
+  "-C", "linker=rust-lld",
+  "-C", "linker-flavor=ld.lld",
+  "-C", "relocation-model=static",
+  # core's float formatting doesn't build for 16-bit pointers on this nightly
+  # (no bignum for target_pointer_width = "16"), and we don't want it anyway.
+  "--cfg", "no_fp_fmt_parse",
+  "--check-cfg", "cfg(no_fp_fmt_parse)",
+]

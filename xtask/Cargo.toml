@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+description = "Build helpers for the TS21 firmware: hex, size, flash, backup."
+publish = false
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

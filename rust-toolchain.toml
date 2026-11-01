@@ -1,0 +1,8 @@
+# AVR needs nightly: core is rebuilt with -Zbuild-std and inline assembly on
+# AVR is still behind asm_experimental_arch. Bump the date deliberately, then
+# run every check in CONTRIBUTING.md, because AVR is a tier 3 target and
+# nightlies do break it.
+[toolchain]
+channel = "nightly-2026-09-23"
+components = ["rust-src", "rustfmt", "clippy"]
+profile = "minimal"
