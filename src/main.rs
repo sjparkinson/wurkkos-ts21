@@ -9,6 +9,8 @@
 #[cfg(target_arch = "avr")]
 mod hw;
 #[cfg(target_arch = "avr")]
+mod regs;
+#[cfg(target_arch = "avr")]
 mod rt;
 
 // src/rt.rs calls `main` by name once memory is set up.

@@ -23,7 +23,8 @@ src/button.rs     switch samples in, clicks and holds out
 src/ramp.rs       brightness levels to PWM duty cycles
 src/ui.rs         the state machine docs/ui.md describes
 src/main.rs       the firmware loop (a stub on the host)
-src/hw.rs         pins and registers (AVR only)
+src/regs.rs       register addresses and bit values, checked against the ATDF
+src/hw.rs         pins and register access (AVR only)
 src/rt.rs         vector table and startup (AVR only)
 link.x            memory layout for the linker
 xtask/            hex, size and the UPDI programmer (ping, backup, flash, restore)
@@ -35,7 +36,11 @@ Keep logic in the library, where `cargo test` can reach it. `src/main.rs` should
 
 ## Registers
 
-There's no PAC. When you add a register to `src/hw.rs`, take its address and bit masks from the ATtiny1617 ATDF in `vendor/attiny1617.atdf` (same register map as the 1616), and say which register and bitfield each magic number is in a comment. Then have someone, or the `register-checker` agent in `.claude/agents/`, check it against the ATDF again. A wrong address compiles fine and does something to the hardware you didn't ask for.
+There's no PAC. When you need a register, add its address or bitfield value to `src/regs.rs`, taken from the ATtiny1617 ATDF in `vendor/attiny1617.atdf` (same register map as the 1616), with a comment naming the register and bitfield. `src/hw.rs` uses the constant, not the number.
+
+Then add a row for it to the tests in `xtask/src/atdf.rs`, which parse the ATDF and compare every constant in `src/regs.rs` against it. You can't forget: a constant no test reads is dead code in the xtask build, and clippy fails on it. The NVM and memory-map constants in `xtask/src/updi.rs` get the same check in that file's tests.
+
+The tests only cover what the ATDF can say: addresses, widths, masks and named values. Write order, timing and which flags set without their interrupt enabled are in the datasheet, so have someone (or the `register-checker` agent in `.claude/agents/`) read those against it. A wrong address compiles fine and does something to the hardware you didn't ask for.
 
 Never write fuses. Changing `SYSCFG0` can disable UPDI, and then the light needs a high-voltage programmer to recover.
 
