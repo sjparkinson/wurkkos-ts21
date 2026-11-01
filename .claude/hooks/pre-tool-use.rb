@@ -49,6 +49,8 @@ if msg
   block(reason) if reason
 end
 
-dir = ENV.fetch('CLAUDE_PROJECT_DIR', Dir.pwd)
+# The checkout the session is in, which may be a worktree rather than CLAUDE_PROJECT_DIR.
+top, status = Open3.capture2('git', 'rev-parse', '--show-toplevel')
+dir = status.success? ? top.chomp : Dir.pwd
 out, status = Open3.capture2e('cargo', 'test', '--workspace', '--locked', '-q', chdir: dir)
 block("cargo test --workspace --locked -q failed, so the commit is blocked:\n#{out.lines.last(60).join}") unless status.success?
