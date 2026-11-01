@@ -35,7 +35,9 @@ input = JSON.parse($stdin.read)
 path = input.dig('tool_input', 'file_path').to_s
 exit 0 if path.empty? || !File.file?(path)
 
-dir = ENV.fetch('CLAUDE_PROJECT_DIR', Dir.pwd)
+# The checkout the file lives in, so edits in a worktree lint that worktree.
+top, status = Open3.capture2('git', '-C', File.dirname(path), 'rev-parse', '--show-toplevel')
+dir = status.success? ? top.chomp : Dir.pwd
 problem =
   if path.start_with?("#{dir}/.github/workflows/") && path.end_with?('.yml', '.yaml')
     run('gh', 'actions-lock', '--verify-local', chdir: dir)

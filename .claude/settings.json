@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ruby --disable-gems \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-use.rb\"",
+            "command": "ruby --disable-gems \"$(git rev-parse --show-toplevel)/.claude/hooks/pre-tool-use.rb\"",
             "timeout": 600
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ruby --disable-gems \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-tool-use.rb\"",
+            "command": "ruby --disable-gems \"$(git rev-parse --show-toplevel)/.claude/hooks/post-tool-use.rb\"",
             "timeout": 600
           }
         ]
