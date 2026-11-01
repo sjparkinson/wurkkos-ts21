@@ -54,7 +54,33 @@ Each has a comment where it lives. Remove it when a nightly makes it unnecessary
 | `src/main.rs` | `#![feature(asm_experimental_arch)]` | `asm!` and `global_asm!` on AVR aren't stable. |
 | `Cargo.toml` | `panic = "abort"` in both profiles | AVR can't unwind. |
 | Library code | No runtime `u32`/`u64` multiplication | There's no `__mulsi3` without libgcc. See above. |
-| `xtask` | Its own ELF-to-HEX conversion | The `rust-objcopy` in the toolchain directory is rustc's private copy and won't run on its own, and `cargo-binutils` would be a dependency. |
+| `xtask` | Its own ELF-to-HEX conversion | The `rust-objcopy` in the toolchain directory is rustc's private copy and won't run on its own. `llvm-tools` has a working `llvm-objcopy`, but that's one more thing to install for every flash, and `xtask` needs to parse the ELF to program it anyway. |
+
+## Looking inside the ELF
+
+For reading the generated code, rustup's `llvm-tools` component has an `llvm-objdump`, `llvm-nm` and `llvm-size` built from rustc's own LLVM, AVR backend included. It's optional, since nothing in the build or CI needs it, so it isn't in `rust-toolchain.toml`. Add it once to the pinned nightly:
+
+```sh
+rustup component add llvm-tools --toolchain nightly-2026-09-23
+```
+
+The binaries aren't on your `PATH`. They live in the toolchain's sysroot, under the host triple. Run this from the repo so rustup picks the pinned nightly:
+
+```sh
+LLVM="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+ELF=target/avr-none/release/ts21.elf
+```
+
+Then, after `cargo fw`:
+
+```sh
+"$LLVM/llvm-objdump" -d --no-show-raw-insn "$ELF"                          # everything, vector table first
+"$LLVM/llvm-objdump" -d -S --no-show-raw-insn --disassemble-symbols=main "$ELF"   # one function, with source
+"$LLVM/llvm-nm" -S -C --size-sort "$ELF"                                   # what's using the flash
+"$LLVM/llvm-objdump" -h "$ELF"                                             # section addresses
+```
+
+`-S` works because the release profile keeps debug info. I checked all four on the nightly-2026-09-23 build: `llvm-size -A` adds `.text` and `.rodata` up to the same 1250 bytes `cargo xtask size` reports, so that command stays the one to use for budgets. These are for when you want to know *why*, such as which function grew, or whether an interrupt handler saves more registers than it should.
 
 ## Host builds
 
