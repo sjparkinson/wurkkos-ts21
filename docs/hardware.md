@@ -80,4 +80,4 @@ These come from [the 2021 teardown](https://budgetlightforum.com/t/wurkkos-ts21-
 - Is PB5 really the button LED's amber element on the TS21? Anduril's TS10 config calls it front-facing aux, and the SP36 config talks about a button LED. A multimeter on the driver would settle it, and so would flashing a build that blinks it.
 - What lights the button LED's blue element? The charger, or something else?
 - Does the TS21 driver match the TS10 exactly (same 7135 current, same FET), or only in pinout? The calibration numbers differ slightly between the TS10 and Q8 builds.
-- What's the pad spacing, 1.27 mm or 2.54 mm?
+- What's the pad spacing, 1.27 mm or 2.54 mm? A rough measurement on a TS21 v2 gave about 1.5 mm centre to centre, so it's likely 1.27 mm. Calipers, or a 1.27 mm probe that sits flat on all three pads, would confirm it.
