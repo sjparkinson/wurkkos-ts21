@@ -47,6 +47,10 @@ const FET: u8 = 0; // PB0
 const LINEAR: u8 = 1; // PB1
 const AUX: u8 = 5; // PB5
 
+/// The PORTB pins we drive. PORTB has PB0 to PB5 on the 20-pin package.
+const PORTB_OUTPUTS: u8 = 1 << FET | 1 << LINEAR | 1 << AUX;
+const PORTB_PINS: u8 = 6;
+
 const PORT_PULLUPEN: u8 = 0x08;
 const PORT_ISC_BOTHEDGES: u8 = 0x01;
 
@@ -101,14 +105,16 @@ pub fn init() {
         };
         write(reg::PORTA_PIN0CTRL + pin as usize, ctrl);
     }
-    for pin in [2u8, 3, 4] {
-        write(reg::PORTB_PIN0CTRL + pin as usize, PORT_PULLUPEN);
+    for pin in 0..PORTB_PINS {
+        if PORTB_OUTPUTS & 1 << pin == 0 {
+            write(reg::PORTB_PIN0CTRL + pin as usize, PORT_PULLUPEN);
+        }
     }
     for pin in 0..4u8 {
         write(reg::PORTC_PIN0CTRL + pin as usize, PORT_PULLUPEN);
     }
 
-    write(reg::VPORTB_DIR, 1 << FET | 1 << LINEAR | 1 << AUX);
+    write(reg::VPORTB_DIR, PORTB_OUTPUTS);
 
     // Dual-slope PWM on WO0 (FET) and WO1 (linear), straight off the
     // 10 MHz clock. The BUF registers apply at the end of a cycle, so level

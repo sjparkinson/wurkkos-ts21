@@ -27,7 +27,6 @@ pub enum Event {
 #[derive(Clone, Debug, Default)]
 pub struct Clicks {
     pressed: bool,
-    holding: bool,
     count: u8,
     ticks: u16,
 }
@@ -36,7 +35,6 @@ impl Clicks {
     pub const fn new() -> Self {
         Self {
             pressed: false,
-            holding: false,
             count: 0,
             ticks: 0,
         }
@@ -52,19 +50,18 @@ impl Clicks {
                 self.ticks = 0;
                 None
             }
-            (true, true) if self.ticks >= HOLD_TICKS => {
-                self.holding = true;
-                Some(Event::Hold {
-                    clicks: self.count,
-                    ticks: self.ticks - HOLD_TICKS,
-                })
-            }
+            (true, true) if self.ticks >= HOLD_TICKS => Some(Event::Hold {
+                clicks: self.count,
+                ticks: self.ticks - HOLD_TICKS,
+            }),
             (true, true) => None,
             (true, false) => {
+                // `ticks` has gone up once since the last pressed tick, so
+                // a press that sent Holds is now past HOLD_TICKS.
+                let held = self.ticks > HOLD_TICKS;
                 self.pressed = false;
                 self.ticks = 0;
-                if self.holding {
-                    self.holding = false;
+                if held {
                     Some(Event::Release {
                         clicks: core::mem::take(&mut self.count),
                     })

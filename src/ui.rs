@@ -35,10 +35,6 @@ impl Ui {
         Self { mode: Mode::Off }
     }
 
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
     /// The level the LEDs should be at right now, `0` meaning off.
     pub fn output_level(&self) -> u8 {
         match self.mode {
@@ -63,7 +59,7 @@ mod tests {
     #[test]
     fn starts_off() {
         let ui = Ui::new();
-        assert_eq!(ui.mode(), Mode::Off);
+        assert_eq!(ui.mode, Mode::Off);
         assert_eq!(ui.output_level(), 0);
     }
 
@@ -71,10 +67,10 @@ mod tests {
     fn one_click_turns_on_and_off() {
         let mut ui = Ui::new();
         ui.handle(Event::Click(1));
-        assert_eq!(ui.mode(), Mode::On);
+        assert_eq!(ui.mode, Mode::On);
         assert_eq!(ui.output_level(), LEVEL);
         ui.handle(Event::Click(1));
-        assert_eq!(ui.mode(), Mode::Off);
+        assert_eq!(ui.mode, Mode::Off);
         assert_eq!(ui.output_level(), 0);
     }
 
@@ -98,7 +94,7 @@ mod tests {
             for event in others {
                 let mut ui = Ui { mode: start };
                 ui.handle(event);
-                assert_eq!(ui.mode(), start, "{event:?} from {start:?}");
+                assert_eq!(ui.mode, start, "{event:?} from {start:?}");
             }
         }
     }
