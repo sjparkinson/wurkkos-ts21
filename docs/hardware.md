@@ -28,7 +28,7 @@ Anduril runs TCA0 in dual-slope mode off the undivided CPU clock, with a variabl
 
 Anduril sets the CPU clock to 10 MHz (the 20 MHz oscillator divided by 2) in `hwdef_setup()`. It measures the battery by reading the internal 1.5 V reference with VCC as the ADC's reference, accumulated 4×, so VCC ≈ 1.5 × 1023 × 4 / result. Then it applies this board's calibration, a slope of 1010/1024 and +0.30 V. That offset suggests a drop between the cell and the MCU (my inference), and any low-voltage threshold has to allow for it.
 
-Temperature comes from the MCU's internal sensor, using the factory calibration in `SIGROW.TEMPSENSE0` and `TEMPSENSE1`.
+Temperature comes from the MCU's internal sensor, using the factory calibration in `SIGROW.TEMPSENSE0` and `TEMPSENSE1`. The datasheet (DS40002204A, section 30.3.2.6) gives kelvin as `((result - TEMPSENSE1) × TEMPSENSE0 + 0x80) >> 8`, where TEMPSENSE1 is a signed offset and TEMPSENSE0 an unsigned gain. That product needs 32 bits. The measurement wants the 1.1 V internal reference, `SAMPCAP` set, and `INITDLY` and `SAMPLEN` each at least 32 µs of ADC clock. Typical accuracy is ±3 °C at 25 °C, at 0.55 °C a step (section 36.17). Anduril accumulates 4× and keeps the result as kelvin × 64.
 
 All of this comes from [`hw/wurkkos/ts10/hwdef.h`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/hw/wurkkos/ts10/hwdef.h), [`hw/sofirn/blf-q8-t1616/hwdef.h`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/hw/sofirn/blf-q8-t1616/hwdef.h), [`hw/sofirn/blf-q8-t1616/anduril.h`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/hw/sofirn/blf-q8-t1616/anduril.h) for the ramp tables, and [`arch/attiny1616.c`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/arch/attiny1616.c) for voltage and temperature. Anduril is GPL-3.0, so this repo takes facts about the board from it and no code.
 
@@ -56,6 +56,8 @@ These are the bits that matter for this firmware.
 - **16 KB of flash means two-word `jmp` vectors**, 31 of them (reset plus 30 interrupts).
 - **16-bit timer registers go through a shared TEMP byte.** Write the low byte, then the high byte.
 - **Clock changes are behind configuration change protection.** Write 0xD8 to `CPU.CCP`, then the register, within four instructions.
+- **Any pin can wake standby, with the right sense setting.** Only pins 2 and 6 of each port are fully asynchronous. The rest, PA5 included, wake the chip with the peripheral clock stopped only on BOTHEDGES or LEVEL, and the new level has to last until the clock restarts or the chip wakes with no interrupt (section 16.3.3.1, table 16-3). Confirmed.
+- **The watchdog runs in sleep.** It's clocked from the 1.024 kHz ultra-low-power oscillator and keeps counting in any sleep mode. Writing 1 to `WDT.STATUS` LOCK can only be undone in debug mode, and the `WDTCFG` fuse can enable it at boot (section 19.3). Confirmed.
 - **There's no hardware multiplier.** See [toolchain.md](toolchain.md#32-bit-multiplication) for what that means for 32-bit maths.
 - **The factory fuses are fine.** Anduril never writes fuses on the t1616, so the defaults (20 MHz oscillator, UPDI enabled on the reset pin, EESAVE off) are what's on a stock TS21. Don't change `SYSCFG0` to turn the UPDI pin into a GPIO or reset pin unless you own a high-voltage programmer, because that's the only way back.
 
@@ -77,6 +79,6 @@ These come from [the 2021 teardown](https://budgetlightforum.com/t/wurkkos-ts21-
 
 ## Open questions
 
-- Is PB5 really the button LED's amber element on the TS21? Anduril's TS10 config calls it front-facing aux, and the SP36 config talks about a button LED. A multimeter on the driver would settle it, and so would flashing a build that blinks it.
+- Is PB5 really the button LED's amber element on the TS21? Anduril's TS10 config calls it front-facing aux, and the SP36 config talks about a button LED. A multimeter on the driver would settle it, and so would flashing a build that blinks it. [LiquidRetro's review](https://liquidretro.net/tag/wurkkos-ts21-user-manual/) of the Anduril 2 light describes red, blue and amber under the switch, with amber as the locator, which fits PB5 being amber and the charger owning the rest.
 - What lights the button LED's blue element? The charger, or something else?
 - Does the TS21 driver match the TS10 exactly (same 7135 current, same FET), or only in pinout? The calibration numbers differ slightly between the TS10 and Q8 builds.
