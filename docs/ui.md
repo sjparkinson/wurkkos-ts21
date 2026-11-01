@@ -1,8 +1,8 @@
 # The UI
 
-What every click and hold does. This is the spec: `src/ui.rs` implements it and its tests check it, so change this file in the same commit as the code.
+What every click and hold does. This is the spec. `src/ui.rs` implements it and its tests check it, so change this file in the same commit as the code.
 
-The notation is Anduril's: **1C** is one click, **1H** press and hold, and so on. Clicks count once the switch has been left alone for about 280 ms.
+The notation is Anduril's. **1C** is one click, **1H** press and hold, and so on. Clicks count once the switch has been left alone for about 280 ms.
 
 For the first flash the UI is as small as it gets, so that when something doesn't work it's the hardware or the toolchain, not the UI. The full UI (ramping, turbo, lockout, moonlight) is on the `fancy-ui` branch and comes back once this has been checked on a real torch.
 

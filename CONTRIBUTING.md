@@ -2,7 +2,7 @@
 
 ## Checks
 
-CI runs these on every pull request, so run them before you push:
+CI runs these on every pull request, so run them before you push.
 
 ```sh
 cargo fmt --check
@@ -48,7 +48,7 @@ AVR is a tier 3 target. Pick a nightly at least a week old, change `rust-toolcha
 
 ## Commits
 
-Single-line [Conventional Commits](https://www.conventionalcommits.org): `feat(ui): add battery check on 3C`. PRs merge by rebase only, so every commit on a branch lands on main.
+Single-line [Conventional Commits](https://www.conventionalcommits.org), such as `feat(ui): add battery check on 3C`. PRs merge by rebase only, so every commit on a branch lands on main.
 
 ## Workflows
 
@@ -56,7 +56,7 @@ Actions are pinned in `.github/workflows/actions.lock`, a [workflow lockfile](ht
 
 ## Claude Code hooks
 
-`.claude/settings.json` wires up two Ruby hooks (standard library only):
+`.claude/settings.json` wires up two Ruby hooks (standard library only).
 
-- `.claude/hooks/post-tool-use.rb` runs after every Edit or Write: `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files, and `gh actions-lock --verify-local` for workflows.
-- `.claude/hooks/pre-tool-use.rb` runs before any `git commit`: it rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
+- `.claude/hooks/post-tool-use.rb` runs after every Edit or Write. It runs `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files, and `gh actions-lock --verify-local` for workflows.
+- `.claude/hooks/pre-tool-use.rb` runs before any `git commit`. It rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
