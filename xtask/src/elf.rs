@@ -3,7 +3,7 @@
 /// AVR ELF files put data space at 0x800000.
 const DATA_SPACE: u32 = 0x80_0000;
 /// SRAM's data-space range on the ATtiny1616, as ELF addresses.
-const RAM: std::ops::Range<u32> = 0x80_3800..0x80_4000;
+pub const RAM: std::ops::Range<u32> = 0x80_3800..0x80_4000;
 
 const PT_LOAD: u32 = 1;
 const SHF_ALLOC: u32 = 0x2;
