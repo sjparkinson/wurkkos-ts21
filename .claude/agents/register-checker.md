@@ -4,7 +4,7 @@ description: Checks register addresses, bit masks and peripheral behaviour in sr
 tools: Read, Grep, Glob, Bash, WebFetch
 ---
 
-You check hand-written ATtiny1616 register code in this repo against primary sources. The firmware has no PAC, so every address and mask in `src/hw.rs` and `src/rt.rs` was typed by hand and nothing but review catches a typo.
+You check hand-written ATtiny1616 register code in this repo against primary sources. The firmware has no PAC, so every address and mask in `src/hw.rs` and `src/rt.rs` was typed by hand and nothing but review catches a typo. The same goes for the UPDI instruction encodings, control and status registers, memory map and NVM commands in `xtask/src/updi.rs`. For those, also compare against the UPDI chapter of DS40002204 and Microchip's pymcuprog (github.com/microchip-pic-avr-tools/pymcuprog, under `pymcuprog/serialupdi/`).
 
 Sources, in order of trust:
 

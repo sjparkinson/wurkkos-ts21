@@ -1,25 +1,35 @@
 //! `cargo xtask <command>`: the steps around `cargo fw` that cargo can't do.
 //!
-//! No dependencies. The ELF reading and Intel HEX writing are small enough
-//! to do by hand, which saves needing avr-objcopy (or anything from LLVM
-//! beyond what rustup ships).
+//! No dependencies. ELF reading, Intel HEX and the UPDI programmer are all
+//! small enough to do by hand, which saves needing avr-objcopy, avrdude or
+//! pymcuprog.
 
 mod elf;
 mod ihex;
+mod serial;
+mod updi;
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use serial::Port;
+use updi::{Programmer, map};
+
 const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  hex                 build the firmware and write target/ts21.hex
-  size                build the firmware and print flash and RAM use
-  flash <port>        build, then write target/ts21.hex with avrdude
-  backup <port>       read the torch's flash, EEPROM and fuses into backup/
+  hex                     build the firmware and write target/ts21.hex
+  size                    build the firmware and print flash and RAM use
+  ping <port>             check the programmer can see the chip, change nothing
+  backup <port>           save the torch's flash, EEPROM and fuses into backup/
+  flash <port> [file.hex] build and flash the firmware, or flash file.hex
+  restore <port>          put backup/flash.hex and backup/eeprom.hex back
+
+<port> is the serial UPDI adapter, e.g. /dev/cu.usbserial-1410 on macOS
+or /dev/ttyUSB0 on Linux.
 ";
 
 const ELF: &str = "target/avr-none/release/ts21.elf";
@@ -35,8 +45,11 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         ["hex"] => hex().map(|_| ()),
         ["size"] => size(),
-        ["flash", port] => flash(port),
+        ["ping", port] => ping(port),
         ["backup", port] => backup(port),
+        ["flash", port] => build().and_then(|elf| flash(port, &elf.flash_image())),
+        ["flash", port, file] => read_hex(Path::new(file)).and_then(|image| flash(port, &image)),
+        ["restore", port] => restore(port),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
@@ -69,11 +82,10 @@ fn build() -> Result<elf::Elf, String> {
 }
 
 fn hex() -> Result<PathBuf, String> {
-    let elf = build()?;
-    let image = elf.flash_image();
+    let image = build()?.flash_image();
     let path = root().join(HEX);
-    fs::write(&path, ihex::encode(&image)).map_err(|e| format!("{}: {e}", path.display()))?;
-    eprintln!("wrote {} ({} bytes of flash)", HEX, image.len());
+    write(&path, &ihex::encode(&image))?;
+    eprintln!("wrote {HEX} ({} bytes of flash)", image.len());
     Ok(path)
 }
 
@@ -92,24 +104,98 @@ fn size() -> Result<(), String> {
     Ok(())
 }
 
-fn flash(port: &str) -> Result<(), String> {
-    let hex = hex()?;
-    run(Command::new("avrdude")
-        .args(["-c", "serialupdi", "-p", "t1616", "-P", port])
-        .arg("-e")
-        .arg(format!("-Uflash:w:{}:i", hex.display())))
+fn connect(port: &str) -> Result<Programmer<Port>, String> {
+    eprintln!("connecting on {port}");
+    Programmer::connect(Port::open(port)?)
+}
+
+fn ping(port: &str) -> Result<(), String> {
+    let mut p = connect(port)?;
+    let sib = p.sib()?;
+    p.disconnect()?;
+    println!("found {}", String::from_utf8_lossy(&sib).trim_end());
+    Ok(())
 }
 
 fn backup(port: &str) -> Result<(), String> {
     let dir = root().join("backup");
+    let flash_path = dir.join("flash.hex");
+    if flash_path.exists() {
+        return Err(format!(
+            "{} already exists. Move it somewhere safe first; if it's the factory \
+             firmware, it's the only copy",
+            flash_path.display()
+        ));
+    }
+
+    let mut p = connect(port)?;
+    p.enter_progmode()?;
+    p.check_signature()?;
+    eprintln!("reading flash");
+    let flash = p.read(map::FLASH, map::FLASH_SIZE)?;
+    eprintln!("reading EEPROM and fuses");
+    let eeprom = p.read(map::EEPROM, map::EEPROM_SIZE)?;
+    let fuses = p.read(map::FUSES, map::FUSES_SIZE)?;
+    p.leave()?;
+
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    run(Command::new("avrdude")
-        .current_dir(&dir)
-        .args(["-c", "serialupdi", "-p", "t1616", "-P", port])
-        .args(["-Uflash:r:flash.hex:i", "-Ueeprom:r:eeprom.hex:i"])
-        .args(["-Ufuses:r:fuses.hex:i"]))?;
-    eprintln!("saved flash, EEPROM and fuses to backup/");
+    write(&flash_path, &ihex::encode(&flash))?;
+    write(&dir.join("eeprom.hex"), &ihex::encode(&eeprom))?;
+    write(&dir.join("fuses.hex"), &ihex::encode(&fuses))?;
+    eprintln!("saved flash, EEPROM and fuses (for reference, never written back) to backup/");
     Ok(())
+}
+
+fn flash(port: &str, image: &[u8]) -> Result<(), String> {
+    program(port, image, None)
+}
+
+fn restore(port: &str) -> Result<(), String> {
+    let dir = root().join("backup");
+    let flash = read_hex(&dir.join("flash.hex"))?;
+    let eeprom = read_hex(&dir.join("eeprom.hex"))?;
+    program(port, &flash, Some(&eeprom))
+}
+
+/// Erase, write, verify, restart. EEPROM goes too, because a chip erase
+/// wipes it; pass `Some` to put contents back.
+fn program(port: &str, flash: &[u8], eeprom: Option<&[u8]>) -> Result<(), String> {
+    if flash.len() > map::FLASH_SIZE {
+        return Err(format!(
+            "the image is {} bytes; the ATtiny1616 has {}",
+            flash.len(),
+            map::FLASH_SIZE
+        ));
+    }
+    if eeprom.is_some_and(|e| e.len() > map::EEPROM_SIZE) {
+        return Err("the EEPROM image is bigger than 256 bytes".into());
+    }
+
+    let mut p = connect(port)?;
+    p.enter_progmode()?;
+    p.check_signature()?;
+    eprintln!("erasing");
+    p.chip_erase()?;
+    eprintln!("writing {} bytes of flash", flash.len());
+    p.write(map::FLASH, map::FLASH_PAGE, flash)?;
+    p.verify(map::FLASH, flash)?;
+    if let Some(eeprom) = eeprom {
+        eprintln!("writing EEPROM");
+        p.write(map::EEPROM, map::EEPROM_PAGE, eeprom)?;
+        p.verify(map::EEPROM, eeprom)?;
+    }
+    p.leave()?;
+    eprintln!("verified and restarted");
+    Ok(())
+}
+
+fn read_hex(path: &Path) -> Result<Vec<u8>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    ihex::decode(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn write(path: &Path, contents: &str) -> Result<(), String> {
+    fs::write(path, contents).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn run(command: &mut Command) -> Result<(), String> {

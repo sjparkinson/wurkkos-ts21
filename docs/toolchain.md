@@ -8,7 +8,7 @@ How Rust gets onto an ATtiny1616 here, and why it's put together this way.
 - A pinned nightly (`rust-toolchain.toml`), because `core` has to be rebuilt for AVR with `-Zbuild-std=core`, and inline assembly on AVR still needs `#![feature(asm_experimental_arch)]`.
 - Linked by the `rust-lld` that rustup ships, against this repo's own linker script (`link.x`) and startup code (`src/rt.rs`).
 - No crate dependencies. Not avr-device, not avr-hal, not ravedude. (Rebuilding `core` pulls a few crates of its own, see [First build](#first-build).)
-- No avr-gcc and no avr-libc. The only thing to install outside rustup is avrdude, and only to flash.
+- No avr-gcc, no avr-libc and no avrdude. The UPDI programmer is part of `xtask`, so rustup is the only thing to install.
 
 `cargo fw` builds `target/avr-none/release/ts21.elf`. `cargo xtask hex` turns it into Intel HEX.
 

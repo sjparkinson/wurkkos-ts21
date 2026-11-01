@@ -43,14 +43,15 @@ There's no avr-gcc involved. The firmware links with the `rust-lld` that ships w
 
 ## Flashing
 
-You need a UPDI programmer on the R, G and V pads, and avrdude 7 or newer. Back up the factory firmware first:
+You need a serial UPDI programmer on the R, G and V pads, and that's all: the programmer software is built into `cargo xtask`, so there's no avrdude. Check it can see the chip, back up the factory firmware, then flash:
 
 ```sh
+cargo xtask ping /dev/cu.usbserial-XXXX
 cargo xtask backup /dev/cu.usbserial-XXXX
 cargo xtask flash /dev/cu.usbserial-XXXX
 ```
 
-[docs/flashing.md](docs/flashing.md) covers programmers, pad order, pymcuprog and getting back to Anduril.
+[docs/flashing.md](docs/flashing.md) covers programmers, pad order, restoring the backup and getting back to Anduril.
 
 ## Licence
 

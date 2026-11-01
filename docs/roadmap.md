@@ -9,7 +9,8 @@ Roughly in order. Each step should leave a torch that's no worse than the step b
 - [x] Switch sampling at 64 Hz and a click/hold decoder
 - [x] Two-channel ramp (linear then FET), 150 levels
 - [x] On, off, ramp up and down, turbo, lockout
-- [ ] Flash it to a real TS21 and see what happens (needs a UPDI programmer)
+- [x] A built-in UPDI programmer in `xtask` (ping, backup, flash, restore), tested against a fake chip
+- [ ] Ping, back up and flash a real TS21, which is also the first real test of the programmer
 - [ ] Check PB5 is the button LED and decide what it does
 
 ## 2. It's safe to leave a cell in

@@ -26,7 +26,7 @@ src/main.rs       the firmware loop (a stub on the host)
 src/hw.rs         pins and registers (AVR only)
 src/rt.rs         vector table and startup (AVR only)
 link.x            memory layout for the linker
-xtask/            hex, size, flash, backup
+xtask/            hex, size and the UPDI programmer (ping, backup, flash, restore)
 docs/             hardware, flashing, toolchain, UI spec, roadmap
 ```
 
@@ -34,7 +34,7 @@ Keep logic in the library, where `cargo test` can reach it. `src/main.rs` should
 
 ## Registers
 
-There's no PAC. When you add a register to `src/hw.rs`, take its address and bit masks from the ATtiny1617 ATDF (same die as the 1616), and say which register and bitfield each magic number is in a comment. Then have someone, or the `register-checker` agent in `.claude/agents/`, check it against the ATDF again. A wrong address compiles fine and does something to the hardware you didn't ask for.
+There's no PAC. When you add a register to `src/hw.rs`, take its address and bit masks from the ATtiny1617 ATDF (same register map as the 1616), and say which register and bitfield each magic number is in a comment. Then have someone, or the `register-checker` agent in `.claude/agents/`, check it against the ATDF again. A wrong address compiles fine and does something to the hardware you didn't ask for.
 
 Never write fuses. Changing `SYSCFG0` can disable UPDI, and then the light needs a high-voltage programmer to recover.
 
