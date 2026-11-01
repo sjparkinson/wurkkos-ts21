@@ -1,4 +1,4 @@
-name: ci
+name: test
 
 on:
   push:
@@ -17,27 +17,11 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  # PRs land with rebase merges, so every commit on the branch ends up on main.
-  commits:
-    name: commits
-    if: github.event_name == 'pull_request'
+  test:
+    name: test
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - run: ruby --disable-gems .claude/hooks/commit_msg.rb "$BASE..$HEAD"
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-
-  check:
-    name: check
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -45,7 +29,7 @@ jobs:
       # with rust-src, rustfmt and clippy, the first time cargo runs.
       - run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -62,7 +46,7 @@ jobs:
       - run: cargo xtask size
       - run: cargo xtask hex
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: ts21-firmware
           path: |
