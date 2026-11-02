@@ -29,6 +29,18 @@ const AUX: u8 = 5; // PB5
 const PORTB_OUTPUTS: u8 = 1 << FET | 1 << LINEAR | 1 << AUX;
 const PORTB_PINS: u8 = 6;
 
+// How software talks to the hardware: every peripheral (the ports, the
+// timers, the clock controller) exposes its settings as bytes at fixed
+// addresses in the same address space as SRAM. Storing a byte at, say,
+// `VPORTB_DIR` doesn't put it in memory; it flips the direction of PORTB's
+// pins. Loading from `VPORTA_IN` reads the voltage on PORTA's pins right
+// now. These two helpers are the only way the rest of the file does it.
+//
+// They're `volatile` because the compiler would otherwise treat these as
+// ordinary memory: it could drop a write nobody reads back, or read once
+// and reuse the value in a loop. `read_volatile` and `write_volatile`
+// promise each access happens, in order, exactly as written.
+
 fn write(addr: usize, value: u8) {
     // SAFETY: every caller passes one of the `reg` constants, which are
     // memory-mapped I/O registers on this part.
@@ -43,6 +55,12 @@ fn read(addr: usize) -> u8 {
 /// 16-bit peripheral registers go through a shared TEMP byte: write the low
 /// byte first, then the high byte. Spelling it out keeps the order from
 /// depending on the compiler.
+///
+/// The CPU only moves 8 bits at a time, so a 16-bit value takes two
+/// stores. If the timer saw the halves land separately it could briefly
+/// run with a new low byte and an old high byte. Instead, the low-byte
+/// write is parked in TEMP, and the high-byte write copies both into the
+/// register in the same clock cycle.
 fn write16(addr: usize, value: u16) {
     let [lo, hi] = value.to_le_bytes();
     write(addr, lo);
@@ -52,17 +70,40 @@ fn write16(addr: usize, value: u16) {
 /// Writes a register behind configuration change protection. The CPU only
 /// accepts the write within four instructions of the CCP key, so it has to
 /// be assembly.
+///
+/// Some registers, like the clock settings, could brick a running program
+/// if a stray pointer hit them, so the chip guards them. Writing the magic
+/// value 0xD8 (`CPU_CCP_IOREG`) to the CCP register unlocks them for the
+/// next four instructions, and interrupts are held off for that window.
+/// Rust gives no guarantee about how many instructions it puts between two
+/// `write` calls, so the pair is written out by hand.
 fn protected_write(addr: usize, value: u8) {
     // SAFETY: writes the IOREG key to CPU.CCP, then `value` to `addr`.
     // Touches no memory Rust knows about.
     unsafe {
         asm!(
+            // Unlock. `out` writes a register to an I/O address. CCP sits
+            // at 0x34, low enough for `out` to reach.
             "out {ccp}, {key}",
+            // Write the protected register, the very next instruction.
+            // `st Z, r` stores register r at the address held in Z (the
+            // r31:r30 pair). It's used here because `out` only reaches the
+            // first 64 addresses and the clock registers are further up.
             "st Z, {value}",
+            // The operands. `const` pastes a number into the text, so
+            // `{ccp}` becomes 0x34.
             ccp = const reg::CPU_CCP,
+            // `in(reg)` asks the compiler to load these values into
+            // whichever spare registers it likes, and substitute their
+            // names for `{key}` and `{value}`.
             key = in(reg) regs::CPU_CCP_IOREG,
             value = in(reg) value,
+            // The target address has to be in Z specifically, because
+            // that's what `st Z` reads.
             in("Z") addr as u16,
+            // Promises to the compiler, which it uses to optimise around
+            // the block: this doesn't touch the stack, and neither `out`
+            // nor `st` changes the status flags in SREG.
             options(nostack, preserves_flags),
         );
     }
