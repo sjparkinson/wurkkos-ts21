@@ -1,15 +1,17 @@
 //! `cargo xtask <command>`: the steps around `cargo fw` that cargo can't do.
 //!
-//! No dependencies. ELF reading, Intel HEX and the UPDI programmer are all
-//! small enough to do by hand, which saves needing avr-objcopy, avrdude or
-//! pymcuprog.
+//! No dependencies. ELF reading, Intel HEX, the UPDI programmer and the AVR
+//! simulator are all small enough to do by hand, which saves needing
+//! avr-objcopy, avrdude, pymcuprog or simavr.
 
 #[cfg(test)]
 mod atdf;
+mod avr;
 mod elf;
 mod ihex;
 mod layout;
 mod serial;
+mod sim;
 mod updi;
 
 use std::env;
@@ -48,7 +50,7 @@ fn main() -> ExitCode {
         ["size"] => size(),
         ["ping", port] => ping(port),
         ["backup", port] => backup(port),
-        ["flash", port] => build().and_then(|elf| flash(port, &elf.flash_image())),
+        ["flash", port] => build().and_then(|(elf, _)| flash(port, &elf.flash_image())),
         ["flash", port, file] => read_hex(Path::new(file)).and_then(|image| flash(port, &image)),
         ["restore", port] => restore(port),
         _ => {
@@ -74,25 +76,26 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
-fn build() -> Result<elf::Elf, String> {
+fn build() -> Result<(elf::Elf, sim::Report), String> {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     run(Command::new(cargo).current_dir(root()).arg("fw"))?;
     let path = root().join(ELF);
     let bytes = fs::read(&path).map_err(at(&path))?;
     let elf = elf::Elf::parse(&bytes).map_err(at(&path))?;
     layout::check(&elf).map_err(at(&path))?;
-    Ok(elf)
+    let report = sim::check(&elf).map_err(|e| format!("{}: simulator: {e}", path.display()))?;
+    Ok((elf, report))
 }
 
 fn hex() -> Result<(), String> {
-    let image = build()?.flash_image();
+    let image = build()?.0.flash_image();
     write(&root().join(HEX), &ihex::encode(&image))?;
     eprintln!("wrote {HEX} ({} bytes of flash)", image.len());
     Ok(())
 }
 
 fn size() -> Result<(), String> {
-    let elf = build()?;
+    let (elf, sim) = build()?;
     let flash = elf.flash_image().len() as u32;
     let flash_size = map::FLASH_SIZE as u32;
     let ram = elf.ram_bytes();
@@ -104,6 +107,11 @@ fn size() -> Result<(), String> {
     println!(
         "ram   {ram:>5} / {ram_size} bytes ({}%), plus the stack",
         ram * 100 / ram_size
+    );
+    println!("stack {:>5} bytes at most, in the simulator", sim.stack);
+    println!(
+        "loop  {:>5} instructions at most per 64 Hz tick (budget {})",
+        sim.loop_instructions, sim.loop_budget
     );
     Ok(())
 }
