@@ -11,7 +11,7 @@ Roughly in order. Each step should leave a torch that's no worse than the step b
 - [x] Click on, click off, at one level on the linear channel
 - [x] A built-in UPDI programmer in `xtask` (ping, backup, flash, restore), tested against a fake chip
 - [ ] Ping, back up and flash a real TS21, which is also the first real test of the programmer
-- [ ] Confirm the batched UPDI frames work on a real chip. `write_page` now sends the RSD toggle, REPEAT, the page data and the RSD toggle back in one frame, and `read` sends REPEAT and LD together. The fake chip is happy with both; if a real flash fails partway through a page, split them back into separate sends first.
+- [ ] Confirm the batched UPDI frames work on a real chip. `write_page` now sends the RSD toggle, REPEAT, the page data and the RSD toggle back in one frame, and `read` sends REPEAT and LD together. The fake chip is happy with both; if a real flash fails partway through a page, split them back into separate sends first. Flash is committed with PAGEWRITE (0x01) and EEPROM with PAGEERASEWRITE (0x03), and only the fake chip has seen either, so if flash fails `verify` and EEPROM doesn't, suspect PAGEWRITE.
 - [ ] See whether the `wait_nvm` after `NVM_PAGE_BUFFER_CLEAR` ever sees the controller busy. pymcuprog waits there, so keep it unless a real chip shows the first poll is always idle. It's one round trip per page.
 - [ ] Check PB5 is the button LED and decide what it does
 - [ ] Bring back the full UI from the `fancy-ui` branch, with ramping, moonlight, turbo and lockout
@@ -40,4 +40,4 @@ None of this is optional for a light with a direct-drive FET on a 21700.
 - Configurable floor, ceiling and thermal limit
 - [x] A UI simulator that runs `src/ui.rs` in a terminal: `cargo xtask simulate`
 - Support for the TS10 and other lights that share this driver layout
-- The write-page NVM command (0x01) for flash in place of page erase-write (0x03), since `program` chip-erases first. The datasheet (table 36-38) gives 2 ms for a page write against 4 ms for erase-write, so even a full 256-page flash only saves about half a second. Keep erase-write for EEPROM, since EESAVE can keep it through a chip erase.
+- [x] The write-page NVM command (0x01) for flash in place of page erase-write (0x03), since `program` chip-erases first. That's one erase per page per flash instead of two, and saves up to half a second (the datasheet's table 36-38 gives 2 ms for a page write against 4 ms for erase-write). `Programmer::erase_and_write_flash` does the chip erase and the page writes in one call, so nothing can page-write over flash that isn't blank, and `verify` catches an erase that didn't take. EEPROM keeps erase-write, since EESAVE can keep it through a chip erase.
