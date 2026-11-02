@@ -172,4 +172,163 @@ mod tests {
         ]);
         assert_eq!(events[n - 1], Some(Event::Click(1)));
     }
+
+    // The tests above pick their timings by hand. These compare `Clicks`
+    // against a second description of the same rules, written in terms of
+    // whole presses and gaps rather than one tick at a time, over thousands
+    // of random switchings and a few very long ones.
+
+    extern crate std;
+    use std::vec::Vec;
+
+    /// Spans of the switch, as (pressed, ticks).
+    type Runs = [(bool, u32)];
+
+    /// What `Clicks` should send, and on which tick, from the presses and
+    /// gaps alone. Runs must alternate between pressed and released.
+    fn model(runs: &Runs) -> Vec<(u32, Event)> {
+        let saturate = |ticks: u32| ticks.min(u32::from(u16::MAX)) as u16;
+        let mut out = Vec::new();
+        let (mut t, mut count) = (0, 0u8);
+        // The length of the press that just ended, if one did.
+        let mut press = None;
+        for &(pressed, len) in runs {
+            if pressed {
+                // A press counts from its first tick, and is a hold from
+                // HOLD_TICKS in, sending a Hold every tick after that.
+                for i in u32::from(HOLD_TICKS)..len {
+                    let ticks = saturate(i) - HOLD_TICKS;
+                    out.push((
+                        t + i,
+                        Event::Hold {
+                            clicks: count,
+                            ticks,
+                        },
+                    ));
+                }
+                press = Some(len);
+            } else {
+                // The tick a hold ends sends Release; a shorter press adds
+                // a click.
+                match press.take() {
+                    Some(len) if saturate(len) > HOLD_TICKS => {
+                        out.push((t, Event::Release { clicks: count }));
+                        count = 0;
+                    }
+                    Some(_) => count = count.saturating_add(1),
+                    None => {}
+                }
+                // Clicks count once the switch has been up for
+                // RELEASE_TICKS after the tick it came up.
+                if count > 0 && len > u32::from(RELEASE_TICKS) {
+                    out.push((t + u32::from(RELEASE_TICKS), Event::Click(count)));
+                    count = 0;
+                }
+            }
+            t += len;
+        }
+        out
+    }
+
+    fn actual(runs: &Runs) -> Vec<(u32, Event)> {
+        let mut clicks = Clicks::new();
+        let mut out = Vec::new();
+        let mut t = 0;
+        for &(pressed, len) in runs {
+            for _ in 0..len {
+                if let Some(event) = clicks.tick(pressed) {
+                    out.push((t, event));
+                }
+                t += 1;
+            }
+        }
+        out
+    }
+
+    /// Xorshift, so the runs are random but the same every time.
+    struct Rng(u32);
+
+    impl Rng {
+        fn next(&mut self) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 17;
+            self.0 ^= self.0 << 5;
+            self.0
+        }
+
+        /// A span length, mostly near the edges the rules care about.
+        fn len(&mut self) -> u32 {
+            let (hold, release) = (u32::from(HOLD_TICKS), u32::from(RELEASE_TICKS));
+            let edges = [
+                1,
+                2,
+                4,
+                hold - 1,
+                hold,
+                hold + 1,
+                hold + 2,
+                release - 1,
+                release,
+                release + 1,
+            ];
+            match self.next() % 3 {
+                0 => 1 + self.next() % 100,
+                _ => edges[self.next() as usize % edges.len()],
+            }
+        }
+    }
+
+    #[test]
+    fn matches_the_model_on_random_switching() {
+        for seed in 1..=500 {
+            let mut rng = Rng(seed);
+            let mut pressed = rng.next().is_multiple_of(2);
+            let runs: Vec<_> = (0..60)
+                .map(|_| {
+                    pressed = !pressed;
+                    (pressed, rng.len())
+                })
+                .collect();
+            assert_eq!(actual(&runs), model(&runs), "seed {seed}: {runs:?}");
+        }
+    }
+
+    #[test]
+    fn a_click_still_counts_after_a_long_wait() {
+        // Longer than `ticks` can count to, so it has saturated.
+        let runs = [(false, 70_000), (true, 4), (false, 30)];
+        assert_eq!(actual(&runs), model(&runs));
+        assert_eq!(
+            actual(&runs).last(),
+            Some(&(70_004 + u32::from(RELEASE_TICKS), Event::Click(1)))
+        );
+    }
+
+    #[test]
+    fn a_very_long_hold_saturates_and_still_releases() {
+        let runs = [(true, 70_000), (false, 2)];
+        let events = actual(&runs);
+        assert_eq!(events, model(&runs));
+        let n = events.len();
+        let top = Event::Hold {
+            clicks: 0,
+            ticks: u16::MAX - HOLD_TICKS,
+        };
+        assert_eq!(
+            (events[n - 2].1, events[n - 1].1),
+            (top, Event::Release { clicks: 0 })
+        );
+    }
+
+    #[test]
+    fn hundreds_of_clicks_count_up_to_255() {
+        let mut runs: Vec<_> = (0..300).flat_map(|_| [(true, 2), (false, 2)]).collect();
+        // The last gap is long enough for the clicks to count.
+        *runs.last_mut().unwrap() = (false, 30);
+        assert_eq!(actual(&runs), model(&runs));
+        assert_eq!(
+            actual(&runs),
+            [(299 * 4 + 2 + u32::from(RELEASE_TICKS), Event::Click(255))]
+        );
+    }
 }
