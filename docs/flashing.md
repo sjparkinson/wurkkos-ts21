@@ -52,13 +52,15 @@ That builds the firmware and then
 
 1. puts the chip in programming mode and checks its signature (1E 94 21)
 2. chip-erases it, which wipes flash and, unless the EESAVE fuse is set (Microchip ships it unset), EEPROM
-3. writes the image a 64-byte page at a time, skipping blank pages
+3. writes the image a 64-byte page at a time, skipping blank pages (the erase already left them blank)
 4. reads it all back and compares
 5. resets the chip and turns UPDI off, so the new firmware starts
 
+If a write or the compare fails, step 5 still runs, so the chip isn't left in programming mode. Whatever was half-written then runs, but with the cell out it's powered by the programmer alone. Run the command again.
+
 ## Going back
 
-`restore` puts your backup's flash and EEPROM back.
+`restore` puts your backup's flash and EEPROM back. It writes every EEPROM page, blank ones included, since with EESAVE set the old contents survive the erase.
 
 ```sh
 cargo xtask restore /dev/cu.usbserial-XXXX
