@@ -54,7 +54,7 @@ jobs:
         with:
           name: wurkkos-ts21-0614
           path: |
-            target/ts21.hex
+            target/wurkkos-ts21-0614.hex
             target/avr-none/release/ts21.elf
 
   release:
@@ -80,7 +80,7 @@ jobs:
       - run: |
           version="0.1.$(git rev-list --count HEAD)"
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          mv dist/ts21.hex "dist/wurkkos-ts21-0614-$version.hex"
+          mv dist/wurkkos-ts21-0614.hex "dist/wurkkos-ts21-0614-$version.hex"
           mv dist/avr-none/release/ts21.elf "dist/wurkkos-ts21-0614-$version.elf"
 
       - uses: actions/attest@v4.2.2

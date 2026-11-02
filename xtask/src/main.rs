@@ -32,7 +32,7 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  hex                     build the firmware and write target/ts21.hex
+  hex                     build the firmware and write target/wurkkos-ts21-0614.hex
   size                    build the firmware and print flash and RAM use
   ping <port>             check the programmer can see the chip, change nothing
   backup <port>           save the torch's flash, EEPROM and fuses into backup/
@@ -48,7 +48,7 @@ or /dev/ttyUSB0 on Linux.
 const ELF: &str = "target/avr-none/release/ts21.elf";
 /// src/bin/link_probe.rs, which `cargo fw` builds alongside the firmware.
 const PROBE: &str = "target/avr-none/release/link-probe.elf";
-const HEX: &str = "target/ts21.hex";
+const HEX: &str = "target/wurkkos-ts21-0614.hex";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
