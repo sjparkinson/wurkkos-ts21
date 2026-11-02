@@ -70,9 +70,11 @@ Single-line [Conventional Commits](https://www.conventionalcommits.org), such as
 
 Actions are pinned in `.github/workflows/actions.lock`, a [workflow lockfile](https://docs.github.com/actions/concepts/security/workflow-dependency-lockfiles) that records the commit each `uses:` resolves to. Rerun `gh actions-lock` (`gh extension install github/gh-actions-lock`) after adding a workflow or changing any `uses:`, and commit the lockfile with it. Dependabot updates the lockfile in its own PRs.
 
-## Claude Code hooks
+## Claude Code
 
-`.claude/settings.json` wires up two Ruby hooks (standard library only).
+`.claude/CLAUDE.md` has the project instructions. `.claude/agents/` holds read-only review agents (registers, AVR codegen, the simulator, the UI spec, hardware research), and `.claude/skills/` holds `/check`, `/bump-nightly` and `/fix-review`. `.claude/settings.json` denies `cargo xtask ping`, `backup`, `flash` and `restore`, so only a person drives the hardware.
+
+It also wires up two Ruby hooks (standard library only).
 
 - `.claude/hooks/post-tool-use.rb` runs after every Edit or Write. It runs `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files, and `gh actions-lock --verify-local` for workflows.
 - `.claude/hooks/pre-tool-use.rb` runs before any `git commit`. It rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
