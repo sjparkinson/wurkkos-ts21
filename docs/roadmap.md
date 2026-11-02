@@ -38,6 +38,6 @@ None of this is optional for a light with a direct-drive FET on a 21700.
 ## Maybe
 
 - Configurable floor, ceiling and thermal limit
-- A UI simulator that runs `src/ui.rs` in a terminal
+- [x] A UI simulator that runs `src/ui.rs` in a terminal: `cargo xtask simulate`
 - Support for the TS10 and other lights that share this driver layout
 - The write-page NVM command (0x01) for flash in place of page erase-write (0x03), since `program` chip-erases first. The datasheet (table 36-38) gives 2 ms for a page write against 4 ms for erase-write, so even a full 256-page flash only saves about half a second. Keep erase-write for EEPROM, since EESAVE can keep it through a chip erase.

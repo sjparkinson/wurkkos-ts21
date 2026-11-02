@@ -13,6 +13,7 @@ mod layout;
 mod serial;
 mod sim;
 mod simulate;
+mod terminal;
 mod updi;
 
 use std::env;
@@ -34,7 +35,8 @@ commands:
   backup <port>           save the torch's flash, EEPROM and fuses into backup/
   flash <port> [file.hex] build and flash the firmware, or flash file.hex
   restore <port>          put backup/flash.hex and backup/eeprom.hex back
-  simulate <script>...    run src/ui.rs on a script, e.g. `1C 2H:1.5s wait:1s 3C`
+  simulate [script...]    try src/ui.rs live in the terminal, or on a script
+                          such as `1C 2H:1.5s wait:1s 3C`
 
 <port> is the serial UPDI adapter, e.g. /dev/cu.usbserial-1410 on macOS
 or /dev/ttyUSB0 on Linux.
@@ -55,7 +57,8 @@ fn main() -> ExitCode {
         ["flash", port] => build().and_then(|(elf, _)| flash(port, &elf.flash_image())),
         ["flash", port, file] => read_hex(Path::new(file)).and_then(|image| flash(port, &image)),
         ["restore", port] => restore(port),
-        ["simulate", script @ ..] if !script.is_empty() => simulate::script(script),
+        ["simulate"] => simulate::interactive(),
+        ["simulate", script @ ..] => simulate::script(script),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);

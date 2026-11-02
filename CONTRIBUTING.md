@@ -29,7 +29,7 @@ src/regs.rs       register addresses and bit values, checked against the ATDF
 src/hw.rs         pins and register access (AVR only)
 src/rt.rs         vector table and startup (AVR only)
 link.x            memory layout for the linker
-xtask/            hex, size and the UPDI programmer (ping, backup, flash, restore)
+xtask/            hex, size, the UPDI programmer (ping, backup, flash, restore) and the UI simulator
 docs/             hardware, flashing, toolchain, UI spec, roadmap
 vendor/           Microchip's ATDF for the part (Apache-2.0)
 ```

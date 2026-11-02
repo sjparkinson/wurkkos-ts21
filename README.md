@@ -11,6 +11,8 @@ For now it's one click on, one click off, at a single level on the linear channe
 
 [docs/ui.md](docs/ui.md) is the full spec, including what's still to come.
 
+To try it without a torch, `cargo xtask simulate` runs the UI live in your terminal, and `cargo xtask simulate 1C 2H:1.5s 3C` runs a script of clicks and holds.
+
 ## Building
 
 You need [rustup](https://rustup.rs). The pinned nightly, `rust-src` and everything else come down on the first build.
