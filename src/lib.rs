@@ -8,6 +8,7 @@
 
 pub mod button;
 pub mod ramp;
+pub mod temp;
 pub mod ui;
 
 /// How often the firmware samples the switch and steps the UI. The RTC's
