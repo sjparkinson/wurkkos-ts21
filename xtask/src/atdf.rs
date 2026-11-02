@@ -482,4 +482,17 @@ mod tests {
             "CPU.CCP"
         );
     }
+
+    #[test]
+    fn simulator_cpu_registers_match_the_atdf() {
+        let atdf = Atdf::load();
+        for (ours, name) in [
+            (crate::avr::SPL, "SPL"),
+            (crate::avr::SPH, "SPH"),
+            (crate::avr::SREG, "SREG"),
+        ] {
+            let theirs = atdf.register("CPU", None, name).address;
+            assert_eq!(u32::from(ours), theirs, "CPU.{name}");
+        }
+    }
 }
