@@ -169,7 +169,8 @@ pub enum Verdict {
 ///   the linear channel. On the FET, several amps make the cell sag a lot, so
 ///   a low reading there may be a cell with plenty left: the ceiling drops to
 ///   [`LINEAR_MAX`] instead, where the 350 mA regulator sags the cell much
-///   less, and the next second's samples decide.
+///   less. The hold starts again once the light's faded down to it, so it's
+///   a second of samples on the linear channel that decide.
 /// - At [`RECOVER_AT`] or above for [`RECOVER_SAMPLES`], the ceiling steps
 ///   back up by [`STEP`].
 ///
@@ -256,6 +257,10 @@ impl Protection {
             false => 0,
         };
         self.flat_samples = match voltage < OFF_BELOW {
+            // Dropped to the linear channel but still fading down to it:
+            // the cell's still under the FET's load, so wait till it's
+            // there and judge it on the linear channel's.
+            true if level > LINEAR_MAX && self.ceiling <= LINEAR_MAX => 0,
             true => self.flat_samples + 1,
             false => 0,
         };
@@ -462,6 +467,26 @@ mod tests {
         // If it doesn't, it turns off a second later.
         let verdicts = run(&mut lvp, 250, LINEAR_MAX, secs(3));
         assert!(verdicts.contains(&Verdict::Off));
+    }
+
+    #[test]
+    fn waits_for_the_light_to_reach_the_linear_channel_before_turning_off() {
+        let mut lvp = Protection::new();
+        let fet = LINEAR_MAX + 1;
+        assert_eq!(
+            last(&mut lvp, 250, LEVELS, secs(1)),
+            Verdict::Ceiling(LINEAR_MAX)
+        );
+        // Still fading down to it. The fade takes a second or so; this is four.
+        assert!(all(
+            &run(&mut lvp, 250, fet, secs(4)),
+            Verdict::Ceiling(LINEAR_MAX)
+        ));
+        // There, a second of flat samples turns it off.
+        let verdicts = run(&mut lvp, 250, LINEAR_MAX, secs(1));
+        let (before, after) = verdicts.split_at(usize::from(secs(1)) - 1);
+        assert!(all(before, Verdict::Ceiling(LINEAR_MAX)));
+        assert_eq!(after, [Verdict::Off]);
     }
 
     #[test]

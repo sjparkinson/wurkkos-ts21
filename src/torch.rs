@@ -14,7 +14,6 @@ pub struct Torch {
     clicks: Clicks,
     ui: Ui,
     limits: Limits,
-    level: u8,
 }
 
 impl Torch {
@@ -24,7 +23,6 @@ impl Torch {
             clicks: Clicks::new(),
             ui: Ui::new(),
             limits: Limits::new(calibration),
-            level: 0,
         }
     }
 
@@ -36,17 +34,15 @@ impl Torch {
         if let Some(event) = event {
             self.ui.handle(event);
         }
-        let step = self.limits.tick(self.ui.output_level(), adc);
-        if step.off {
+        if self.limits.tick(self.ui.output_level(), adc).off {
             self.ui.off();
         }
-        self.level = step.level;
         event
     }
 
     /// The level the LEDs should be at right now, `0` meaning off.
     pub fn level(&self) -> u8 {
-        self.level
+        self.limits.level()
     }
 
     /// The conversion to start on the ADC after this tick, if any.
@@ -92,20 +88,20 @@ mod tests {
     use crate::button::RELEASE_TICKS;
     use crate::limits::{BLINK_LEVEL, BLINK_TICKS};
     use crate::ramp::{LEVELS, LINEAR_MAX, Output, output};
-    use crate::sensors::FakeAdc;
+    use crate::testing::{Adc, CALIBRATION};
     use crate::ui::LEVEL;
 
     /// A torch and the ADC it reads.
     struct Rig {
         torch: Torch,
-        adc: FakeAdc,
+        adc: Adc,
     }
 
     impl Rig {
         fn new() -> Self {
             Self {
-                torch: Torch::new(FakeAdc::CALIBRATION),
-                adc: FakeAdc::new(),
+                torch: Torch::new(CALIBRATION),
+                adc: Adc::new(),
             }
         }
 

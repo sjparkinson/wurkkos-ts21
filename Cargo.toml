@@ -27,6 +27,11 @@ authors.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[features]
+# The fake ADC and reading helpers in src/testing.rs, for xtask's
+# simulators. Never on in the firmware.
+testing = []
+
 [[bin]]
 name = "ts21"
 test = false

@@ -13,4 +13,4 @@ workspace = true
 # The firmware's own library, which `cargo xtask simulate` runs. It's this
 # workspace's root package, not a crate from crates.io.
 [dependencies]
-ts21 = { path = ".." }
+ts21 = { path = "..", features = ["testing"] }

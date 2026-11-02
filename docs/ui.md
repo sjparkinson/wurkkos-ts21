@@ -1,6 +1,6 @@
 # The UI
 
-What every click and hold does. This is the spec. `src/ui.rs` implements it and its tests check it, so change this file in the same commit as the code.
+What every click and hold does. This is the spec. `src/ui.rs` implements the clicks and `src/limits.rs` the low battery and heat, and their tests check it, so change this file in the same commit as the code.
 
 The notation is Anduril's. **1C** is one click, **1H** press and hold, and so on. Clicks count once the switch has been left alone for about 280 ms.
 

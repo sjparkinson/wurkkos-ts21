@@ -13,6 +13,8 @@ pub mod limits;
 pub mod ramp;
 pub mod sensors;
 pub mod temp;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod thermal;
 pub mod torch;
 pub mod ui;

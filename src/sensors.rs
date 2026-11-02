@@ -14,6 +14,10 @@
 //! tick 10  that result is the temperature
 //! ```
 //!
+//! The ADC's only set up when the channel changes. With the light off it
+//! reads nothing but the voltage, so after the first round it skips the
+//! setup and goes straight to converting.
+//!
 //! A conversion takes a fraction of a millisecond, so it's always done by
 //! the next tick, and nothing ever waits on the ADC.
 //!
@@ -47,7 +51,8 @@ pub enum Channel {
 pub struct Convert {
     pub channel: Channel,
     /// Set the ADC (and the reference) up for `channel` first. Only the
-    /// first conversion of a turn needs it.
+    /// first conversion of a turn on a different channel from the last
+    /// turn's needs it.
     pub setup: bool,
 }
 
@@ -72,6 +77,11 @@ pub struct Schedule {
     phase: u8,
     /// Whether this round reads the temperature.
     temperature: bool,
+    /// The channel the ADC was last set up for, `None` before the first.
+    /// Its registers keep their values until a reset, which starts this
+    /// afresh too. Anything that turns the ADC or its reference off (sleep,
+    /// one day) has to put this back to `None`.
+    set_up: Option<Channel>,
 }
 
 impl Schedule {
@@ -79,6 +89,7 @@ impl Schedule {
         Self {
             phase: 0,
             temperature: false,
+            set_up: None,
         }
     }
 
@@ -108,7 +119,11 @@ impl Schedule {
         }
         let convert = |setup| Some(Convert { channel, setup });
         match step {
-            0 => (None, convert(true)),
+            0 => {
+                let setup = self.set_up != Some(channel);
+                self.set_up = Some(channel);
+                (None, convert(setup))
+            }
             1 => (None, convert(false)),
             2 => {
                 let reading = result.unwrap_or(0);
@@ -119,47 +134,6 @@ impl Schedule {
                 (Some(reading), None)
             }
             _ => (None, None),
-        }
-    }
-}
-
-/// An ADC for tests: it hands back, a tick later, a fixed result for
-/// whichever channel the last conversion was on.
-#[cfg(test)]
-#[derive(Clone, Debug)]
-pub(crate) struct FakeAdc {
-    pub voltage: u16,
-    pub temperature: u16,
-    pending: Option<Channel>,
-}
-
-#[cfg(test)]
-impl FakeAdc {
-    /// 3.8 V and 25 °C with [`FakeAdc::CALIBRATION`].
-    pub const fn new() -> Self {
-        Self {
-            voltage: 1731,
-            temperature: 531,
-            pending: None,
-        }
-    }
-
-    pub const CALIBRATION: crate::temp::Calibration = crate::temp::Calibration {
-        offset: -10,
-        gain: 141,
-    };
-
-    /// The result of the conversion started last tick.
-    pub fn result(&mut self) -> Option<u16> {
-        self.pending.take().map(|channel| match channel {
-            Channel::Voltage => self.voltage,
-            Channel::Temperature => self.temperature,
-        })
-    }
-
-    pub fn start(&mut self, convert: Option<Convert>) {
-        if let Some(convert) = convert {
-            self.pending = Some(convert.channel);
         }
     }
 }
@@ -266,26 +240,34 @@ mod tests {
     }
 
     #[test]
+    fn only_sets_the_adc_up_when_the_channel_changes() {
+        let mut schedule = Schedule::new();
+        let setups = |ticks: &[(Option<Reading>, Option<Convert>)]| -> Vec<Channel> {
+            ticks
+                .iter()
+                .filter_map(|(_, convert)| convert.filter(|c| c.setup).map(|c| c.channel))
+                .collect()
+        };
+        // Off: the first voltage turn sets up, the rest don't.
+        let off = run(&mut schedule, 64, Some(1), false);
+        assert_eq!(off[0].1, convert(Channel::Voltage, true));
+        assert_eq!(off[16].1, convert(Channel::Voltage, false));
+        assert_eq!(setups(&off), [Channel::Voltage]);
+        // On: every turn switches channel, so every turn sets up.
+        let on = run(&mut schedule, 64, Some(1), true);
+        let alternating = [Channel::Temperature, Channel::Voltage].repeat(4);
+        assert_eq!(setups(&on)[..], alternating[..7]);
+        // Off again: the voltage turn after the last temperature one sets up,
+        // and that's all.
+        let off = run(&mut schedule, 64, Some(1), false);
+        assert_eq!(setups(&off), [Channel::Voltage]);
+    }
+
+    #[test]
     fn no_result_when_one_is_due_reads_as_zero() {
         let mut schedule = Schedule::new();
         let ticks = run(&mut schedule, 16, None, true);
         assert_eq!(ticks[2].0, Some(Reading::Voltage(0)));
         assert_eq!(ticks[10].0, Some(Reading::Temperature(0)));
-    }
-
-    #[test]
-    fn the_fake_adc_answers_for_the_last_channel_a_tick_later() {
-        let mut adc = FakeAdc::new();
-        assert_eq!(adc.result(), None);
-        adc.start(convert(Channel::Temperature, true));
-        assert_eq!(adc.result(), Some(531));
-        assert_eq!(adc.result(), None);
-        adc.start(convert(Channel::Voltage, false));
-        assert_eq!(adc.result(), Some(1731));
-        assert_eq!(crate::battery::centivolts(1731), 380);
-        assert_eq!(
-            FakeAdc::CALIBRATION.kelvin(531),
-            crate::thermal::celsius(25)
-        );
     }
 }
