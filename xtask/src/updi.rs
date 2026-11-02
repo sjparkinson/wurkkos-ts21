@@ -99,6 +99,7 @@ const RESET_REQ_APPLY: u8 = 0x59;
 const KEY_NVMPROG: &[u8; 8] = b"NVMProg ";
 
 // NVMCTRL.CTRLA commands and NVMCTRL.STATUS bits.
+const NVM_PAGE_WRITE: u8 = 0x01;
 const NVM_PAGE_ERASE_WRITE: u8 = 0x03;
 const NVM_PAGE_BUFFER_CLEAR: u8 = 0x04;
 const NVM_CHIP_ERASE: u8 = 0x05;
@@ -205,9 +206,27 @@ impl<W: Wire> Programmer<W> {
         self.wait_nvm()
     }
 
-    /// Writes `data` page by page from `addr`, skipping pages that are all
-    /// 0xFF (already erased). `addr` must be page aligned.
+    /// Chip-erases, then writes `data` from the start of flash with plain
+    /// page writes, since every page is already 0xFF. That's one erase per
+    /// page instead of two. Erases EEPROM too unless EESAVE is set.
+    ///
+    /// The erase and the write stay in one call because a page write can only
+    /// clear bits: over flash that isn't blank, it ANDs the new data into the
+    /// old. Follow with [`Self::verify`], which catches an erase that didn't
+    /// take.
+    pub fn erase_and_write_flash(&mut self, data: &[u8]) -> Result<()> {
+        self.chip_erase()?;
+        self.write_pages(map::FLASH, map::FLASH_PAGE, data, NVM_PAGE_WRITE)
+    }
+
+    /// Writes `data` page by page from `addr` with page erase-write, skipping
+    /// pages that are all 0xFF. `addr` must be page aligned. For EEPROM,
+    /// which EESAVE can keep through a chip erase.
     pub fn write(&mut self, addr: u16, page: usize, data: &[u8]) -> Result<()> {
+        self.write_pages(addr, page, data, NVM_PAGE_ERASE_WRITE)
+    }
+
+    fn write_pages(&mut self, addr: u16, page: usize, data: &[u8], command: u8) -> Result<()> {
         // Each page write ends by waiting for the NVM controller, so this is
         // the only wait needed before the next one starts.
         self.wait_nvm()?;
@@ -215,7 +234,7 @@ impl<W: Wire> Programmer<W> {
             if chunk.iter().all(|&b| b == 0xFF) {
                 continue;
             }
-            self.write_page(offset(addr, i * page)?, chunk)?;
+            self.write_page(offset(addr, i * page)?, chunk, command)?;
         }
         Ok(())
     }
@@ -247,8 +266,9 @@ impl<W: Wire> Programmer<W> {
         Ok(self.wire)
     }
 
-    /// Expects the NVM controller to be idle, as [`Self::write`] leaves it.
-    fn write_page(&mut self, addr: u16, data: &[u8]) -> Result<()> {
+    /// Expects the NVM controller to be idle, as [`Self::write_pages`] leaves
+    /// it. `command` is the NVM command that commits the page buffer.
+    fn write_page(&mut self, addr: u16, data: &[u8], command: u8) -> Result<()> {
         self.nvm_command(NVM_PAGE_BUFFER_CLEAR)?;
         self.wait_nvm()?;
 
@@ -263,7 +283,7 @@ impl<W: Wire> Programmer<W> {
         frame.extend([SYNC, STCS | CS_CTRLA, CTRLA_IBDLY]);
         self.send(&frame)?;
 
-        self.nvm_command(NVM_PAGE_ERASE_WRITE)?;
+        self.nvm_command(command)?;
         self.wait_nvm()
     }
 
@@ -437,6 +457,11 @@ mod tests {
 
         for (ours, theirs, label) in [
             (
+                NVM_PAGE_WRITE,
+                ctrla.value("CMD", "PAGEWRITE"),
+                "CMD=PAGEWRITE",
+            ),
+            (
                 NVM_PAGE_ERASE_WRITE,
                 ctrla.value("CMD", "PAGEERASEWRITE"),
                 "CMD=PAGEERASEWRITE",
@@ -506,15 +531,31 @@ mod tests {
 
         let mut p = Programmer::connect(tiny).unwrap();
         p.enter_progmode().unwrap();
-        p.chip_erase().unwrap();
-        p.write(map::FLASH, map::FLASH_PAGE, &image).unwrap();
+        p.erase_and_write_flash(&image).unwrap();
         p.verify(map::FLASH, &image).unwrap();
         let tiny = p.leave().unwrap();
 
         assert_eq!(&tiny.flash[..image.len()], &image[..]);
         assert!(tiny.flash[image.len()..].iter().all(|&b| b == 0xFF));
+        // One erase per page, the chip erase's: 1000 bytes is 16 pages.
+        assert_eq!(tiny.page_writes, 16);
+        assert_eq!(tiny.page_erase_writes, 0);
         assert!(tiny.updi_disabled);
         assert!(!tiny.in_reset);
+    }
+
+    #[test]
+    fn verify_catches_flash_that_did_not_erase() {
+        let image: Vec<u8> = (0..200u32).map(|i| (i * 7 + 3) as u8).collect();
+        let mut tiny = Tiny::new();
+        tiny.flash.fill(0x42);
+        tiny.ignores_chip_erase = true;
+
+        let mut p = Programmer::connect(tiny).unwrap();
+        p.enter_progmode().unwrap();
+        p.erase_and_write_flash(&image).unwrap();
+        let err = p.verify(map::FLASH, &image).unwrap_err();
+        assert!(err.contains("verify failed"), "{err}");
     }
 
     #[test]
@@ -523,20 +564,31 @@ mod tests {
         image[2 * map::FLASH_PAGE] = 0x12;
         let mut p = Programmer::connect(Tiny::new()).unwrap();
         p.enter_progmode().unwrap();
-        p.write(map::FLASH, map::FLASH_PAGE, &image).unwrap();
+        p.erase_and_write_flash(&image).unwrap();
         let tiny = p.leave().unwrap();
         assert_eq!(tiny.page_writes, 1);
     }
 
     #[test]
-    fn writes_eeprom_and_reads_fuses() {
+    fn writes_eeprom_over_eesave_contents_and_reads_fuses() {
         let eeprom: Vec<u8> = (0..=255).collect();
-        let mut p = Programmer::connect(Tiny::new()).unwrap();
+        let mut tiny = Tiny::new();
+        tiny.eesave = true;
+        tiny.eeprom.fill(0x42);
+
+        let mut p = Programmer::connect(tiny).unwrap();
         p.enter_progmode().unwrap();
+        p.erase_and_write_flash(&[0x12]).unwrap();
         p.write(map::EEPROM, map::EEPROM_PAGE, &eeprom).unwrap();
         p.verify(map::EEPROM, &eeprom).unwrap();
         let fuses = p.read(map::FUSES, map::FUSES_SIZE).unwrap();
         assert_eq!(fuses[2], 0x02); // OSCCFG: 20 MHz
+
+        // EEPROM kept its old contents through the chip erase, so it needs
+        // erase-write: 256 bytes is 8 pages. The flash page is a plain write.
+        let tiny = p.leave().unwrap();
+        assert_eq!(tiny.page_erase_writes, 8);
+        assert_eq!(tiny.page_writes, 1);
     }
 
     #[test]
@@ -592,7 +644,14 @@ mod tests {
             pub breaks: usize,
             pub updi_disabled: bool,
             pub in_reset: bool,
+            /// The EESAVE fuse: EEPROM survives a chip erase.
+            pub eesave: bool,
+            /// A chip erase that silently does nothing.
+            pub ignores_chip_erase: bool,
+            /// Plain page writes (PAGEWRITE).
             pub page_writes: usize,
+            /// Page erase-writes (PAGEERASEWRITE).
+            pub page_erase_writes: usize,
             expect: Expect,
             replies: VecDeque<u8>,
             ctrla: u8,
@@ -615,7 +674,10 @@ mod tests {
                     breaks: 0,
                     updi_disabled: false,
                     in_reset: false,
+                    eesave: false,
+                    ignores_chip_erase: false,
                     page_writes: 0,
+                    page_erase_writes: 0,
                     expect: Expect::Sync,
                     replies: VecDeque::new(),
                     ctrla: 0,
@@ -804,7 +866,7 @@ mod tests {
                         self.page_buffer.fill(0xFF);
                         self.page_addr = None;
                     }
-                    NVM_PAGE_ERASE_WRITE => {
+                    NVM_PAGE_WRITE | NVM_PAGE_ERASE_WRITE => {
                         let addr = self.page_addr.take().expect("a page to write");
                         let (base, page) = region(addr);
                         let mem = if base == map::FLASH {
@@ -813,13 +875,27 @@ mod tests {
                             &mut self.eeprom
                         };
                         let start = usize::from(addr - base);
-                        mem[start..start + page].copy_from_slice(&self.page_buffer[..page]);
+                        let cells = mem[start..start + page].iter_mut();
+                        if command == NVM_PAGE_WRITE {
+                            // A write can only clear bits; only an erase sets them.
+                            for (cell, &b) in cells.zip(&self.page_buffer) {
+                                *cell &= b;
+                            }
+                            self.page_writes += 1;
+                        } else {
+                            for (cell, &b) in cells.zip(&self.page_buffer) {
+                                *cell = b;
+                            }
+                            self.page_erase_writes += 1;
+                        }
                         self.page_buffer.fill(0xFF);
-                        self.page_writes += 1;
                     }
+                    NVM_CHIP_ERASE if self.ignores_chip_erase => {}
                     NVM_CHIP_ERASE => {
                         self.flash.fill(0xFF);
-                        self.eeprom.fill(0xFF);
+                        if !self.eesave {
+                            self.eeprom.fill(0xFF);
+                        }
                     }
                     _ => panic!("unexpected NVM command 0x{command:02X}"),
                 }

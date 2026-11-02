@@ -193,8 +193,8 @@ fn restore(port: &str) -> Result<(), String> {
     program(port, &flash, Some(&eeprom))
 }
 
-/// Erase, write, verify, restart. EEPROM goes too, because a chip erase
-/// wipes it; pass `Some` to put contents back.
+/// Erase, write, verify, restart. The chip erase wipes EEPROM too unless the
+/// EESAVE fuse is set; pass `Some` to put contents back.
 fn program(port: &str, flash: &[u8], eeprom: Option<&[u8]>) -> Result<(), String> {
     if flash.len() > map::FLASH_SIZE {
         return Err(format!(
@@ -211,10 +211,8 @@ fn program(port: &str, flash: &[u8], eeprom: Option<&[u8]>) -> Result<(), String
     }
 
     let mut p = connect_for_programming(port)?;
-    eprintln!("erasing");
-    p.chip_erase()?;
-    eprintln!("writing {} bytes of flash", flash.len());
-    p.write(map::FLASH, map::FLASH_PAGE, flash)?;
+    eprintln!("erasing and writing {} bytes of flash", flash.len());
+    p.erase_and_write_flash(flash)?;
     p.verify(map::FLASH, flash)?;
     if let Some(eeprom) = eeprom {
         eprintln!("writing EEPROM");
