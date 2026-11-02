@@ -1,8 +1,8 @@
 # Hardware
 
-What's inside a TS21 v2, and how sure I am about each bit. "Confirmed" means a primary source (Microchip's files, Anduril's hardware definitions or someone who opened one up) says so. "Likely" means it follows from a sibling light or a convention and nobody's contradicted it.
+What's inside a TS21 (model 0614), and how sure I am about each bit. "Confirmed" means a primary source (Microchip's files, Anduril's hardware definitions or someone who opened one up) says so. "Likely" means it follows from a sibling light or a convention and nobody's contradicted it.
 
-## Spotting a v2
+## Spotting a model 0614
 
 It has an ATtiny1616 and three pads labelled R, G and V on the driver. A version check from off (15 or more clicks in Anduril 2) blinks out the build date and then the model number, which is 0614. Confirmed.
 
@@ -30,7 +30,7 @@ Anduril sets the CPU clock to 10 MHz (the 20 MHz oscillator divided by 2) in `hw
 
 `src/battery.rs` does the same sums: a reading of 4 × 1024 × 1.5 V / VCC (Anduril's scaling, which uses 1024 counts to full scale where the datasheet says 1023), then the slope and offset, rounded to the nearest centivolt. How Anduril measures and scales is confirmed, from its source.
 
-The 0614 calibration is confirmed to within 0.1 V at 3.57 to 4.08 V on a real TS21 v2, and no better than that yet. Stock Anduril's battery check against a multimeter on the cell, at rest:
+The 0614 calibration is confirmed to within 0.1 V at 3.57 to 4.08 V on a real TS21 (model 0614), and no better than that yet. Stock Anduril's battery check against a multimeter on the cell, at rest:
 
 | Multimeter | Anduril battcheck | What Anduril read |
 |---|---|---|
@@ -60,7 +60,7 @@ This firmware shares ADC0 between the two, switching every 8 ticks so each is re
 
 Anything that can't be real counts as garbage and fails safe (a ceiling at level 75, never off), and garbage in the first round after power-on gives one dim blink, so a wrong setup shows on the first flash. See [ui.md](ui.md#low-battery-and-heat).
 
-The sensor and its factory calibration read sensibly on a real TS21 v2. Likely, not confirmed. After the light had sat off at room temperature, stock Anduril's temperature check blinked 20 °C against 20.6 °C on the user's thermometer. Anduril shows whole degrees, so that's within 1 °C. It isn't confirmation of this firmware's sums, though: Anduril uses its own formula (`(measurement>>6) + THERM_CAL_OFFSET + TH_CAL - 275` in [`fsm/adc.c`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/fsm/adc.c)), not the datasheet's that `temp::kelvin` follows, and it has a user-adjustable calibration that may not be at its default on this light. This firmware's own reading still needs checking against a thermometer, and nothing's changed on this evidence.
+The sensor and its factory calibration read sensibly on a real TS21 (model 0614). Likely, not confirmed. After the light had sat off at room temperature, stock Anduril's temperature check blinked 20 °C against 20.6 °C on the user's thermometer. Anduril shows whole degrees, so that's within 1 °C. It isn't confirmation of this firmware's sums, though: Anduril uses its own formula (`(measurement>>6) + THERM_CAL_OFFSET + TH_CAL - 275` in [`fsm/adc.c`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/fsm/adc.c)), not the datasheet's that `temp::kelvin` follows, and it has a user-adjustable calibration that may not be at its default on this light. This firmware's own reading still needs checking against a thermometer, and nothing's changed on this evidence.
 
 This firmware also reads the temperature only while the light's on, plus once at power-on for the diagnostic. The voltage it reads all the time, on or off, until sleep arrives and that gets revisited.
 
@@ -80,7 +80,7 @@ Unscrew the head and they're on the driver. They're UPDI.
 | G | Ground |
 | V | VCC, 3.3 to 5 V from the programmer depending on which one |
 
-People who've opened one confirm the labels. What each one does is the standard three-pad layout gchart's t1616 drivers use, which other lights label `+ - R` or, read from the other end, `R - +` ([pingle.org](https://www.pingle.org/2022/08/07/flashing-a-3-pin-t1616-flashlight-with-new-firmware)). Likely, bordering on confirmed. The pads are at 1.27 mm pitch, the same as gchart's layout, so a standard 1.27 mm probe fits. Confirmed by measuring a TS21 v2 (it's nowhere near 2.54 mm). Pad order varies between lights, so before you press a programmer onto them, check with a multimeter that G is continuous with the battery negative.
+People who've opened one confirm the labels. What each one does is the standard three-pad layout gchart's t1616 drivers use, which other lights label `+ - R` or, read from the other end, `R - +` ([pingle.org](https://www.pingle.org/2022/08/07/flashing-a-3-pin-t1616-flashlight-with-new-firmware)). Likely, bordering on confirmed. The pads are at 1.27 mm pitch, the same as gchart's layout, so a standard 1.27 mm probe fits. Confirmed by measuring a TS21 (model 0614) (it's nowhere near 2.54 mm). Pad order varies between lights, so before you press a programmer onto them, check with a multimeter that G is continuous with the battery negative.
 
 How to flash through them is in [flashing.md](flashing.md).
 

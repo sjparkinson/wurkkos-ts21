@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Firmware for the Wurkkos TS21 v2 torch (ATtiny1616), in Rust, with zero crate dependencies. Read README.md for what it is, CONTRIBUTING.md for the checks and layout, and docs/ for the hardware, toolchain and UI spec.
+Firmware for the Wurkkos TS21 torch (model 0614) (ATtiny1616), in Rust, with zero crate dependencies. Read README.md for what it is, CONTRIBUTING.md for the checks and layout, and docs/ for the hardware, toolchain and UI spec.
 
 ## Commands
 

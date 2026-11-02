@@ -5,7 +5,7 @@ Roughly in order. Each step should leave a torch that's no worse than the step b
 ## 1. It lights up
 
 - [x] Toolchain with nightly `avr-none`, `rust-lld`, own linker script and vector table, no crates
-- [x] Pin map and registers for the TS21 v2 driver
+- [x] Pin map and registers for the TS21 (model 0614) driver
 - [x] Switch sampling at 64 Hz and a click/hold decoder
 - [x] Two-channel ramp (linear then FET), 150 levels
 - [x] Click on, click off, at one level on the linear channel

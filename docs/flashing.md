@@ -10,7 +10,7 @@ The easy option is a ready-made USB UPDI programmer. [JLHawaii808's kit](https:/
 
 The cheap option is a USB-serial adapter (CH340, CP2102, FT232) wired as a serial UPDI programmer, with TX and RX joined and that joined line going to R. [pymcuprog's README](https://github.com/microchip-pic-avr-tools/pymcuprog) suggests a series resistor of about 1 kΩ between TX and UPDI, and an adapter running at the same voltage as the MCU. The CH340 module in [pingle.org's guide](https://www.pingle.org/2022/08/07/flashing-a-3-pin-t1616-flashlight-with-new-firmware) worked wired straight through. Add pogo pins or a steady hand.
 
-Watch the pad spacing before you rely on a fixed probe. gchart's standard three-pad layout is `+ - R` at 1.27 mm pitch, and that's what most probes expect. Some Wurkkos and Sofirn boards use 2.54 mm instead (thefreeman ships loose leads for exactly that reason). The TS21's R, G, V is the same arrangement read from the R end, so mind which way round a probe goes. Loose pogo leads work whatever the layout. The TS21 v2 is 1.27 mm (measured on mine), so a standard probe fits.
+Watch the pad spacing before you rely on a fixed probe. gchart's standard three-pad layout is `+ - R` at 1.27 mm pitch, and that's what most probes expect. Some Wurkkos and Sofirn boards use 2.54 mm instead (thefreeman ships loose leads for exactly that reason). The TS21's R, G, V is the same arrangement read from the R end, so mind which way round a probe goes. Loose pogo leads work whatever the layout. The TS21 (model 0614) is 1.27 mm (measured on mine), so a standard probe fits.
 
 Use a short USB cable. JLHawaii808 notes failures with 1 m ones.
 
