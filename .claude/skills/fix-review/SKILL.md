@@ -20,6 +20,6 @@ Take the findings from the review in this conversation (or the PR comments, if p
    - run the `check` skill before reporting, and report flash and RAM before and after;
    - use the `register-checker` agent after touching register code, `sim-checker` after touching the simulator, and `ui-spec-checker` after touching the UI or docs/ui.md.
 3. **Bring the work together** on one branch off `origin/main` (cherry-pick each agent's commits), then run the `check` skill on the combined tree. Fix anything that only breaks when combined.
-4. **Commit** one single-line Conventional Commit per area, push with `git push -u origin <branch>`, and open a ready PR against `main`. The PR body lists each finding and how it was fixed. PRs merge by rebase, so every commit lands on main as written.
+4. **Commit** one single-line Conventional Commit per area, push with `git push origin <branch>` (the sandbox can't record an upstream, so skip `-u`), and open a ready PR against `main` with `gh pr create --head <branch>`. The PR body lists each finding and how it was fixed. PRs merge by rebase, so every commit lands on main as written.
 
 Don't fix things the review didn't raise. If a finding turns out to be wrong, say so in the PR body instead of changing code to satisfy it.

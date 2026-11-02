@@ -33,7 +33,7 @@ Skills in `.claude/skills/`: `/check` (every CI check), `/bump-nightly [date]`, 
 
 - **Edit `.rs` files with Edit or Write**, not `sed -i`, `cp` or a heredoc. The lint hook only runs on Edit and Write.
 - **Parallel agents get their own worktree and their own files.** Two agents in one checkout broke each other's builds mid-edit. Never `git stash` to compare before and after; use a WIP commit or a second worktree.
-- **Push with `git push -u origin <branch>`.** Setting upstream afterwards writes `.git/config`, which the sandbox blocks.
+- **The sandbox can't write `.git/config`**, so `git push -u` pushes but can't record the upstream. Push with `git push origin <branch>`, pass `--head <branch>` to `gh pr create`, and don't try to fix the tracking.
 - **PRs merge by rebase only**, so every commit on a branch lands on main as written. Keep each one single-line and passing.
 
 ## Rules that bite
