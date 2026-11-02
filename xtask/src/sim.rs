@@ -24,14 +24,24 @@
 //! 2. The same startup code with .data and .bss moved and given contents,
 //!    because the firmware has no statics yet, so as linked both loops in
 //!    src/rt.rs run zero times.
-//! 3. A script of clicks and holds from docs/ui.md, checking the LEDs after
-//!    each, how deep the stack goes, and that every pass of the main loop
-//!    fits in a 64 Hz tick.
+//! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
+//!    checking the LEDs at the end.
+//! 4. Twenty thousand ticks of random clicks and holds, checking the LEDs
+//!    match `ts21::torch` on every tick.
+//!
+//! Throughout, it measures how deep the stack goes and checks every pass of
+//! the main loop fits in a 64 Hz tick.
 
 use std::ops::Range;
 
+use ts21::button::{HOLD_TICKS, RELEASE_TICKS};
+use ts21::ramp;
+use ts21::torch::Torch;
+
 use crate::avr::{Bus, Cpu, is_two_words};
 use crate::elf::{DATA_SPACE, Elf, RAM};
+use crate::simulate;
+use crate::spec::{self, Example, Expect};
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
@@ -109,7 +119,23 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     startup_with_statics(&image, symbol("__reset")?, main, &linked)
         .map_err(|e| format!("startup with statics: {e}"))?;
 
-    clicks(sim)
+    let mut report = Report {
+        stack: 0,
+        loop_instructions: 0,
+        loop_budget: TICK_BUDGET,
+    };
+    let fresh = || -> Result<Sim, String> {
+        let mut sim = Sim::new(image.clone(), linked.bss.end)?;
+        sim.run_to(main, BOOT_BUDGET)?;
+        Ok(sim)
+    };
+    for example in spec::examples(spec::UI_MD)? {
+        let sim = fresh().map_err(|e| format!("startup: {e}"))?;
+        ui_example(sim, &example, &mut report).map_err(|e| format!("{}: {e}", example.row))?;
+    }
+    against_the_library(sim, &mut report)
+        .map_err(|e| format!("random switching, against the library: {e}"))?;
+    Ok(report)
 }
 
 /// Where src/rt.rs's startup copies and zeroes, as data-space addresses.
@@ -242,64 +268,100 @@ fn word(bytes: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([b[0], b[1]]))
 }
 
-// Press and release timings, in ticks. src/button.rs counts a press under
-// 24 ticks as a click and a gap over 18 as the end of a run of clicks.
-const PRESS: (bool, u32) = (true, 4);
-const GAP: (bool, u32) = (false, 4);
-const HOLD: (bool, u32) = (true, 64);
-const SETTLE: (bool, u32) = (false, 40);
+/// Ticks of random switching to compare against the library: about five
+/// minutes of a torch being clicked and held.
+const RANDOM_TICKS: usize = 20_000;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Light {
-    Off,
-    On,
+/// Runs one of docs/ui.md's examples on the firmware, from just after
+/// `main`, and checks the LEDs at the end.
+fn ui_example(mut sim: Sim, example: &Example, report: &mut Report) -> Result<(), String> {
+    sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
+    for pressed in simulate::samples(&example.actions) {
+        let took = sim.tick(pressed)?;
+        report.loop_instructions = report.loop_instructions.max(took);
+    }
+    report.stack = report.stack.max(sim.stack());
+
+    let leds = sim.chip.leds();
+    let holds = match example.expect {
+        Expect::Off => leds == (0, 0),
+        Expect::On => leds != (0, 0),
+        Expect::Level(level) => leds == duty(level),
+    };
+    if !holds {
+        return Err(format!(
+            "expected {:?}, but (linear, FET) duty is {leds:?}",
+            example.expect
+        ));
+    }
+    Ok(())
 }
 
-/// A docs/ui.md row: its name, the switch as (pressed, ticks) steps, and
-/// what the light should be after.
-type Row = (&'static str, &'static [(bool, u32)], Light);
-
-/// Runs docs/ui.md's rows against the firmware, from just after `main`.
-fn clicks(mut sim: Sim) -> Result<Report, String> {
-    use Light::{Off, On};
-    let script: [Row; 7] = [
-        ("starts off", &[SETTLE], Off),
-        ("1C from off turns on", &[PRESS, SETTLE], On),
-        ("1H while on does nothing", &[HOLD, SETTLE], On),
-        ("2C while on does nothing", &[PRESS, GAP, PRESS, SETTLE], On),
-        ("1C from on turns off", &[PRESS, SETTLE], Off),
-        (
-            "2C while off does nothing",
-            &[PRESS, GAP, PRESS, SETTLE],
-            Off,
-        ),
-        ("1H while off does nothing", &[HOLD, SETTLE], Off),
-    ];
-
-    // The first pass runs hw::init too, so it doesn't count towards the loop.
+/// Switches the firmware and `ts21::torch` the same random way, and checks
+/// the LEDs match the library's level on every tick. The host tests trust
+/// the library; this checks the AVR build of it, and `hw.rs`'s pins and
+/// channels, do what it says.
+fn against_the_library(mut sim: Sim, report: &mut Report) -> Result<(), String> {
     sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
-    let mut busiest = 0;
-    for (row, steps, want) in script {
-        for &(pressed, ticks) in steps {
-            for _ in 0..ticks {
-                let took = sim.tick(pressed).map_err(|e| format!("{row}: {e}"))?;
-                busiest = busiest.max(took);
-            }
-        }
-        let leds = sim.chip.leds();
-        let light = if leds == (0, 0) { Off } else { On };
-        if light != want {
+    let mut torch = Torch::new();
+    for (tick, pressed) in random_switching(RANDOM_TICKS).into_iter().enumerate() {
+        let took = sim.tick(pressed).map_err(|e| format!("tick {tick}: {e}"))?;
+        report.loop_instructions = report.loop_instructions.max(took);
+        torch.tick(pressed);
+        let (leds, want) = (sim.chip.leds(), duty(torch.level()));
+        if leds != want {
             return Err(format!(
-                "{row}: expected the light {want:?}, but (linear, FET) duty is {leds:?}"
+                "tick {tick}: the firmware's (linear, FET) duty is {leds:?}, \
+                 but the library's level {} is {want:?}",
+                torch.level()
             ));
         }
     }
+    report.stack = report.stack.max(sim.stack());
+    Ok(())
+}
 
-    Ok(Report {
-        stack: SRAM.end - 1 - sim.lowest_sp,
-        loop_instructions: busiest,
-        loop_budget: TICK_BUDGET,
-    })
+/// What the LEDs should show for a level, as `Chip::leds` reports it.
+fn duty(level: u8) -> (u16, u16) {
+    let output = ramp::output(level);
+    (output.linear.into(), output.fet.into())
+}
+
+/// Presses and gaps of random lengths, mostly near the edges of what
+/// src/button.rs counts as a click, a hold and the end of a run of clicks.
+/// Xorshift with a fixed seed, so a failure always comes back.
+fn random_switching(ticks: usize) -> Vec<bool> {
+    let mut state: u32 = 0x5EED;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+    let (hold, release) = (u32::from(HOLD_TICKS), u32::from(RELEASE_TICKS));
+    let edges = [
+        1,
+        2,
+        4,
+        hold - 1,
+        hold,
+        hold + 1,
+        release - 1,
+        release,
+        release + 1,
+    ];
+    let mut out = Vec::with_capacity(ticks);
+    let mut pressed = false;
+    while out.len() < ticks {
+        let len = match next() % 3 {
+            0 => 1 + next() % 100,
+            _ => edges[next() as usize % edges.len()],
+        };
+        out.extend((0..len).map(|_| pressed));
+        pressed = !pressed;
+    }
+    out.truncate(ticks);
+    out
 }
 
 struct Sim {
@@ -322,6 +384,11 @@ impl Sim {
             chip: Chip::new(image),
             stack_floor: bss_end - 1,
         })
+    }
+
+    /// The most stack used so far, in bytes.
+    fn stack(&self) -> u16 {
+        SRAM.end - 1 - self.lowest_sp
     }
 
     fn step(&mut self) -> Result<(), String> {

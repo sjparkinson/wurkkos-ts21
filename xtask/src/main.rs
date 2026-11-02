@@ -13,6 +13,7 @@ mod layout;
 mod serial;
 mod sim;
 mod simulate;
+mod spec;
 mod terminal;
 mod updi;
 

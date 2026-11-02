@@ -121,8 +121,18 @@ fn ticks(duration: &str) -> Result<u16, String> {
     }
 }
 
+/// The level a fresh torch ends at after a script.
+#[cfg(test)]
+pub fn level_after(actions: &[Action]) -> u8 {
+    let mut torch = Torch::new();
+    for pressed in samples(actions) {
+        torch.tick(pressed);
+    }
+    torch.level()
+}
+
 /// The switch, one sample per tick, for a whole script.
-fn samples(actions: &[Action]) -> Vec<bool> {
+pub fn samples(actions: &[Action]) -> Vec<bool> {
     let mut out = Vec::new();
     for &action in actions {
         match action {
