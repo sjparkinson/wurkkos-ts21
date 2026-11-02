@@ -10,6 +10,7 @@
 //! handful the checks look for are decoded.
 
 use crate::elf::{DATA_SPACE, Elf, RAM, Segment};
+use crate::updi::map;
 
 /// Vector slots on the ATtiny1616, reset included. atdf.rs checks this
 /// against `regs::VECTORS` and the ATDF.
@@ -17,10 +18,10 @@ pub const VECTORS: usize = 31;
 /// CPU.CCP's I/O address. atdf.rs checks this against `regs::addr::CPU_CCP`.
 pub const CPU_CCP: u16 = 0x34;
 
-/// Where tinyAVR maps flash into data space.
-const MAPPED_FLASH: u32 = 0x8000;
-/// Flash size, and so the size of the mapped window.
-const FLASH_SIZE: u32 = 16 * 1024;
+/// Where tinyAVR maps flash into data space, and how much of it there is.
+/// updi.rs checks both against the ATDF.
+const MAPPED_FLASH: u32 = map::FLASH as u32;
+const FLASH_SIZE: u32 = map::FLASH_SIZE as u32;
 /// `reti`: 1001 0101 0001 1000.
 const RETI: u16 = 0x9518;
 
