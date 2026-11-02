@@ -8,6 +8,7 @@
 mod atdf;
 mod elf;
 mod ihex;
+mod layout;
 mod serial;
 mod updi;
 
@@ -78,7 +79,9 @@ fn build() -> Result<elf::Elf, String> {
     run(Command::new(cargo).current_dir(root()).arg("fw"))?;
     let path = root().join(ELF);
     let bytes = fs::read(&path).map_err(at(&path))?;
-    elf::Elf::parse(&bytes).map_err(at(&path))
+    let elf = elf::Elf::parse(&bytes).map_err(at(&path))?;
+    layout::check(&elf).map_err(at(&path))?;
+    Ok(elf)
 }
 
 fn hex() -> Result<(), String> {
