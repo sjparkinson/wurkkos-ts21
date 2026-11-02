@@ -25,7 +25,7 @@
 //! compares, shifts and subtracts on `u16`s.
 
 use crate::TICKS_PER_SECOND;
-use crate::ramp::LEVELS;
+use crate::ramp::{LEVELS, LINEAR_MAX};
 
 /// The 0614 build's voltage slope, out of 1024. A starting point, not a
 /// measurement of this light.
@@ -83,30 +83,52 @@ pub fn centivolts(reading: u16) -> u16 {
     quotient + OFFSET
 }
 
-/// Below this many centivolts, held for [`HOLD_TICKS`], the ceiling steps down.
-pub const STEP_DOWN_BELOW: u16 = 300;
+/// How many ticks apart the voltage samples come. The ADC alternates between
+/// the voltage and the temperature sensor every 8 ticks, so each gets a fresh
+/// reading every 16.
+pub const SAMPLE_TICKS: u16 = 16;
 
-/// Below this many centivolts, when the hold runs out, the torch turns off.
-pub const OFF_BELOW: u16 = 280;
+/// Voltage samples a second: four.
+pub const SAMPLES_PER_SECOND: u16 = TICKS_PER_SECOND / SAMPLE_TICKS;
 
-/// At or above this many centivolts, held for [`RECOVER_TICKS`], the ceiling
-/// steps back up. The 0.2 V gap to [`STEP_DOWN_BELOW`] is the hysteresis: a
-/// cell that sags to 2.9 V on the FET and rests at 3.1 V on a lower level
-/// stays put.
-pub const RECOVER_AT: u16 = 320;
+const _: () = assert!(TICKS_PER_SECOND.is_multiple_of(SAMPLE_TICKS));
 
-/// How long the filtered voltage has to stay under [`STEP_DOWN_BELOW`] before
-/// anything happens: one second, at one reading a tick.
-pub const HOLD_TICKS: u16 = TICKS_PER_SECOND;
+/// Below this many centivolts, held for [`STEP_SAMPLES`], the ceiling steps
+/// down. It's 0.11 V over [`OFF_BELOW`], so there's room to step down before
+/// cutting out.
+pub const STEP_DOWN_BELOW: u16 = 310;
 
-/// How long it has to stay at [`RECOVER_AT`] or above for each step back up.
-pub const RECOVER_TICKS: u16 = TICKS_PER_SECOND * 4;
+/// Below this many centivolts, held for [`HOLD_SAMPLES`], the torch turns off,
+/// or drops to the linear channel if it's on the FET. Stock Anduril on this
+/// light is reported to cut out at about 2.99 V, and the Wurkkos cell's
+/// minimum is 2.50 V (docs/hardware.md).
+pub const OFF_BELOW: u16 = 299;
+
+/// At or above this many centivolts, held for [`RECOVER_SAMPLES`], the
+/// ceiling steps back up. The 0.2 V gap to [`STEP_DOWN_BELOW`] is the
+/// hysteresis: a cell that sags to 3.05 V on the FET and rests at 3.25 V on a
+/// lower level stays put.
+pub const RECOVER_AT: u16 = 330;
+
+/// How long the filtered voltage has to stay under [`OFF_BELOW`] before it
+/// acts: one second.
+pub const HOLD_SAMPLES: u16 = SAMPLES_PER_SECOND;
+
+/// How long it has to stay under [`STEP_DOWN_BELOW`] for each step down: five
+/// seconds. Long enough for the cell to recover a little after the last step,
+/// the way Anduril waits about six seconds between its low-voltage
+/// step-downs.
+pub const STEP_SAMPLES: u16 = SAMPLES_PER_SECOND * 5;
+
+/// How long it has to stay at [`RECOVER_AT`] or above for each step back up:
+/// four seconds.
+pub const RECOVER_SAMPLES: u16 = SAMPLES_PER_SECOND * 4;
 
 /// How many levels each step down (or up) moves the ceiling, a tenth of the
 /// ramp.
 pub const STEP: u8 = 15;
 
-/// The low-voltage verdict for one tick.
+/// The low-voltage verdict for one sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Run no higher than this level. [`LEVELS`] means no limit.
@@ -115,27 +137,36 @@ pub enum Verdict {
     Off,
 }
 
-/// Low-voltage protection: feed it one voltage a tick and it says how bright
-/// the torch may be.
+/// Low-voltage protection: feed it each voltage sample (every
+/// [`SAMPLE_TICKS`] ticks) and it says how bright the torch may be.
 ///
-/// Readings go through a moving average (each one moves the filtered value a
-/// sixteenth of the way, a time constant of a quarter of a second at 64 Hz),
-/// and the filtered value has to stay low for a whole [`HOLD_TICKS`] before it
-/// acts, so one bad reading, or the sag as the FET comes on, does nothing.
+/// Samples go through a moving average (each one moves the filtered value an
+/// eighth of the way, a time constant of about two seconds at four samples a
+/// second), and the filtered value has to stay low for a whole second or more
+/// before it acts, so one bad reading, or the sag as the FET comes on, does
+/// nothing.
 ///
-/// Once the hold runs out, it turns the torch off if the filtered voltage is
-/// under [`OFF_BELOW`] or the ceiling has nowhere left to go, and otherwise
-/// drops the ceiling to [`STEP`] levels under whichever is lower of the
-/// ceiling and the level the torch is at. Then the hold starts again. It
-/// never steps down or turns off while the torch is off, since there's no
+/// - Under [`STEP_DOWN_BELOW`] for [`STEP_SAMPLES`], the ceiling drops to
+///   [`STEP`] levels under whichever is lower of the ceiling and the level the
+///   torch is at, or the torch turns off if that's already level 1.
+/// - Under [`OFF_BELOW`] for [`HOLD_SAMPLES`], the torch turns off if it's on
+///   the linear channel. On the FET, several amps make the cell sag a lot, so
+///   a low reading there may be a cell with plenty left: the ceiling drops to
+///   [`LINEAR_MAX`] instead, where the 350 mA regulator sags the cell much
+///   less, and the next second's samples decide.
+/// - At [`RECOVER_AT`] or above for [`RECOVER_SAMPLES`], the ceiling steps
+///   back up by [`STEP`].
+///
+/// It never steps down or turns off while the torch is off, since there's no
 /// load to sag under, but it does recover then.
 #[derive(Clone, Debug)]
 pub struct Protection {
     /// The filtered voltage in sixteenths of a centivolt. Zero until the
-    /// first reading, which seeds it.
+    /// first sample, which seeds it.
     filtered: u16,
-    low_ticks: u16,
-    high_ticks: u16,
+    low_samples: u16,
+    flat_samples: u16,
+    high_samples: u16,
     ceiling: u8,
 }
 
@@ -149,13 +180,14 @@ impl Protection {
     pub const fn new() -> Self {
         Self {
             filtered: 0,
-            low_ticks: 0,
-            high_ticks: 0,
+            low_samples: 0,
+            flat_samples: 0,
+            high_samples: 0,
             ceiling: LEVELS,
         }
     }
 
-    /// The filtered voltage in centivolts, or `None` before the first reading.
+    /// The filtered voltage in centivolts, or `None` before the first sample.
     pub fn centivolts(&self) -> Option<u16> {
         match self.filtered {
             0 => None,
@@ -163,48 +195,60 @@ impl Protection {
         }
     }
 
-    /// One tick: `centivolts` from [`centivolts`] and the level the torch is
-    /// at (`0` for off), before any ceiling.
-    pub fn tick(&mut self, centivolts: u16, level: u8) -> Verdict {
+    /// One voltage sample: `centivolts` from [`centivolts`] and the level the
+    /// torch is at (`0` for off), before any ceiling.
+    pub fn sample(&mut self, centivolts: u16, level: u8) -> Verdict {
         let voltage = self.filter(centivolts);
 
         if voltage >= RECOVER_AT {
-            self.high_ticks += 1;
-            if self.high_ticks >= RECOVER_TICKS {
-                self.high_ticks = 0;
+            self.high_samples += 1;
+            if self.high_samples >= RECOVER_SAMPLES {
+                self.high_samples = 0;
                 self.ceiling = self.ceiling.saturating_add(STEP).min(LEVELS);
             }
         } else {
-            self.high_ticks = 0;
+            self.high_samples = 0;
         }
 
-        if level == 0 || voltage >= STEP_DOWN_BELOW {
-            self.low_ticks = 0;
+        if level == 0 {
+            (self.low_samples, self.flat_samples) = (0, 0);
             return Verdict::Ceiling(self.ceiling);
         }
+        self.low_samples = match voltage < STEP_DOWN_BELOW {
+            true => self.low_samples + 1,
+            false => 0,
+        };
+        self.flat_samples = match voltage < OFF_BELOW {
+            true => self.flat_samples + 1,
+            false => 0,
+        };
 
-        self.low_ticks += 1;
-        if self.low_ticks < HOLD_TICKS {
-            return Verdict::Ceiling(self.ceiling);
-        }
-
-        self.low_ticks = 0;
         let from = self.ceiling.min(level);
-        if voltage < OFF_BELOW || from == 1 {
-            return Verdict::Off;
+        if self.flat_samples >= HOLD_SAMPLES {
+            (self.low_samples, self.flat_samples) = (0, 0);
+            if from <= LINEAR_MAX {
+                return Verdict::Off;
+            }
+            self.ceiling = LINEAR_MAX;
+        } else if self.low_samples >= STEP_SAMPLES {
+            self.low_samples = 0;
+            if from == 1 {
+                return Verdict::Off;
+            }
+            self.ceiling = from.saturating_sub(STEP).max(1);
         }
-        self.ceiling = from.saturating_sub(STEP).max(1);
         Verdict::Ceiling(self.ceiling)
     }
 
-    /// Folds a reading into the moving average and returns the result in
-    /// centivolts. Readings over 4095 cV (which a real cell can't give)
-    /// clamp, so the sum stays in a `u16`.
+    /// Folds a sample into the moving average and returns the result in
+    /// centivolts. In sixteenths, moving an eighth of the way is taking off
+    /// an eighth and adding the sample times two. Samples over 4095 cV (which
+    /// a real cell can't give) clamp, so the sum stays in a `u16`.
     fn filter(&mut self, centivolts: u16) -> u16 {
         let sample = centivolts.min(u16::MAX >> 4);
         self.filtered = match self.filtered {
             0 => (sample << 4).max(1),
-            filtered => filtered - (filtered >> 4) + sample,
+            filtered => filtered - (filtered >> 3) + (sample << 1),
         };
         self.filtered >> 4
     }
@@ -286,14 +330,28 @@ mod tests {
         assert_eq!(centivolts(0), u16::MAX);
     }
 
-    /// Runs `ticks` ticks at a steady voltage and level, and returns every
-    /// verdict.
-    fn run(lvp: &mut Protection, cv: u16, level: u8, ticks: u16) -> Vec<Verdict> {
-        (0..ticks).map(|_| lvp.tick(cv, level)).collect()
+    #[test]
+    fn samples_come_four_times_a_second() {
+        assert_eq!(SAMPLES_PER_SECOND, 4);
     }
 
-    fn last(lvp: &mut Protection, cv: u16, level: u8, ticks: u16) -> Verdict {
-        *run(lvp, cv, level, ticks).last().unwrap()
+    /// Samples in `seconds` of real time.
+    const fn secs(seconds: u16) -> u16 {
+        seconds * SAMPLES_PER_SECOND
+    }
+
+    /// Feeds `samples` samples at a steady voltage and level, and returns
+    /// every verdict.
+    fn run(lvp: &mut Protection, cv: u16, level: u8, samples: u16) -> Vec<Verdict> {
+        (0..samples).map(|_| lvp.sample(cv, level)).collect()
+    }
+
+    fn last(lvp: &mut Protection, cv: u16, level: u8, samples: u16) -> Verdict {
+        *run(lvp, cv, level, samples).last().unwrap()
+    }
+
+    fn all(verdicts: &[Verdict], expected: Verdict) -> bool {
+        verdicts.iter().all(|&v| v == expected)
     }
 
     const NONE: Verdict = Verdict::Ceiling(LEVELS);
@@ -302,191 +360,180 @@ mod tests {
     fn a_full_cell_has_no_ceiling() {
         let mut lvp = Protection::new();
         assert_eq!(lvp.centivolts(), None);
-        assert!(
-            run(&mut lvp, 410, LEVELS, 10_000)
-                .iter()
-                .all(|&v| v == NONE)
-        );
+        assert!(all(&run(&mut lvp, 410, LEVELS, secs(600)), NONE));
         assert_eq!(lvp.centivolts(), Some(410));
     }
 
     #[test]
-    fn the_first_reading_seeds_the_filter() {
+    fn the_first_sample_seeds_the_filter() {
         let mut lvp = Protection::new();
-        lvp.tick(290, 100);
+        lvp.sample(290, 100);
         assert_eq!(lvp.centivolts(), Some(290));
     }
 
     #[test]
-    fn steps_down_after_a_second_below_3_volts() {
+    fn steps_down_after_5_seconds_below_3_1_volts() {
         let mut lvp = Protection::new();
-        let verdicts = run(&mut lvp, 295, 100, HOLD_TICKS);
-        let (before, after) = verdicts.split_at(usize::from(HOLD_TICKS) - 1);
-        assert!(before.iter().all(|&v| v == NONE));
+        let verdicts = run(&mut lvp, 305, 100, secs(5));
+        let (before, after) = verdicts.split_at(usize::from(secs(5)) - 1);
+        assert!(all(before, NONE));
         assert_eq!(after, [Verdict::Ceiling(100 - STEP)]);
     }
 
     #[test]
-    fn exactly_3_volts_is_not_low() {
+    fn exactly_3_1_volts_is_not_low() {
         let mut lvp = Protection::new();
-        assert_eq!(last(&mut lvp, STEP_DOWN_BELOW, 100, 10_000), NONE);
+        assert!(all(&run(&mut lvp, STEP_DOWN_BELOW, 100, secs(600)), NONE));
     }
 
     #[test]
-    fn keeps_stepping_down_a_second_at_a_time() {
+    fn keeps_stepping_down_every_5_seconds_then_turns_off() {
         let mut lvp = Protection::new();
-        let mut ceiling = 100;
-        while ceiling > STEP {
-            ceiling -= STEP;
-            assert_eq!(
-                last(&mut lvp, 290, 100, HOLD_TICKS),
-                Verdict::Ceiling(ceiling)
-            );
+        for ceiling in [85, 70, 55, 40, 25, 10, 1] {
+            assert_eq!(last(&mut lvp, 305, 100, secs(5)), Verdict::Ceiling(ceiling));
         }
-        // 100 is 6 × 15 + 10, so the last step lands on the bottom level.
-        assert_eq!(last(&mut lvp, 290, 100, HOLD_TICKS), Verdict::Ceiling(1));
-        assert_eq!(last(&mut lvp, 290, 100, HOLD_TICKS), Verdict::Off);
+        assert_eq!(last(&mut lvp, 305, 100, secs(5)), Verdict::Off);
     }
 
     #[test]
     fn steps_from_the_level_when_it_is_under_the_ceiling() {
         let mut lvp = Protection::new();
-        assert_eq!(last(&mut lvp, 295, 40, HOLD_TICKS), Verdict::Ceiling(25));
+        assert_eq!(last(&mut lvp, 305, 40, secs(5)), Verdict::Ceiling(25));
     }
 
     #[test]
-    fn turns_off_after_a_second_below_2_8_volts() {
+    fn turns_off_after_a_second_below_2_99_volts_on_the_linear_channel() {
         let mut lvp = Protection::new();
-        let verdicts = run(&mut lvp, 275, LEVELS, HOLD_TICKS);
-        let (before, after) = verdicts.split_at(usize::from(HOLD_TICKS) - 1);
-        assert!(before.iter().all(|&v| v == NONE));
+        let verdicts = run(&mut lvp, 298, LINEAR_MAX, secs(1));
+        let (before, after) = verdicts.split_at(usize::from(secs(1)) - 1);
+        assert!(all(before, NONE));
         assert_eq!(after, [Verdict::Off]);
     }
 
     #[test]
-    fn exactly_2_8_volts_steps_down_rather_than_off() {
+    fn drops_to_the_linear_channel_first_when_on_the_fet() {
         let mut lvp = Protection::new();
+        let fet = LINEAR_MAX + 1;
         assert_eq!(
-            last(&mut lvp, OFF_BELOW, LEVELS, HOLD_TICKS),
-            Verdict::Ceiling(LEVELS - STEP)
+            last(&mut lvp, 290, fet, secs(1)),
+            Verdict::Ceiling(LINEAR_MAX)
         );
+        // If the cell recovers there, it stays on.
+        assert!(all(
+            &run(&mut lvp, 315, LINEAR_MAX, secs(60)),
+            Verdict::Ceiling(LINEAR_MAX)
+        ));
+        // If it doesn't, it turns off a second later.
+        let verdicts = run(&mut lvp, 250, LINEAR_MAX, secs(3));
+        assert!(verdicts.contains(&Verdict::Off));
+    }
+
+    #[test]
+    fn exactly_2_99_volts_steps_down_rather_than_off() {
+        let mut lvp = Protection::new();
+        let verdicts = run(&mut lvp, OFF_BELOW, 50, secs(5));
+        assert!(!verdicts.contains(&Verdict::Off));
+        assert_eq!(verdicts.last(), Some(&Verdict::Ceiling(35)));
     }
 
     #[test]
     fn one_bad_reading_does_nothing() {
         let mut lvp = Protection::new();
-        run(&mut lvp, 380, LEVELS, 100);
-        for glitch in [0, 1, 100, 279] {
-            assert_eq!(lvp.tick(glitch, LEVELS), NONE);
-            assert!(run(&mut lvp, 380, LEVELS, 1000).iter().all(|&v| v == NONE));
+        run(&mut lvp, 380, 50, secs(10));
+        for glitch in [0, 1, 100, 298] {
+            assert_eq!(lvp.sample(glitch, 50), NONE);
+            assert!(all(&run(&mut lvp, 380, 50, secs(60)), NONE));
         }
     }
 
     #[test]
-    fn a_burst_of_bad_readings_shorter_than_the_hold_does_nothing() {
+    fn half_a_second_of_zero_readings_does_nothing() {
         let mut lvp = Protection::new();
-        run(&mut lvp, 380, LEVELS, 100);
-        assert!(
-            run(&mut lvp, 0, LEVELS, HOLD_TICKS / 2)
-                .iter()
-                .all(|&v| v == NONE)
-        );
-        assert!(run(&mut lvp, 380, LEVELS, 1000).iter().all(|&v| v == NONE));
+        run(&mut lvp, 380, 50, secs(10));
+        assert!(all(&run(&mut lvp, 0, 50, secs(1) / 2), NONE));
+        assert!(all(&run(&mut lvp, 380, 50, secs(60)), NONE));
     }
 
     #[test]
-    fn the_filter_takes_a_while_to_follow_a_drop() {
+    fn the_filter_takes_a_couple_of_seconds_to_follow_a_drop() {
         let mut lvp = Protection::new();
-        run(&mut lvp, 360, LEVELS, 100);
-        let verdicts = run(&mut lvp, 250, LEVELS, 4 * HOLD_TICKS);
-        // The filtered voltage passes 3 V a few ticks in, then the hold has
-        // to run out before the light goes off.
+        run(&mut lvp, 360, 50, secs(10));
+        let verdicts = run(&mut lvp, 250, 50, secs(10));
+        // The filtered voltage passes 2.99 V a second or two in, then the
+        // hold has to run out before the light goes off.
         let off = verdicts.iter().position(|&v| v == Verdict::Off).unwrap();
-        assert!(
-            off > usize::from(HOLD_TICKS) && off < usize::from(HOLD_TICKS) + 32,
-            "{off}"
-        );
+        let off = u16::try_from(off).unwrap();
+        assert!(off > secs(2) && off < secs(3), "{off}");
     }
 
     #[test]
-    fn a_reading_back_above_3_volts_restarts_the_hold() {
+    fn a_voltage_back_above_3_1_volts_restarts_the_hold() {
         let mut lvp = Protection::new();
-        run(&mut lvp, 295, 100, HOLD_TICKS / 2);
-        // Enough good readings to lift the filtered value well over 3 V.
-        run(&mut lvp, 320, 100, 32);
+        run(&mut lvp, 305, 100, secs(3));
+        // Enough good samples to lift the filtered value over 3.1 V.
+        run(&mut lvp, 320, 100, secs(2));
         // Without the restart this would be well past the hold.
-        assert_eq!(last(&mut lvp, 295, 100, HOLD_TICKS - 2), NONE);
-        assert_eq!(last(&mut lvp, 295, 100, HOLD_TICKS), Verdict::Ceiling(85));
+        assert!(all(&run(&mut lvp, 305, 100, secs(5) - 1), NONE));
+        assert!(run(&mut lvp, 305, 100, secs(5)).contains(&Verdict::Ceiling(85)));
     }
 
     #[test]
     fn does_nothing_while_the_torch_is_off() {
         let mut lvp = Protection::new();
-        assert!(run(&mut lvp, 250, 0, 10_000).iter().all(|&v| v == NONE));
+        assert!(all(&run(&mut lvp, 250, 0, secs(600)), NONE));
         // And the hold starts from scratch when it comes on.
-        assert_eq!(last(&mut lvp, 250, 50, HOLD_TICKS - 1), NONE);
-        assert_eq!(lvp.tick(250, 50), Verdict::Off);
+        assert_eq!(last(&mut lvp, 250, 50, secs(1) - 1), NONE);
+        assert_eq!(lvp.sample(250, 50), Verdict::Off);
     }
 
     #[test]
     fn turning_off_keeps_the_ceiling() {
         let mut lvp = Protection::new();
-        assert_eq!(last(&mut lvp, 295, 60, HOLD_TICKS), Verdict::Ceiling(45));
-        assert_eq!(last(&mut lvp, 250, 45, 4 * HOLD_TICKS), Verdict::Off);
-        assert_eq!(last(&mut lvp, 290, 0, 100), Verdict::Ceiling(45));
+        assert_eq!(last(&mut lvp, 305, 60, secs(5)), Verdict::Ceiling(45));
+        assert!(run(&mut lvp, 250, 45, secs(5)).contains(&Verdict::Off));
+        assert_eq!(last(&mut lvp, 290, 0, secs(1)), Verdict::Ceiling(45));
     }
 
     #[test]
-    fn hysteresis_holds_the_ceiling_between_3_and_3_2_volts() {
+    fn hysteresis_holds_the_ceiling_between_3_1_and_3_3_volts() {
         let mut lvp = Protection::new();
-        assert_eq!(
-            last(&mut lvp, 295, LEVELS, HOLD_TICKS),
-            Verdict::Ceiling(135)
-        );
+        assert_eq!(last(&mut lvp, 305, LEVELS, secs(5)), Verdict::Ceiling(135));
         let resting = Verdict::Ceiling(135);
-        assert!(
-            run(&mut lvp, 319, 135, 10_000)
-                .iter()
-                .all(|&v| v == resting)
-        );
-        assert!(
-            run(&mut lvp, 300, 135, 10_000)
-                .iter()
-                .all(|&v| v == resting)
-        );
+        assert!(all(&run(&mut lvp, 329, 135, secs(600)), resting));
+        assert!(all(&run(&mut lvp, 310, 135, secs(600)), resting));
     }
 
     #[test]
-    fn recovers_a_step_every_four_seconds_at_3_2_volts() {
+    fn recovers_a_step_every_4_seconds_at_3_3_volts() {
         let mut lvp = Protection::new();
-        assert_eq!(last(&mut lvp, 295, 50, HOLD_TICKS), Verdict::Ceiling(35));
-        // The filter needs a few ticks to climb from 2.95 to 3.2 V.
-        let verdicts = run(&mut lvp, 330, 35, RECOVER_TICKS + 64);
+        assert_eq!(last(&mut lvp, 305, 50, secs(5)), Verdict::Ceiling(35));
+        // The filter needs a couple of seconds to climb from 3.05 to 3.3 V.
+        let verdicts = run(&mut lvp, 340, 35, secs(10));
         let up = verdicts
             .iter()
             .position(|&v| v == Verdict::Ceiling(50))
             .unwrap();
-        let first = usize::from(RECOVER_TICKS);
-        assert!(up >= first && up < first + 64, "{up}");
-        assert_eq!(last(&mut lvp, 330, 0, RECOVER_TICKS), Verdict::Ceiling(65));
+        let up = u16::try_from(up).unwrap();
+        assert!(up >= secs(4) && up < secs(7), "{up}");
+        assert_eq!(last(&mut lvp, 340, 0, secs(4)), Verdict::Ceiling(65));
         // Back to no limit, and no further.
-        assert_eq!(last(&mut lvp, 330, 0, 20 * RECOVER_TICKS), NONE);
+        assert_eq!(last(&mut lvp, 340, 0, secs(120)), NONE);
     }
 
     #[test]
-    fn readings_too_big_for_the_filter_clamp() {
+    fn samples_too_big_for_the_filter_clamp() {
         let mut lvp = Protection::new();
-        assert_eq!(last(&mut lvp, u16::MAX, LEVELS, 1000), NONE);
+        assert_eq!(last(&mut lvp, u16::MAX, LEVELS, secs(60)), NONE);
         assert_eq!(lvp.centivolts(), Some(4095));
     }
 
     #[test]
     fn a_seed_of_zero_still_counts_as_seeded() {
         let mut lvp = Protection::new();
-        lvp.tick(0, 100);
+        lvp.sample(0, 100);
         assert_eq!(lvp.centivolts(), Some(0));
-        // And the next reading averages in rather than seeding it again.
-        lvp.tick(400, 100);
-        assert_eq!(lvp.centivolts(), Some(25));
+        // And the next sample averages in rather than seeding it again.
+        lvp.sample(400, 100);
+        assert_eq!(lvp.centivolts(), Some(50));
     }
 }
