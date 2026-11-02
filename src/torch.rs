@@ -39,10 +39,34 @@ impl Torch {
     }
 }
 
+/// The last value sent to the hardware, so the loop only rewrites the
+/// timer when the output moves.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Changes<T> {
+    last: Option<T>,
+}
+
+impl<T: Copy + PartialEq> Changes<T> {
+    pub const fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// `Some(value)` the first time and whenever `value` differs from the
+    /// last one seen, `None` otherwise.
+    pub fn update(&mut self, value: T) -> Option<T> {
+        if self.last == Some(value) {
+            return None;
+        }
+        self.last = Some(value);
+        Some(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::button::RELEASE_TICKS;
+    use crate::ramp::{LEVELS, LINEAR_MAX, Output, output};
     use crate::ui::LEVEL;
 
     fn run(torch: &mut Torch, pressed: bool, ticks: u16) {
@@ -98,5 +122,40 @@ mod tests {
                 assert_eq!(torch.level(), ui.output_level());
             }
         }
+    }
+
+    #[test]
+    fn the_first_output_always_counts_as_a_change() {
+        assert_eq!(Changes::new().update(Output::OFF), Some(Output::OFF));
+        let on = output(LEVEL);
+        assert_eq!(Changes::new().update(on), Some(on));
+    }
+
+    #[test]
+    fn an_unchanged_output_is_not_a_change() {
+        let mut changes = Changes::new();
+        changes.update(output(LEVEL));
+        assert_eq!(changes.update(output(LEVEL)), None);
+        assert_eq!(changes.update(output(LEVEL)), None);
+    }
+
+    #[test]
+    fn turning_on_and_off_are_changes() {
+        let (off, on) = (output(0), output(LEVEL));
+        let mut changes = Changes::new();
+        assert_eq!(changes.update(off), Some(off));
+        assert_eq!(changes.update(off), None);
+        assert_eq!(changes.update(on), Some(on));
+        assert_eq!(changes.update(off), Some(off));
+        assert_eq!(changes.update(off), None);
+    }
+
+    #[test]
+    fn moving_between_lit_levels_is_a_change() {
+        let mut changes = Changes::new();
+        let (linear, fet) = (output(LINEAR_MAX), output(LEVELS));
+        changes.update(linear);
+        assert_eq!(changes.update(fet), Some(fet));
+        assert_eq!(changes.update(linear), Some(linear));
     }
 }

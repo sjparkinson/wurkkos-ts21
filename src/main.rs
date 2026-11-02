@@ -18,16 +18,22 @@ mod rt;
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
-    use ts21::{ramp, torch::Torch};
+    use ts21::{
+        ramp,
+        torch::{Changes, Torch},
+    };
 
     hw::init();
 
     let mut torch = Torch::new();
+    let mut changes = Changes::new();
 
     loop {
         hw::wait_for_tick();
         torch.tick(hw::switch_pressed());
-        hw::set_output(ramp::output(torch.level()));
+        if let Some(output) = changes.update(ramp::output(torch.level())) {
+            hw::set_output(output);
+        }
     }
 }
 
