@@ -50,8 +50,8 @@ const _: () = assert!(NUMERATOR / MIN_READING as u32 + OFFSET as u32 <= u16::MAX
 /// internal reference against VCC, rounded to the nearest centivolt.
 ///
 /// Readings too small for the answer to fit (zero included, which would mean
-/// VCC at infinity, so a broken read) come out as `u16::MAX`, which is safe:
-/// it never steps down or turns off.
+/// VCC at infinity, so a broken read) come out as `u16::MAX`, which isn't
+/// [`plausible`], so [`Protection`] treats it as the garbage it is.
 pub fn centivolts(reading: u16) -> u16 {
     if reading < MIN_READING {
         return u16::MAX;
@@ -128,6 +128,22 @@ pub const RECOVER_SAMPLES: u16 = SAMPLES_PER_SECOND * 4;
 /// ramp.
 pub const STEP: u8 = 15;
 
+/// Voltages a real cell can give, in centivolts. A lithium-ion cell sits
+/// between about 2.5 and 4.2 V, and this allows for the calibration being
+/// off by a few tenths either way. Outside it, the ADC's set up wrong or the
+/// read failed: a reading of zero comes out as `u16::MAX`, and four
+/// saturated conversions (the internal reference at or above VCC) as 1.78 V.
+pub const PLAUSIBLE: core::ops::RangeInclusive<u16> = 200..=460;
+
+/// Whether a voltage from [`centivolts`] could be a real cell.
+pub fn plausible(centivolts: u16) -> bool {
+    PLAUSIBLE.contains(&centivolts)
+}
+
+/// Implausible samples in a row that [`Protection`] lets go before it assumes
+/// the worst. The fourth in a row, a second's worth, acts.
+const GLITCHES: u8 = 3;
+
 /// The low-voltage verdict for one sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -159,14 +175,25 @@ pub enum Verdict {
 ///
 /// It never steps down or turns off while the torch is off, since there's no
 /// load to sag under, but it does recover then.
+///
+/// A sample that isn't [`plausible`] never reaches the filter. It can't
+/// count towards stepping back up, and it doesn't restart the holds, so a
+/// flat cell can't hide behind the odd bad reading. More than [`GLITCHES`]
+/// in a row and the ADC can't be trusted to say the cell's fine, so the
+/// ceiling drops to [`LINEAR_MAX`], on or off. It never turns the torch
+/// off: a broken reading isn't evidence of a flat cell, and the linear
+/// channel's 350 mA is gentle on one that is. Good samples at
+/// [`RECOVER_AT`] or above step it back up as usual.
 #[derive(Clone, Debug)]
 pub struct Protection {
     /// The filtered voltage in sixteenths of a centivolt. Zero until the
-    /// first sample, which seeds it.
+    /// first plausible sample, which seeds it.
     filtered: u16,
     low_samples: u16,
     flat_samples: u16,
     high_samples: u16,
+    /// Implausible samples in a row.
+    implausible: u8,
     ceiling: u8,
 }
 
@@ -183,6 +210,7 @@ impl Protection {
             low_samples: 0,
             flat_samples: 0,
             high_samples: 0,
+            implausible: 0,
             ceiling: LEVELS,
         }
     }
@@ -196,8 +224,17 @@ impl Protection {
     }
 
     /// One voltage sample: `centivolts` from [`centivolts`] and the level the
-    /// torch is at (`0` for off), before any ceiling.
+    /// torch is at (`0` for off).
     pub fn sample(&mut self, centivolts: u16, level: u8) -> Verdict {
+        if !plausible(centivolts) {
+            self.high_samples = 0;
+            self.implausible = self.implausible.saturating_add(1);
+            if self.implausible > GLITCHES {
+                self.ceiling = self.ceiling.min(LINEAR_MAX);
+            }
+            return Verdict::Ceiling(self.ceiling);
+        }
+        self.implausible = 0;
         let voltage = self.filter(centivolts);
 
         if voltage >= RECOVER_AT {
@@ -242,13 +279,12 @@ impl Protection {
 
     /// Folds a sample into the moving average and returns the result in
     /// centivolts. In sixteenths, moving an eighth of the way is taking off
-    /// an eighth and adding the sample times two. Samples over 4095 cV (which
-    /// a real cell can't give) clamp, so the sum stays in a `u16`.
+    /// an eighth and adding the sample times two. Only plausible samples get
+    /// here, so the sum stays well inside a `u16` and the seed isn't zero.
     fn filter(&mut self, centivolts: u16) -> u16 {
-        let sample = centivolts.min(u16::MAX >> 4);
         self.filtered = match self.filtered {
-            0 => (sample << 4).max(1),
-            filtered => filtered - (filtered >> 3) + (sample << 1),
+            0 => centivolts << 4,
+            filtered => filtered - (filtered >> 3) + (centivolts << 1),
         };
         self.filtered >> 4
     }
@@ -521,19 +557,87 @@ mod tests {
     }
 
     #[test]
-    fn samples_too_big_for_the_filter_clamp() {
+    fn the_filter_has_room_for_the_most_plausible_voltage() {
         let mut lvp = Protection::new();
-        assert_eq!(last(&mut lvp, u16::MAX, LEVELS, secs(60)), NONE);
-        assert_eq!(lvp.centivolts(), Some(4095));
+        assert!(u32::from(*PLAUSIBLE.end()) << 4 <= u32::from(u16::MAX));
+        assert_eq!(last(&mut lvp, *PLAUSIBLE.end(), LEVELS, secs(60)), NONE);
+        assert_eq!(lvp.centivolts(), Some(*PLAUSIBLE.end()));
     }
 
     #[test]
-    fn a_seed_of_zero_still_counts_as_seeded() {
+    fn plausible_covers_a_real_cell_and_nothing_broken() {
+        for cv in [250, 299, 310, 420, 435] {
+            assert!(plausible(cv), "{cv}");
+        }
+        // A zero reading, four saturated conversions, and either side.
+        for cv in [centivolts(0), centivolts(4 * 1023), 199, 461] {
+            assert!(!plausible(cv), "{cv}");
+        }
+    }
+
+    #[test]
+    fn implausible_samples_never_reach_the_filter() {
         let mut lvp = Protection::new();
+        lvp.sample(u16::MAX, 100);
         lvp.sample(0, 100);
-        assert_eq!(lvp.centivolts(), Some(0));
-        // And the next sample averages in rather than seeding it again.
+        assert_eq!(lvp.centivolts(), None);
         lvp.sample(400, 100);
-        assert_eq!(lvp.centivolts(), Some(50));
+        lvp.sample(u16::MAX, 100);
+        assert_eq!(lvp.centivolts(), Some(400));
+    }
+
+    #[test]
+    fn a_second_of_garbage_drops_to_the_linear_channel_and_never_off() {
+        for level in [0, 50, LINEAR_MAX, LEVELS] {
+            let mut lvp = Protection::new();
+            let verdicts = run(&mut lvp, u16::MAX, level, u16::from(GLITCHES));
+            assert!(all(&verdicts, NONE), "level {level}");
+            assert_eq!(lvp.sample(u16::MAX, level), Verdict::Ceiling(LINEAR_MAX));
+            assert!(all(
+                &run(&mut lvp, 0, level, secs(600)),
+                Verdict::Ceiling(LINEAR_MAX)
+            ));
+        }
+    }
+
+    #[test]
+    fn garbage_keeps_a_lower_ceiling() {
+        let mut lvp = Protection::new();
+        assert_eq!(last(&mut lvp, 305, 50, secs(5)), Verdict::Ceiling(35));
+        assert_eq!(last(&mut lvp, 0, 35, secs(10)), Verdict::Ceiling(35));
+    }
+
+    #[test]
+    fn good_samples_bring_it_back_up_after_garbage() {
+        let mut lvp = Protection::new();
+        run(&mut lvp, 0, LEVELS, secs(2));
+        let verdicts = run(&mut lvp, 400, LEVELS, secs(30));
+        assert!(verdicts.contains(&Verdict::Ceiling(LINEAR_MAX + STEP)));
+        assert_eq!(verdicts.last(), Some(&NONE));
+    }
+
+    #[test]
+    fn garbage_never_counts_towards_stepping_up() {
+        let mut lvp = Protection::new();
+        assert_eq!(last(&mut lvp, 305, 50, secs(5)), Verdict::Ceiling(35));
+        run(&mut lvp, 340, 35, secs(3));
+        // Every third sample bad: never four good seconds in a row.
+        for _ in 0..200 {
+            lvp.sample(340, 35);
+            lvp.sample(340, 35);
+            assert_eq!(lvp.sample(0, 35), Verdict::Ceiling(35));
+        }
+    }
+
+    #[test]
+    fn garbage_doesnt_restart_the_hold_on_a_flat_cell() {
+        let mut lvp = Protection::new();
+        let mut verdicts = Vec::new();
+        // Every other sample bad: the flat ones still add up.
+        for _ in 0..secs(2) {
+            verdicts.push(lvp.sample(290, 50));
+            verdicts.push(lvp.sample(u16::MAX, 50));
+        }
+        assert!(verdicts.contains(&Verdict::Off));
     }
 }
