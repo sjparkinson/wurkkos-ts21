@@ -72,7 +72,7 @@ Actions are pinned in `.github/workflows/actions.lock`, a [workflow lockfile](ht
 
 ## Claude Code
 
-`.claude/CLAUDE.md` has the project instructions. `.claude/agents/` holds read-only review agents (registers, AVR codegen, the simulator, the UI spec, hardware research), and `.claude/skills/` holds `/check`, `/bump-nightly` and `/fix-review`. `.claude/settings.json` denies `cargo xtask ping`, `backup`, `flash` and `restore`, so only a person drives the hardware.
+`.claude/CLAUDE.md` has the project instructions. `.claude/agents/` holds read-only review agents (registers, AVR codegen, the simulator, the UI spec, hardware research). `.claude/settings.json` denies `cargo xtask ping`, `backup`, `flash` and `restore`, so only a person drives the hardware.
 
 It also wires up two Ruby hooks (standard library only).
 

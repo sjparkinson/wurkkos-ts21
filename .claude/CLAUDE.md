@@ -13,11 +13,11 @@ cargo fw-clippy                                            # lint hw.rs and rt.r
 cargo xtask size                                           # flash/RAM use, after any firmware change
 ```
 
-The `check` skill (`/check`) runs the lot. Plain `cargo test` only tests the root package, so always pass `--workspace`.
+CONTRIBUTING.md lists every check CI runs. Plain `cargo test` only tests the root package, so always pass `--workspace`.
 
 `cargo fw`, `fw-clippy` and the xtask commands rebuild `core` with `-Zbuild-std`. The first run on a machine fetches crates from crates.io and writes to `~/.cargo` and `~/.rustup`, which the sandbox may block. If it does, rerun outside the sandbox; nothing else in this repo needs that.
 
-## Agents and skills
+## Agents
 
 Agents in `.claude/agents/` report back and never edit. Use them rather than doing the same work inline:
 
@@ -26,8 +26,6 @@ Agents in `.claude/agents/` report back and never edit. Use them rather than doi
 - `sim-checker`: after touching `xtask/src/sim.rs`, `avr.rs`, `world.rs` or `simulate.rs`, or when the simulator and the library disagree.
 - `ui-spec-checker`: after changing docs/ui.md, `src/ui.rs`, `src/limits.rs` or `src/torch.rs`.
 - `hardware-researcher`: before writing a new fact into docs/hardware.md.
-
-Skills in `.claude/skills/`: `/check` (every CI check), `/bump-nightly [date]`, and `/fix-review` (fix a review's findings with a team of agents, then open a PR).
 
 ## Working in this repo
 
