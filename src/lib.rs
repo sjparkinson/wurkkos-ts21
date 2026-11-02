@@ -8,8 +8,10 @@
 
 pub mod battery;
 pub mod button;
+pub mod gradual;
 pub mod ramp;
 pub mod temp;
+pub mod thermal;
 pub mod torch;
 pub mod ui;
 
