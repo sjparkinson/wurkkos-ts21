@@ -17,6 +17,21 @@
 //! and `hi * g` at most 65,025, and the sum is at most 65,279, so every step
 //! fits in a `u16` for any `d` at all.
 
+/// The factory calibration for this chip's temperature sensor, from
+/// `SIGROW.TEMPSENSE1` (the offset) and `SIGROW.TEMPSENSE0` (the gain).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Calibration {
+    pub offset: i8,
+    pub gain: u8,
+}
+
+impl Calibration {
+    /// Kelvin from one conversion, as [`kelvin`] works it out.
+    pub fn kelvin(self, reading: u16) -> u16 {
+        kelvin(reading, self.offset, self.gain)
+    }
+}
+
 /// Kelvin from one temperature sensor conversion, using the factory
 /// calibration from the signature row. A reading below the offset (which
 /// would mean a broken sensor or a bad read) comes out as 0 K rather than
@@ -63,6 +78,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_calibration_does_the_same_sums() {
+        let calibration = Calibration {
+            offset: -10,
+            gain: 141,
+        };
+        assert_eq!(calibration.kelvin(531), kelvin(531, -10, 141));
+        assert_eq!(calibration.kelvin(531), 298);
     }
 
     #[test]

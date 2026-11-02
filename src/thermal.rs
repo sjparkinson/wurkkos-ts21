@@ -101,6 +101,12 @@ const UP_EVERY: u8 = 4;
 /// Readings outside -40 °C to 150 °C can't be real. The part is rated to
 /// 125 °C at most, so the top leaves some slack.
 const PLAUSIBLE: core::ops::RangeInclusive<u16> = 233..=423;
+
+/// Whether a reading in kelvin could be real. Anything else is a broken
+/// sensor or a bad ADC setup.
+pub fn plausible(kelvin: u16) -> bool {
+    PLAUSIBLE.contains(&kelvin)
+}
 /// A reading further than this from the last good one is a glitch, unless
 /// more than `GLITCHES` in a row agree, and then it's believed.
 const JUMP: u16 = 6;
@@ -171,7 +177,7 @@ impl Thermal {
     /// ticks while the light's on, and the level it's at right now.
     pub fn sample(&mut self, kelvin: u16, level: u8) {
         let smooth = match self.smooth {
-            _ if !PLAUSIBLE.contains(&kelvin) => {
+            _ if !plausible(kelvin) => {
                 self.rejected = self.rejected.saturating_add(1);
                 if self.rejected > GLITCHES {
                     // The sensor's broken. Assume the worst.
