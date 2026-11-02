@@ -57,10 +57,7 @@ jobs:
             target/ts21.hex
             target/avr-none/release/ts21.elf
 
-  # Every push to main is a release. PRs merge by rebase, so main never
-  # rewinds and the commit count only goes up.
   release:
-    name: gh release
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
@@ -77,13 +74,10 @@ jobs:
           name: ts21-firmware
           path: dist
 
-      # The tag leaves off the +sha build metadata, which semver ignores
-      # when ordering anyway.
       - run: |
-          count=$(git rev-list --count HEAD)
-          gh release create "v0.1.$count" dist/ts21.hex dist/avr-none/release/ts21.elf \
+          gh release create "v0.1.$(git rev-list --count HEAD)" dist/ts21.hex dist/avr-none/release/ts21.elf \
             --target "$GITHUB_SHA" \
-            --title "0.1.$count+$(git rev-parse --short HEAD)" \
+            --title "0.1.$(git rev-list --count HEAD)+$(git rev-parse --short HEAD)" \
             --generate-notes
         env:
           GITHUB_TOKEN: ${{ github.token }}
