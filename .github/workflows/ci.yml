@@ -52,7 +52,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: ts21-firmware
+          name: wurkkos-ts21-0614
           path: |
             target/ts21.hex
             target/avr-none/release/ts21.elf
@@ -71,13 +71,16 @@ jobs:
 
       - uses: actions/download-artifact@v8.0.2
         with:
-          name: ts21-firmware
+          name: wurkkos-ts21-0614
           path: dist
 
       - run: |
-          gh release create "v0.1.$(git rev-list --count HEAD)" dist/ts21.hex dist/avr-none/release/ts21.elf \
+          version="0.1.$(git rev-list --count HEAD)"
+          mv dist/ts21.hex "dist/wurkkos-ts21-0614-$version.hex"
+          mv dist/avr-none/release/ts21.elf "dist/wurkkos-ts21-0614-$version.elf"
+          gh release create "v$version" dist/wurkkos-ts21-0614-* \
             --target "$GITHUB_SHA" \
-            --title "0.1.$(git rev-list --count HEAD)+$(git rev-parse --short HEAD)" \
+            --title "$version+$(git rev-parse --short HEAD)" \
             --generate-notes
         env:
           GITHUB_TOKEN: ${{ github.token }}
