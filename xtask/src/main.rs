@@ -14,6 +14,7 @@ mod serial;
 mod sim;
 mod simulate;
 mod spec;
+mod switching;
 mod terminal;
 mod updi;
 

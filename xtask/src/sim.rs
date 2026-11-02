@@ -37,7 +37,6 @@
 use std::iter;
 use std::ops::Range;
 
-use ts21::button::RandomSwitching;
 use ts21::ramp;
 use ts21::torch::Torch;
 
@@ -45,6 +44,7 @@ use crate::avr::{Bus, Cpu, is_two_words};
 use crate::elf::{DATA_SPACE, Elf, RAM};
 use crate::simulate;
 use crate::spec::{self, Example};
+use crate::switching::RandomSwitching;
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
