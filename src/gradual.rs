@@ -3,9 +3,9 @@
 //!
 //! It moves at most one level per tick, and you pick how many ticks each step
 //! waits for, separately going down and going up. Thermal regulation uses it
-//! for its ceiling (`src/thermal.rs`), and low-voltage step-down can use it
-//! the same way. UI changes (on, off, ramping) shouldn't go through it: they
-//! want to be instant.
+//! for its ceiling (`src/thermal.rs`), and low-voltage protection does the
+//! same with its own (`src/limits.rs`). UI changes (on, off, ramping)
+//! shouldn't go through it: they want to be instant.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gradual {

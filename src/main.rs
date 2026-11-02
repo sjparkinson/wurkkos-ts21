@@ -25,12 +25,15 @@ extern "C" fn main() -> ! {
 
     hw::init();
 
-    let mut torch = Torch::new();
+    let mut torch = Torch::new(hw::temperature_calibration());
     let mut changes = Changes::new();
 
     loop {
         hw::wait_for_tick();
-        torch.tick(hw::switch_pressed());
+        torch.tick(hw::switch_pressed(), hw::adc_result());
+        if let Some(convert) = torch.convert() {
+            hw::adc_start(convert);
+        }
         if let Some(output) = changes.update(ramp::output(torch.level())) {
             hw::set_output(output);
         }

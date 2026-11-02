@@ -50,11 +50,30 @@ impl Ui {
             (mode, _) => mode,
         };
     }
+
+    /// Off, whatever it was doing: the cell's flat. The next 1C turns it on
+    /// as usual, and low-voltage protection turns it off again if the cell's
+    /// still flat.
+    pub fn off(&mut self) {
+        self.mode = Mode::Off;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn off_turns_it_off_and_1c_still_turns_it_on() {
+        let mut ui = Ui::new();
+        ui.off();
+        assert_eq!(ui.output_level(), 0);
+        ui.handle(Event::Click(1));
+        ui.off();
+        assert_eq!(ui.mode, Mode::Off);
+        ui.handle(Event::Click(1));
+        assert_eq!(ui.output_level(), LEVEL);
+    }
 
     #[test]
     fn starts_off() {

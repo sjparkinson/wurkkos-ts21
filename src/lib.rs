@@ -9,7 +9,9 @@
 pub mod battery;
 pub mod button;
 pub mod gradual;
+pub mod limits;
 pub mod ramp;
+pub mod sensors;
 pub mod temp;
 pub mod thermal;
 pub mod torch;

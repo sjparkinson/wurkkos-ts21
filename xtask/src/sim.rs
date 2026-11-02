@@ -13,6 +13,16 @@
 //!   byte with a stale low one.
 //! - RTC.PITCTRLA isn't written while PITSTATUS.CTRLBUSY is set. The real
 //!   chip drops that write.
+//! - ADC0 only converts when it's set up for one of the two measurements the
+//!   firmware makes (the 1.5 V reference against VDD, four accumulated, or
+//!   the temperature sensor against 1.1 V with the datasheet's delays and
+//!   clock), and then reads the scripted world (`world.rs`). Starting a
+//!   conversion mid-conversion, changing its setup mid-conversion, reading
+//!   RES before RESRDY or its high byte first are errors. The first
+//!   conversion after a change of reference or input reads 0, so a firmware
+//!   that stopped throwing it away would blink at power-on and part company
+//!   with the library.
+//! - SIGROW.TEMPSENSE0 and 1 hold `world::CALIBRATION`.
 //!
 //! Touching a register it doesn't model is an error too, so new peripheral
 //! code fails here until the model learns about it.
@@ -24,8 +34,10 @@
 //! 2. The same startup code with .data and .bss moved and given contents,
 //!    because the firmware has no statics yet, so as linked both loops in
 //!    src/rt.rs run zero times.
-//! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip.
-//! 4. Twenty thousand ticks of random clicks and holds.
+//! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
+//!    with the cell, temperature or broken ADC the example scripts.
+//! 4. Twenty thousand ticks of random clicks and holds, with a good cell at
+//!    room temperature.
 //!
 //! `probe` separately runs src/bin/link_probe.rs, which has real statics,
 //! and checks it reads them from where link.x put them.
@@ -41,14 +53,15 @@ use std::iter;
 use std::ops::Range;
 
 use ts21::ramp;
-use ts21::torch::Torch;
+use ts21::sensors::Channel;
 
 use crate::avr::{Bus, Cpu, is_two_words};
 use crate::elf::{DATA_SPACE, Elf, RAM};
-use crate::simulate;
+use crate::simulate::{self, Sample};
 use crate::spec::{self, Example};
 use crate::switching::RandomSwitching;
 use crate::updi::map;
+use crate::world::{CALIBRATION, Rig, World};
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
@@ -341,37 +354,44 @@ fn ui_example(sim: Sim, example: &Example, report: &mut Report) -> Result<(), St
 fn against_the_library(sim: Sim, report: &mut Report) -> Result<(), String> {
     let samples = RandomSwitching::new(0x5EED)
         .flat_map(|(pressed, ticks)| iter::repeat_n(pressed, ticks.into()))
-        .take(RANDOM_TICKS);
+        .take(RANDOM_TICKS)
+        .map(|pressed| Sample {
+            pressed,
+            world: World::NORMAL,
+        });
     in_step(sim, samples, report).map(drop)
 }
 
-/// Feeds the same switch samples to the firmware, from just after `main`,
-/// and to `ts21::torch`, and checks the LEDs show the library's level on
-/// every tick. Returns the level it ends at.
+/// Feeds the same switch samples and ADC readings to the firmware, from just
+/// after `main`, and to `ts21::torch`, and checks the LEDs show the
+/// library's level on every tick. Returns the level it ends at.
 fn in_step(
     mut sim: Sim,
-    samples: impl IntoIterator<Item = bool>,
+    samples: impl IntoIterator<Item = Sample>,
     report: &mut Report,
 ) -> Result<u8, String> {
     sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
-    let mut torch = Torch::new();
-    for (tick, pressed) in samples.into_iter().enumerate() {
-        let took = sim.tick(pressed).map_err(|e| format!("tick {tick}: {e}"))?;
+    let mut rig = Rig::default();
+    for (tick, sample) in samples.into_iter().enumerate() {
+        sim.chip.world = sample.world;
+        let took = sim
+            .tick(sample.pressed)
+            .map_err(|e| format!("tick {tick}: {e}"))?;
         report.loop_instructions = report.loop_instructions.max(took);
-        torch.tick(pressed);
-        let output = ramp::output(torch.level());
+        rig.tick(sample.pressed, &sample.world);
+        let output = ramp::output(rig.level());
         let want = (output.linear.into(), output.fet.into());
         let leds = sim.chip.leds();
         if leds != want {
             return Err(format!(
                 "tick {tick}: the firmware's (linear, FET) duty is {leds:?}, \
                  but the library's level {} is {want:?}",
-                torch.level()
+                rig.level()
             ));
         }
     }
     report.stack = report.stack.max(sim.stack());
-    Ok(torch.level())
+    Ok(rig.level())
 }
 
 struct Sim {
@@ -464,7 +484,39 @@ struct Chip {
     wide: [u16; 4],
     /// TCA0's TEMP byte, and which register's low byte it holds.
     temp: Option<(usize, u8)>,
+    /// What the ADC measures.
+    world: World,
+    adc: Adc,
 }
+
+/// ADC0's state beyond its plain registers.
+#[derive(Default)]
+struct Adc {
+    /// The reference and input the last conversion used, to spot a switch.
+    last_setup: Option<(u8, u8, u8)>,
+    /// The result of the last conversion started.
+    result: u16,
+    /// When that conversion finishes, while its result's unread.
+    ready_at: Option<u64>,
+    /// The high byte of RES, latched into ADC0.TEMP by reading the low byte.
+    temp: Option<u8>,
+}
+
+/// Instructions a conversion takes on the simulated chip. Four accumulated
+/// conversions with the delays `hw::init` sets are about 2,600 CPU cycles,
+/// so this is roughly that, and well inside a tick, so a firmware that reads
+/// the result straight after starting a conversion finds it isn't ready.
+const CONVERSION_INSTRUCTIONS: u64 = 1_000;
+
+/// What the first conversion after a change of reference or input reads.
+/// The datasheet doesn't promise it's wrong, but Anduril finds it unstable,
+/// so the model makes it as wrong as it gets. The firmware throws it away;
+/// if it ever stopped, the power-on blink would give it away against the
+/// library, which never sees this.
+const UNSETTLED: u16 = 0;
+
+/// CPU cycles a second, from `hw::init`'s clock setup.
+const CLK_PER: u32 = 10_000_000;
 
 impl Chip {
     fn new(flash: Vec<u8>) -> Self {
@@ -480,7 +532,96 @@ impl Chip {
             ticks: 0,
             wide: [0; 4],
             temp: None,
+            world: World::NORMAL,
+            adc: Adc::default(),
         }
+    }
+
+    fn converting(&self) -> bool {
+        self.adc.ready_at.is_some_and(|at| self.now < at)
+    }
+
+    /// Starts a conversion, if the ADC's set up for one of the two
+    /// measurements the firmware makes, and works out what it'll read.
+    fn start_conversion(&mut self) -> Result<(), String> {
+        if self.converting() {
+            return Err("starts a conversion while one's still running".into());
+        }
+        let io = |r: usize| self.io[r];
+        if io(reg::ADC0_CTRLA) != regs::ADC_ENABLE {
+            return Err(format!(
+                "starts a conversion with ADC0.CTRLA {:#04x}; it wants the ADC enabled, \
+                 single conversions and 10-bit results",
+                io(reg::ADC0_CTRLA)
+            ));
+        }
+        if io(reg::VREF_CTRLB) & regs::VREF_ADC0REFEN == 0 {
+            return Err(
+                "starts a conversion with VREF.CTRLB.ADC0REFEN clear, so the reference \
+                 may still be starting up"
+                    .into(),
+            );
+        }
+        if io(reg::ADC0_CALIB) != regs::ADC_DUTYCYC_DUTY25 {
+            return Err("starts a conversion without ADC0.CALIB at 25% duty".into());
+        }
+        let ctrlc = io(reg::ADC0_CTRLC);
+        let clk_adc = CLK_PER >> (1 + u32::from(ctrlc & 0x07));
+        if !(200_000..=1_500_000).contains(&clk_adc) {
+            return Err(format!(
+                "runs the ADC at {clk_adc} Hz, outside 200 kHz to 1.5 MHz (table 36-26)"
+            ));
+        }
+        let vref = io(reg::VREF_CTRLA) & 0x70;
+        let refsel = ctrlc & 0x30;
+        let muxpos = io(reg::ADC0_MUXPOS);
+        let sampnum = io(reg::ADC0_CTRLB) & 0x07;
+        let sampcap = ctrlc & regs::ADC_SAMPCAP != 0;
+        let channel = match (muxpos, refsel, vref, sampnum) {
+            (
+                regs::ADC_MUXPOS_INTREF,
+                regs::ADC_REFSEL_VDDREF,
+                regs::VREF_ADC0REFSEL_1V5,
+                regs::ADC_SAMPNUM_ACC4,
+            ) => Channel::Voltage,
+            (
+                regs::ADC_MUXPOS_TEMPSENSE,
+                regs::ADC_REFSEL_INTREF,
+                regs::VREF_ADC0REFSEL_1V1,
+                regs::ADC_SAMPNUM_ACC1,
+            ) => {
+                // Section 30.3.2.6: SAMPCAP, and INITDLY and SAMPLEN each at
+                // least 32 µs of ADC clock.
+                let initdly = match io(reg::ADC0_CTRLD) >> 5 {
+                    0 => 0,
+                    n => 8u32 << n,
+                };
+                let samplen = u32::from(io(reg::ADC0_SAMPCTRL) & 0x1F);
+                let need = clk_adc.div_ceil(1_000_000 / 32);
+                if !sampcap || initdly < need || samplen < need {
+                    return Err(format!(
+                        "reads the temperature sensor with SAMPCAP {sampcap}, INITDLY {initdly} \
+                         and SAMPLEN {samplen}; it needs SAMPCAP and both at least {need} clocks"
+                    ));
+                }
+                Channel::Temperature
+            }
+            _ => {
+                return Err(format!(
+                    "starts a conversion that's neither measurement: MUXPOS {muxpos:#04x}, \
+                     REFSEL {refsel:#04x}, ADC0REFSEL {vref:#04x}, SAMPNUM {sampnum}"
+                ));
+            }
+        };
+        let setup = Some((vref, refsel, muxpos));
+        self.adc.result = if self.adc.last_setup == setup {
+            self.world.reading(channel)
+        } else {
+            UNSETTLED
+        };
+        self.adc.last_setup = setup;
+        self.adc.ready_at = Some(self.now + CONVERSION_INSTRUCTIONS);
+        Ok(())
     }
 
     fn sram(&self, range: &Range<u16>) -> &[u8] {
@@ -527,8 +668,29 @@ fn plain(addr: usize) -> bool {
                 | reg::RTC_PITCTRLA
                 | reg::TCA0_CTRLA
                 | reg::TCA0_CTRLB
+                | reg::VREF_CTRLA
+                | reg::VREF_CTRLB
+                | reg::ADC0_CALIB
+                | reg::ADC0_CTRLA
+                | reg::ADC0_CTRLB
+                | reg::ADC0_CTRLC
+                | reg::ADC0_CTRLD
+                | reg::ADC0_SAMPCTRL
+                | reg::ADC0_MUXPOS
         )
 }
+
+/// The registers that decide what a conversion measures. Changing one
+/// mid-conversion is a mistake the firmware shouldn't make.
+const ADC_SETUP: [usize; 7] = [
+    reg::VREF_CTRLA,
+    reg::ADC0_CTRLA,
+    reg::ADC0_CTRLB,
+    reg::ADC0_CTRLC,
+    reg::ADC0_CTRLD,
+    reg::ADC0_SAMPCTRL,
+    reg::ADC0_MUXPOS,
+];
 
 fn name(addr: usize) -> String {
     let known = [
@@ -545,6 +707,21 @@ fn name(addr: usize) -> String {
         (reg::TCA0_PERBUF, "TCA0.PERBUF"),
         (reg::TCA0_CMP0BUF, "TCA0.CMP0BUF"),
         (reg::TCA0_CMP1BUF, "TCA0.CMP1BUF"),
+        (reg::VREF_CTRLA, "VREF.CTRLA"),
+        (reg::VREF_CTRLB, "VREF.CTRLB"),
+        (reg::ADC0_CALIB, "ADC0.CALIB"),
+        (reg::ADC0_CTRLA, "ADC0.CTRLA"),
+        (reg::ADC0_CTRLB, "ADC0.CTRLB"),
+        (reg::ADC0_CTRLC, "ADC0.CTRLC"),
+        (reg::ADC0_CTRLD, "ADC0.CTRLD"),
+        (reg::ADC0_SAMPCTRL, "ADC0.SAMPCTRL"),
+        (reg::ADC0_MUXPOS, "ADC0.MUXPOS"),
+        (reg::ADC0_COMMAND, "ADC0.COMMAND"),
+        (reg::ADC0_INTFLAGS, "ADC0.INTFLAGS"),
+        (reg::ADC0_RES, "ADC0.RESL"),
+        (reg::ADC0_RES + 1, "ADC0.RESH"),
+        (reg::SIGROW_TEMPSENSE0, "SIGROW.TEMPSENSE0"),
+        (reg::SIGROW_TEMPSENSE1, "SIGROW.TEMPSENSE1"),
     ];
     known
         .iter()
@@ -585,9 +762,37 @@ impl Bus for Chip {
                     }
                     self.pit_flag = true;
                     self.ticks += 1;
+                    // A tick is 15.6 ms of real time, however few
+                    // instructions the wait took here, and a conversion is
+                    // well under one.
+                    if let Some(at) = &mut self.adc.ready_at {
+                        *at = (*at).min(self.now);
+                    }
                 }
                 Ok(regs::RTC_PI)
             }
+            reg::ADC0_INTFLAGS => {
+                let ready = self.adc.ready_at.is_some_and(|at| self.now >= at);
+                Ok(if ready { regs::ADC_RESRDY } else { 0 })
+            }
+            reg::ADC0_RES => {
+                // Reading the low byte latches the high byte into ADC0.TEMP
+                // and clears RESRDY.
+                if !self.adc.ready_at.is_some_and(|at| self.now >= at) {
+                    return Err("reads ADC0.RES with no result ready".into());
+                }
+                self.adc.ready_at = None;
+                let [lo, hi] = self.adc.result.to_le_bytes();
+                self.adc.temp = Some(hi);
+                Ok(lo)
+            }
+            _ if a == reg::ADC0_RES + 1 => self.adc.temp.take().ok_or_else(|| {
+                "reads ADC0.RES's high byte without its low byte just before, \
+                 so it gets whatever ADC0.TEMP held"
+                    .into()
+            }),
+            reg::SIGROW_TEMPSENSE0 => Ok(CALIBRATION.gain),
+            reg::SIGROW_TEMPSENSE1 => Ok(CALIBRATION.offset as u8),
             _ if plain(a) => Ok(self.io[a]),
             _ => Err(format!(
                 "reads {}, which the simulator doesn't model",
@@ -661,6 +866,20 @@ impl Bus for Chip {
                     ));
                 }
             },
+            reg::ADC0_COMMAND => {
+                if value & regs::ADC_STCONV != 0 {
+                    self.start_conversion()?;
+                }
+            }
+            reg::ADC0_INTFLAGS => {
+                // Writing a 1 clears RESRDY.
+                if value & regs::ADC_RESRDY != 0 {
+                    self.adc.ready_at = None;
+                }
+            }
+            _ if ADC_SETUP.contains(&a) && self.converting() => {
+                return Err(format!("writes {} mid-conversion", name(a)));
+            }
             _ if plain(a) => self.io[a] = value,
             _ => {
                 return Err(format!(
@@ -745,6 +964,153 @@ mod tests {
         assert_eq!(c.ticks, 2);
     }
 
+    /// Sets the ADC up the way `hw::init` and `hw::adc_start` do.
+    fn adc_setup(c: &mut Chip, channel: Channel) {
+        let w = |c: &mut Chip, r: usize, v: u8| c.write(r as u16, v).unwrap();
+        w(c, reg::VREF_CTRLB, regs::VREF_ADC0REFEN);
+        w(c, reg::ADC0_CALIB, regs::ADC_DUTYCYC_DUTY25);
+        w(c, reg::ADC0_CTRLD, regs::ADC_INITDLY_DLY32);
+        w(c, reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US);
+        w(c, reg::ADC0_CTRLA, regs::ADC_ENABLE);
+        let (vref, refsel, muxpos, sampnum) = match channel {
+            Channel::Voltage => (
+                regs::VREF_ADC0REFSEL_1V5,
+                regs::ADC_REFSEL_VDDREF,
+                regs::ADC_MUXPOS_INTREF,
+                regs::ADC_SAMPNUM_ACC4,
+            ),
+            Channel::Temperature => (
+                regs::VREF_ADC0REFSEL_1V1,
+                regs::ADC_REFSEL_INTREF,
+                regs::ADC_MUXPOS_TEMPSENSE,
+                regs::ADC_SAMPNUM_ACC1,
+            ),
+        };
+        w(c, reg::VREF_CTRLA, vref);
+        w(
+            c,
+            reg::ADC0_CTRLC,
+            regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV16 | refsel,
+        );
+        w(c, reg::ADC0_MUXPOS, muxpos);
+        w(c, reg::ADC0_CTRLB, sampnum);
+    }
+
+    /// Starts a conversion, waits it out and reads it, low byte first.
+    fn convert(c: &mut Chip) -> Result<u16, String> {
+        c.write(reg::ADC0_COMMAND as u16, regs::ADC_STCONV)?;
+        c.now += CONVERSION_INSTRUCTIONS;
+        let flags = c.read(reg::ADC0_INTFLAGS as u16)?;
+        assert_eq!(flags, regs::ADC_RESRDY);
+        let lo = c.read(reg::ADC0_RES as u16)?;
+        let hi = c.read(reg::ADC0_RES as u16 + 1)?;
+        Ok(u16::from_le_bytes([lo, hi]))
+    }
+
+    #[test]
+    fn the_adc_reads_the_world_once_it_has_settled() {
+        let mut c = chip();
+        c.world.cell = 305;
+        adc_setup(&mut c, Channel::Voltage);
+        assert_eq!(convert(&mut c), Ok(UNSETTLED), "first after a change");
+        let raw = convert(&mut c).unwrap();
+        assert_eq!(ts21::battery::centivolts(raw), 305);
+
+        adc_setup(&mut c, Channel::Temperature);
+        assert_eq!(convert(&mut c), Ok(UNSETTLED));
+        assert_eq!(CALIBRATION.kelvin(convert(&mut c).unwrap()), 298);
+    }
+
+    #[test]
+    fn the_adc_result_is_only_ready_once_the_conversion_is_done() {
+        let mut c = chip();
+        adc_setup(&mut c, Channel::Voltage);
+        c.write(reg::ADC0_COMMAND as u16, regs::ADC_STCONV).unwrap();
+        assert_eq!(c.read(reg::ADC0_INTFLAGS as u16), Ok(0));
+        assert!(c.read(reg::ADC0_RES as u16).is_err());
+        let err = c
+            .write(reg::ADC0_COMMAND as u16, regs::ADC_STCONV)
+            .unwrap_err();
+        assert!(err.contains("still running"), "{err}");
+        let err = c.write(reg::ADC0_MUXPOS as u16, 0).unwrap_err();
+        assert!(err.contains("mid-conversion"), "{err}");
+        c.now += CONVERSION_INSTRUCTIONS;
+        assert_eq!(c.read(reg::ADC0_INTFLAGS as u16), Ok(regs::ADC_RESRDY));
+        // Reading the result clears RESRDY.
+        c.read(reg::ADC0_RES as u16).unwrap();
+        c.read(reg::ADC0_RES as u16 + 1).unwrap();
+        assert_eq!(c.read(reg::ADC0_INTFLAGS as u16), Ok(0));
+    }
+
+    #[test]
+    fn the_adc_result_is_read_low_byte_first() {
+        let mut c = chip();
+        adc_setup(&mut c, Channel::Voltage);
+        convert(&mut c).unwrap();
+        c.write(reg::ADC0_COMMAND as u16, regs::ADC_STCONV).unwrap();
+        c.now += CONVERSION_INSTRUCTIONS;
+        let err = c.read(reg::ADC0_RES as u16 + 1).unwrap_err();
+        assert!(err.contains("low byte"), "{err}");
+    }
+
+    #[test]
+    fn the_adc_refuses_setups_that_measure_neither() {
+        let cases: [(&str, usize, u8); 7] = [
+            (
+                "wrong reference",
+                reg::VREF_CTRLA,
+                regs::VREF_ADC0REFSEL_1V1,
+            ),
+            ("one conversion", reg::ADC0_CTRLB, regs::ADC_SAMPNUM_ACC1),
+            ("against INTREF", reg::ADC0_CTRLC, regs::ADC_PRESC_DIV16),
+            ("ADC too fast", reg::ADC0_CTRLC, regs::ADC_REFSEL_VDDREF),
+            ("ADC off", reg::ADC0_CTRLA, 0),
+            ("reference left to start", reg::VREF_CTRLB, 0),
+            ("50% duty", reg::ADC0_CALIB, 0),
+        ];
+        for (what, register, value) in cases {
+            let mut c = chip();
+            adc_setup(&mut c, Channel::Voltage);
+            c.write(register as u16, value).unwrap();
+            assert!(convert(&mut c).is_err(), "{what}");
+        }
+        // The temperature sensor needs its delays and SAMPCAP.
+        for (register, value) in [
+            (reg::ADC0_CTRLD, 0),
+            (reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US - 1),
+            (
+                reg::ADC0_CTRLC,
+                regs::ADC_PRESC_DIV16 | regs::ADC_REFSEL_INTREF,
+            ),
+        ] {
+            let mut c = chip();
+            adc_setup(&mut c, Channel::Temperature);
+            c.write(register as u16, value).unwrap();
+            let err = convert(&mut c).unwrap_err();
+            assert!(err.contains("temperature sensor"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_stuck_adc_reads_its_number_on_both_channels() {
+        let mut c = chip();
+        c.world.stuck = Some(7);
+        for channel in [Channel::Voltage, Channel::Temperature] {
+            adc_setup(&mut c, channel);
+            convert(&mut c).unwrap();
+            assert_eq!(convert(&mut c), Ok(7));
+        }
+    }
+
+    #[test]
+    fn the_signature_row_has_the_calibration() {
+        let mut c = chip();
+        let gain = c.read(reg::SIGROW_TEMPSENSE0 as u16).unwrap();
+        let offset = c.read(reg::SIGROW_TEMPSENSE1 as u16).unwrap() as i8;
+        assert_eq!(ts21::temp::Calibration { offset, gain }, CALIBRATION);
+        assert!(c.write(reg::SIGROW_TEMPSENSE0 as u16, 0).is_err());
+    }
+
     #[test]
     fn reads_the_switch_active_low() {
         let mut c = chip();
@@ -758,8 +1124,8 @@ mod tests {
     fn refuses_registers_it_doesnt_model() {
         let mut c = chip();
         assert!(
-            c.read(0x0600).unwrap_err().contains("doesn't model"),
-            "ADC0"
+            c.read(0x0800).unwrap_err().contains("doesn't model"),
+            "USART0"
         );
         assert!(
             c.write(reg::VPORTA_IN as u16, 0).is_err(),

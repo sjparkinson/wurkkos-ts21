@@ -17,6 +17,7 @@ mod spec;
 mod switching;
 mod terminal;
 mod updi;
+mod world;
 
 use std::env;
 use std::fmt::Display;

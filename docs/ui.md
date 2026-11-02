@@ -26,12 +26,29 @@ For the first flash the UI is as small as it gets, so that when something doesn'
 
 It always comes on at level 50 of 150, which is on the linear channel. The FET never turns on.
 
+## Low battery and heat
+
+These aren't clicks, they're what the light does on its own. The Action column says what's going on, and the examples set the scene with words `cargo xtask simulate` understands: `cell:3.05V` for the cell (it starts at 3.8 V), `temp:70C` for the MCU (it starts at 25 °C) and `adc:0` for an ADC that reads 0 every time.
+
+The light runs at the lowest of the UI's level, the thermal ceiling and the battery ceiling, and both ceilings fade a level at a time rather than jump. Readings that can't be real (a voltage outside 2.00 to 4.60 V, a temperature outside -40 to 150 °C) are never taken as safe: a second of them drops that ceiling to level 75, the top of the linear channel, and never turns the light off.
+
+| Action | Does | Example | Status |
+|---|---|---|---|
+| Cell under 3.10 V for 5 s, on | Fades down 15 levels, a level a tick, and again every 5 s | `cell:3.05V 1C wait:6s` → level 35 | Done |
+| Cell still low at level 1 | Off | `cell:3.05V 1C wait:30s` → off | Done |
+| Cell under 2.99 V for 1 s, on the linear channel | Off. On the FET it fades to level 75 first, and turns off a second later if it's still low | `cell:2.9V 1C wait:2s` → off | Done |
+| 1C with a flat cell | On as usual, then off again a second later | `cell:2.9V 1C wait:2s 1C` → level 50 | Done |
+| Cell back at 3.30 V for 4 s | The battery ceiling climbs 15 levels, and again every 4 s | `cell:3.05V 1C wait:6s cell:3.4V wait:10s` → level 50 | Done |
+| MCU over 45 °C, on | Fades down towards level 75, never below it, and back up as it cools. At level 50 that's nothing yet, since 50 is under the floor; it shows once the full UI's back | `temp:70C 1C wait:60s` → level 50 | Done |
+| Garbage readings, on | Ceiling at level 75, so nothing changes at level 50 | `adc:0 1C wait:10s` → level 50 | Done |
+| Garbage readings at power-on (diagnostic) | One dim blink (level 20 for a quarter of a second) from off, about 0.15 s after the cell goes in. It means the ADC setup's wrong; it's there for the first flash | `adc:0 wait:300ms` → level 20 | Done |
+
+The thresholds and the 0614 voltage calibration are a starting point, not measured on this firmware yet; see [hardware.md](hardware.md#the-driver).
+
 ## Always on, in the background
 
 | What | Does | Status |
 |---|---|---|
-| Thermal regulation | Steps the level down when the MCU's temperature sensor says the head's too hot, and back up as it cools | Planned |
-| Low-voltage protection | Steps down as the cell runs low, then turns off before it's damaged | Planned |
 | Sleep when off | Powers down and wakes on the switch, so the light can sit in a drawer for a year | Planned |
 
-Until sleep, thermal regulation and low-voltage protection are in, this isn't firmware to carry. See the [roadmap](roadmap.md).
+Until sleep is in, this isn't firmware to carry: it busy-waits with the CPU awake and drains the cell in days. See the [roadmap](roadmap.md).

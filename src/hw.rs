@@ -17,6 +17,8 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 use ts21::ramp::{Output, PWM_TOP};
+use ts21::sensors::{Channel, Convert};
+use ts21::temp::Calibration;
 
 use crate::regs::{self, addr as reg};
 
@@ -64,6 +66,15 @@ fn write16(addr: usize, value: u16) {
     let [lo, hi] = value.to_le_bytes();
     write(addr, lo);
     write(addr + 1, hi);
+}
+
+/// Reads a 16-bit register the same way round: the low byte first, which
+/// latches the high byte into the peripheral's TEMP, then the high byte from
+/// there, so the two halves come from the same value.
+fn read16(addr: usize) -> u16 {
+    let lo = read(addr);
+    let hi = read(addr + 1);
+    u16::from_le_bytes([lo, hi])
 }
 
 /// Writes a register behind configuration change protection. The CPU only
@@ -147,6 +158,24 @@ pub fn init() {
     );
     write(reg::TCA0_CTRLA, regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE);
 
+    // ADC0 in single-conversion mode at 625 kHz, with the delays the
+    // temperature sensor needs (DS40002204A, section 30.3.2.6). Both
+    // channels use the same timing, so only the reference, the input and the
+    // accumulation change between them (`adc_start`).
+    // ADC0's reference stays on, rather than starting when each single
+    // conversion asks for it. The datasheet doesn't say how long a request
+    // lasts, and a 1.5 V reference caught starting up reads low, which
+    // reads as a fuller cell than it is. It costs a little current, which
+    // matters once the torch sleeps (roadmap stage 2), not before.
+    write(reg::VREF_CTRLB, regs::VREF_ADC0REFEN);
+    // The ATDF says CALIB resets to 50% duty, the datasheet says 25%, and
+    // 25% is what it wants at this clock (section 30.5.17), so say so.
+    write(reg::ADC0_CALIB, regs::ADC_DUTYCYC_DUTY25);
+    write(reg::ADC0_CTRLC, regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV16);
+    write(reg::ADC0_CTRLD, regs::ADC_INITDLY_DLY32);
+    write(reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US);
+    write(reg::ADC0_CTRLA, regs::ADC_ENABLE);
+
     // The RTC's periodic interrupt timer, off the internal 32.768 kHz
     // oscillator (RTC.CLKSEL's reset value) divided by 512: 64 Hz.
     while read(reg::RTC_PITSTATUS) & regs::RTC_CTRLBUSY != 0 {}
@@ -162,6 +191,56 @@ pub fn init() {
 pub fn wait_for_tick() {
     while read(reg::RTC_PITINTFLAGS) & regs::RTC_PI == 0 {}
     write(reg::RTC_PITINTFLAGS, regs::RTC_PI);
+}
+
+/// The temperature sensor's factory calibration from the signature row.
+pub fn temperature_calibration() -> Calibration {
+    Calibration {
+        offset: read(reg::SIGROW_TEMPSENSE1) as i8,
+        gain: read(reg::SIGROW_TEMPSENSE0),
+    }
+}
+
+/// Starts an ADC conversion, setting the ADC up for its channel first if
+/// asked. The setups are Anduril's (`arch/attiny1616.c`) for the voltage and
+/// the datasheet's (section 30.3.2.6) for the temperature.
+pub fn adc_start(convert: Convert) {
+    if convert.setup {
+        let (vref, refsel, muxpos, sampnum) = match convert.channel {
+            // The 1.5 V reference measured against VDD, four conversions.
+            Channel::Voltage => (
+                regs::VREF_ADC0REFSEL_1V5,
+                regs::ADC_REFSEL_VDDREF,
+                regs::ADC_MUXPOS_INTREF,
+                regs::ADC_SAMPNUM_ACC4,
+            ),
+            // The sensor against the 1.1 V reference, one conversion.
+            Channel::Temperature => (
+                regs::VREF_ADC0REFSEL_1V1,
+                regs::ADC_REFSEL_INTREF,
+                regs::ADC_MUXPOS_TEMPSENSE,
+                regs::ADC_SAMPNUM_ACC1,
+            ),
+        };
+        // Nothing else uses VREF, so DAC0REFSEL's bits can stay zero.
+        write(reg::VREF_CTRLA, vref);
+        write(
+            reg::ADC0_CTRLC,
+            regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV16 | refsel,
+        );
+        write(reg::ADC0_MUXPOS, muxpos);
+        write(reg::ADC0_CTRLB, sampnum);
+    }
+    write(reg::ADC0_COMMAND, regs::ADC_STCONV);
+}
+
+/// The last conversion's result, if it's finished and not been read yet.
+/// Reading it clears RESRDY.
+pub fn adc_result() -> Option<u16> {
+    if read(reg::ADC0_INTFLAGS) & regs::ADC_RESRDY == 0 {
+        return None;
+    }
+    Some(read16(reg::ADC0_RES))
 }
 
 pub fn switch_pressed() -> bool {

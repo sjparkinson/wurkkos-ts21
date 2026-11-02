@@ -3,7 +3,7 @@
 Rust firmware for the Wurkkos TS21 v2 torch, with a smaller UI than [Anduril](https://github.com/ToyKeeper/anduril).
 
 > [!WARNING]
-> This isn't ready to carry yet. It doesn't sleep when off (it'll flatten a cell in days), and it has no thermal regulation or low-voltage protection. On a light with a direct-drive FET and a 21700, that matters. See the [roadmap](docs/roadmap.md).
+> This isn't ready to carry yet. It doesn't sleep when off (it'll flatten a cell in days), and its thermal regulation and low-voltage protection have only run on a simulator, not a real light. On a light with a direct-drive FET and a 21700, that matters. See the [roadmap](docs/roadmap.md).
 
 ## Using it
 
