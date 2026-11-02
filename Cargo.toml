@@ -8,7 +8,8 @@ repository = "https://github.com/sjparkinson/wurkkos-ts21"
 license = "MIT"
 
 [workspace.lints.rust]
-# Only src/hw.rs, src/rt.rs and the #[unsafe(no_mangle)] on main may opt back in.
+# Only src/hw.rs, src/rt.rs, the #[unsafe(no_mangle)] on main and the no_mangle
+# items in src/bin/link_probe.rs may opt back in.
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 
@@ -28,6 +29,13 @@ license.workspace = true
 
 [[bin]]
 name = "ts21"
+test = false
+bench = false
+
+# Checks link.x and src/rt.rs with real statics. Never flashed.
+[[bin]]
+name = "link-probe"
+path = "src/bin/link_probe.rs"
 test = false
 bench = false
 

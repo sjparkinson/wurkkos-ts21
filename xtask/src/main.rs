@@ -45,6 +45,8 @@ or /dev/ttyUSB0 on Linux.
 ";
 
 const ELF: &str = "target/avr-none/release/ts21.elf";
+/// src/bin/link_probe.rs, which `cargo fw` builds alongside the firmware.
+const PROBE: &str = "target/avr-none/release/link-probe.elf";
 const HEX: &str = "target/ts21.hex";
 
 fn main() -> ExitCode {
@@ -92,6 +94,12 @@ fn build() -> Result<(elf::Elf, sim::Report), String> {
     let elf = elf::Elf::parse(&bytes).map_err(at(&path))?;
     layout::check(&elf).map_err(at(&path))?;
     let report = sim::check(&elf).map_err(|e| format!("{}: simulator: {e}", path.display()))?;
+
+    let probe = root().join(PROBE);
+    let bytes = fs::read(&probe).map_err(at(&probe))?;
+    let probe_elf = elf::Elf::parse(&bytes).map_err(at(&probe))?;
+    layout::memory(&probe_elf).map_err(at(&probe))?;
+    sim::probe(&probe_elf).map_err(|e| format!("{}: simulator: {e}", probe.display()))?;
     Ok((elf, report))
 }
 
