@@ -13,7 +13,7 @@ cargo xtask size
 cargo xtask hex
 ```
 
-The first three run on your machine's own target. `cargo fw-clippy` lints the firmware as the AVR sees it, which is the only place `src/hw.rs` and `src/rt.rs` get checked. `cargo xtask size` builds the real firmware and prints how much of the 16 KB of flash and 2 KB of RAM it uses, and `cargo xtask hex` writes the file you'd flash. CI keeps that hex and the ELF as a build artefact.
+The first three run on your machine's own target. `cargo fw-clippy` lints the firmware as the AVR sees it, which is the only place `src/hw.rs` and `src/rt.rs` get linted. `cargo xtask size` builds the real firmware, checks the linked image against what those two files assume (`xtask/src/layout.rs`: the vector table, where startup copies and zeroes memory, and that each protected-register unlock is followed straight away by its write), and prints how much of the 16 KB of flash and 2 KB of RAM it uses, and `cargo xtask hex` writes the file you'd flash. CI keeps that hex and the ELF as a build artefact.
 
 ## Layout
 

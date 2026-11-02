@@ -472,4 +472,14 @@ mod tests {
     fn vector_count_matches_the_atdf() {
         assert_eq!(regs::VECTORS as u32, Atdf::load().vectors());
     }
+
+    #[test]
+    fn layout_checks_use_the_same_constants_as_the_firmware() {
+        assert_eq!(crate::layout::VECTORS, regs::VECTORS, "vector count");
+        assert_eq!(
+            usize::from(crate::layout::CPU_CCP),
+            regs::addr::CPU_CCP,
+            "CPU.CCP"
+        );
+    }
 }
