@@ -21,6 +21,7 @@ The first three run on your machine's own target. `cargo fw-clippy` lints the fi
 src/lib.rs        the no_std library: everything testable, nothing hardware
 src/button.rs     switch samples in, clicks and holds out
 src/ramp.rs       brightness levels to PWM duty cycles
+src/temp.rs       temperature sensor readings to kelvin
 src/ui.rs         the state machine docs/ui.md describes
 src/main.rs       the firmware loop (a stub on the host)
 src/regs.rs       register addresses and bit values, checked against the ATDF

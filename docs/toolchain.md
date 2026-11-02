@@ -32,8 +32,9 @@ rust-lld: error: undefined symbol: __mulsi3
 
 I tested what does work. 8- and 16-bit multiplication, and division and remainder at every width up to 32 bits, all come from `compiler_builtins`. Multiplying constants at compile time (as `src/ramp.rs` does in a `const fn`) is fine too.
 
-So for now, keep runtime multiplication to 16 bits. If something genuinely needs a 32-bit product (the temperature sensor calibration will), these are the options, in order of preference.
+So for now, keep runtime multiplication to 16 bits. If something genuinely needs a 32-bit product, these are the options, in order of preference.
 
+1. Split one operand into bytes so each partial product fits 16 bits. When the result is shifted right by 8 anyway, as with the temperature calibration in `src/temp.rs`, the low byte's product only needs its top half and the whole thing stays in 16 bits.
 1. Do it as 16 × 16 → 32 in a small shift-and-add helper in the library, tested on the host.
 2. Write `__mulsi3` in `src/rt.rs`. libgcc's version uses a non-standard calling convention (fewer clobbered registers), so a Rust function with the C ABI isn't a safe drop-in. It would need to be assembly that matches libgcc's contract.
 3. Give in and link libgcc from avr-gcc.
