@@ -25,6 +25,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # Turns rustc, clippy, rustfmt, test panic and rust-lld errors in the
+      # log into annotations on the PR diff.
+      - run: echo "::add-matcher::.github/rust-matchers.json"
+
       # rustup reads rust-toolchain.toml and installs the pinned nightly,
       # with rust-src, rustfmt and clippy, the first time cargo runs.
       - run: rustup show active-toolchain || rustup toolchain install
