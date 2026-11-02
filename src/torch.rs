@@ -69,6 +69,22 @@ mod tests {
     }
 
     #[test]
+    fn still_turns_off_after_hours_on() {
+        let mut torch = Torch::new();
+        run(&mut torch, true, 4);
+        run(&mut torch, false, RELEASE_TICKS + 1);
+        assert_eq!(torch.level(), LEVEL);
+        // Past where button::Clicks' tick count saturates.
+        for _ in 0..4 {
+            run(&mut torch, false, u16::MAX);
+        }
+        assert_eq!(torch.level(), LEVEL);
+        run(&mut torch, true, 4);
+        run(&mut torch, false, RELEASE_TICKS + 1);
+        assert_eq!(torch.level(), 0);
+    }
+
+    #[test]
     fn matches_clicks_and_ui_run_by_hand() {
         let samples = [(true, 4), (false, 30), (true, 40), (false, 30), (true, 3)];
         let (mut torch, mut clicks, mut ui) = (Torch::new(), Clicks::new(), Ui::new());
