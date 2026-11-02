@@ -12,11 +12,23 @@
 //! click, hold), for a second unless it says otherwise (`1H:500ms`).
 //! `wait:2s` leaves the switch alone. Every click or hold is followed by
 //! enough of a pause for it to count, so `1C 1C` is two single clicks.
+//!
+//! With no script it runs live in the terminal, in real time, with the keys
+//! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
+//! `h` holds the switch down until pressed again. Where the terminal speaks
+//! the kitty keyboard protocol (see `terminal.rs`), the space bar is the
+//! switch itself: hold it to hold.
+
+use std::collections::VecDeque;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use ts21::TICKS_PER_SECOND;
 use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
-use ts21::ramp::LEVELS;
+use ts21::ramp::{self, LEVELS};
 use ts21::torch::Torch;
+
+use crate::terminal::{Input, Kind, Terminal};
 
 /// How long a scripted click holds the switch down (about 60 ms).
 const PRESS_TICKS: u16 = 4;
@@ -223,6 +235,173 @@ fn ms(ticks: u32) -> u32 {
     ticks * 1000 / u32::from(TICKS_PER_SECOND)
 }
 
+const HELP: &str = "\
+space  click (or, where the terminal reports key releases, the switch itself)
+1-9    that many quick clicks
+h      hold the switch down, or let it go
+r      start again from off
+?      these keys
+q      quit";
+
+/// Width of the brightness bar on the status line, in characters.
+const BAR: usize = 20;
+
+/// Runs the UI live in the terminal until `q` or Ctrl-C.
+pub fn interactive() -> Result<(), String> {
+    let mut terminal = Terminal::open()?;
+    let mut live = Live::new(terminal.kitty);
+    let print = |terminal: &Terminal, text: &str| {
+        for line in text.lines() {
+            terminal.write(&format!("\r\x1b[2K{line}\n"));
+        }
+    };
+    print(&terminal, HELP);
+    print(
+        &terminal,
+        if terminal.kitty {
+            "\nThis terminal reports key releases: hold space to hold the switch.\n"
+        } else {
+            "\nThis terminal can't report key releases, so use h for holds.\n"
+        },
+    );
+
+    let period = Duration::from_micros(1_000_000 / u64::from(TICKS_PER_SECOND));
+    let mut next = Instant::now();
+    let mut shown = String::new();
+    loop {
+        let Some(inputs) = terminal.poll() else {
+            return Ok(());
+        };
+        for input in inputs {
+            match live.input(input) {
+                Command::Continue => {}
+                Command::Help => print(&terminal, HELP),
+                Command::Reset => print(&terminal, "reset"),
+                Command::Quit => return Ok(()),
+            }
+        }
+        if let Some(line) = live.tick() {
+            print(&terminal, &line);
+            shown.clear();
+        }
+        let status = live.status(terminal.width);
+        if status != shown {
+            terminal.write(&format!("\r\x1b[2K{status}"));
+            shown = status;
+        }
+        // Keep to the clock, not to how long each pass took.
+        next += period;
+        thread::sleep(next.saturating_duration_since(Instant::now()));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    Continue,
+    Help,
+    Reset,
+    Quit,
+}
+
+/// A live session, minus the terminal: keys in, ticks, a status line out.
+struct Live {
+    torch: Torch,
+    log: Log,
+    now: u32,
+    /// Scripted samples from clicks, played before `held` counts.
+    queue: VecDeque<bool>,
+    /// Where the switch rests once `queue` runs out.
+    held: bool,
+    /// The last sample the torch saw.
+    pressed: bool,
+    /// Whether key releases arrive, making space the switch.
+    releases: bool,
+}
+
+impl Live {
+    fn new(releases: bool) -> Self {
+        Self {
+            torch: Torch::new(),
+            log: Log::new(),
+            now: 0,
+            queue: VecDeque::new(),
+            held: false,
+            pressed: false,
+            releases,
+        }
+    }
+
+    fn input(&mut self, input: Input) -> Command {
+        let Input::Key { key, ctrl, kind } = input else {
+            return Command::Continue;
+        };
+        match (key.to_ascii_lowercase(), ctrl, kind) {
+            ('c', true, Kind::Press) | ('q', false, Kind::Press) => return Command::Quit,
+            (' ', false, Kind::Press) if self.releases => self.held = true,
+            (' ', false, Kind::Release) if self.releases => self.held = false,
+            (' ', false, Kind::Press) => self.click(1),
+            (digit @ '1'..='9', false, Kind::Press) => self.click(digit as u8 - b'0'),
+            ('h', false, Kind::Press) => self.held = !self.held,
+            ('?', false, Kind::Press) => return Command::Help,
+            ('r', false, Kind::Press) => {
+                *self = Self::new(self.releases);
+                return Command::Reset;
+            }
+            _ => {}
+        }
+        Command::Continue
+    }
+
+    fn click(&mut self, n: u8) {
+        self.held = false;
+        self.queue.extend(clicks(n));
+    }
+
+    /// One 64 Hz tick, and a log line if it did something.
+    fn tick(&mut self) -> Option<String> {
+        self.pressed = self.queue.pop_front().unwrap_or(self.held);
+        let event = self.torch.tick(self.pressed);
+        let line = self.log.note(self.now, event, self.torch.level());
+        self.now += 1;
+        line
+    }
+
+    /// A brightness bar, the level and duty cycles, the switch and the UI's
+    /// state as `Debug` shows it, cut to fit in `width` columns.
+    fn status(&self, width: usize) -> String {
+        let level = self.torch.level();
+        let output = ramp::output(level);
+        let lit = lit(level);
+        let level_text = match level {
+            0 => "off".into(),
+            level => format!("{level}/{LEVELS}"),
+        };
+        let switch = match (self.pressed, self.held) {
+            (true, true) if !self.releases => "held",
+            (true, _) => "down",
+            (false, _) => "up",
+        };
+        let text = format!(
+            " {level_text:>7}  linear {:>3}  FET {:>3}  switch {switch:<4}  {:?}",
+            output.linear,
+            output.fet,
+            self.torch.ui()
+        );
+        let text: String = text.chars().take(width.saturating_sub(BAR + 1)).collect();
+        format!(
+            "\x1b[33m{}\x1b[2m{}\x1b[0m{text}",
+            "█".repeat(lit),
+            "░".repeat(BAR - lit)
+        )
+    }
+}
+
+/// How much of the bar a level fills: none when off, at least one block
+/// when on, and all of it at the top.
+fn lit(level: u8) -> usize {
+    (usize::from(level) * BAR).div_ceil(usize::from(LEVELS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +507,101 @@ mod tests {
         let mut log = Log::new();
         assert!(log.note(0, None, 30).unwrap().ends_with("level 30/150"));
         assert_eq!(log.note(1, None, 30), None);
+    }
+
+    fn press(key: char) -> Input {
+        Input::Key {
+            key,
+            ctrl: false,
+            kind: Kind::Press,
+        }
+    }
+
+    /// Ticks a live session `n` times and keeps the log.
+    fn ticks_of(live: &mut Live, n: u16) -> Vec<String> {
+        (0..n).filter_map(|_| live.tick()).collect()
+    }
+
+    #[test]
+    fn space_clicks_and_digits_click_that_many_times() {
+        let mut live = Live::new(false);
+        live.input(press(' '));
+        let lines = ticks_of(&mut live, 64);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("1C") && live.torch.level() == LEVEL);
+
+        live.input(press('3'));
+        let lines = ticks_of(&mut live, 64);
+        assert!(lines[0].contains("3C") && live.torch.level() == LEVEL);
+    }
+
+    #[test]
+    fn h_holds_the_switch_until_pressed_again() {
+        let mut live = Live::new(false);
+        live.input(press('h'));
+        assert!(ticks_of(&mut live, 64).is_empty());
+        assert!(live.pressed);
+        live.input(press('h'));
+        let lines = ticks_of(&mut live, 64);
+        assert!(lines[0].contains("1H, held 1.00 s"), "{lines:?}");
+        assert!(!live.pressed);
+    }
+
+    #[test]
+    fn with_key_releases_space_is_the_switch() {
+        let mut live = Live::new(true);
+        live.input(press(' '));
+        ticks_of(&mut live, 3);
+        live.input(Input::Key {
+            key: ' ',
+            ctrl: false,
+            kind: Kind::Release,
+        });
+        let lines = ticks_of(&mut live, 64);
+        assert!(lines[0].contains("1C") && live.torch.level() == LEVEL);
+
+        live.input(press(' '));
+        let hold = ticks_of(&mut live, 64);
+        assert!(hold.is_empty() && live.pressed, "{hold:?}");
+    }
+
+    #[test]
+    fn q_and_ctrl_c_quit_and_r_starts_again() {
+        let mut live = Live::new(false);
+        assert_eq!(live.input(press('q')), Command::Quit);
+        let ctrl_c = Input::Key {
+            key: 'c',
+            ctrl: true,
+            kind: Kind::Press,
+        };
+        assert_eq!(live.input(ctrl_c), Command::Quit);
+        assert_eq!(live.input(press('?')), Command::Help);
+
+        live.input(press(' '));
+        ticks_of(&mut live, 64);
+        assert_eq!(live.input(press('r')), Command::Reset);
+        assert_eq!((live.torch.level(), live.now), (0, 0));
+    }
+
+    #[test]
+    fn the_bar_is_empty_only_when_off_and_full_only_at_the_top() {
+        assert_eq!(lit(0), 0);
+        assert_eq!(lit(1), 1);
+        assert_eq!(lit(LEVELS - 1), BAR);
+        assert_eq!(lit(LEVELS), BAR);
+        assert_eq!(lit(LEVELS / 2), BAR / 2);
+    }
+
+    #[test]
+    fn the_status_line_fits_the_terminal() {
+        let mut live = Live::new(false);
+        live.input(press(' '));
+        ticks_of(&mut live, 64);
+        let status = live.status(60);
+        assert!(status.contains(&format!(" {LEVEL}/{LEVELS} ")), "{status}");
+        let visible = status.replace("\x1b[33m", "").replace("\x1b[2m", "");
+        let visible = visible.replace("\x1b[0m", "");
+        assert_eq!(visible.chars().count(), 59);
     }
 
     #[test]
