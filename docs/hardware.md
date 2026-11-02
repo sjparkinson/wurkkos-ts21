@@ -35,6 +35,7 @@ The 0614 calibration is confirmed to within 0.1 V at 3.57 to 4.08 V on a real TS
 | Multimeter | Anduril battcheck | What Anduril read |
 |---|---|---|
 | 4.084 V | 4.1 | 4.10 V or more, so at least 0.016 V high |
+| 3.953 V | 3.9 | 3.90 to 3.99 V |
 | 3.565 V | 3.5 | 3.50 to 3.59 V |
 
 Anduril's battcheck truncates to tenths rather than rounding (`blink_num(voltage16 / dV16)` in [`fsm/adc.c`](https://github.com/ToyKeeper/anduril/blob/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/fsm/adc.c)), hence the ranges. Both are within 0.1 V, and the top one reads a little high, the unsafe direction for a cut-off, though by under a tenth. Readings to the hundredths from the stock firmware are still to come, and nothing's been measured under load or near the 2.99 V cut-off, so the constants stay as they are until then. This firmware will need checking too: its own reading against a multimeter, once it can report one.
