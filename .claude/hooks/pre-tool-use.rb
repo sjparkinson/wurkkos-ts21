@@ -11,7 +11,9 @@ require 'open3'
 TYPES = %w[feat fix docs refactor test ci build perf style chore revert].freeze
 CONVENTIONAL = /\A(?:#{TYPES.join('|')})(?:\([a-z0-9._\/-]+\))?!?: \S/
 
-COMMIT = /(?:\A|[;&|(]\s*)git\s+(?:-\S+\s+(?:\S+\s+)?)*commit\b/
+# An option's value can't start with `-`, so each token matches only one way and
+# a long run of flags can't backtrack exponentially.
+COMMIT = /(?:\A|[;&|(]\s*)git\s+(?:-\S+\s+(?:[^\s-]\S*\s+)?)*commit\b/
 HEREDOC = /<<-?\s*['"]?(\w+)['"]?\n(.*?)\n\s*\1\b/m
 QUOTED = /(?:-m|--message)(?:\s+|=)(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/
 
