@@ -28,7 +28,7 @@ cargo xtask size                                           # flash/RAM use, afte
 - **docs/ui.md is the UI spec.** Change it in the same commit as `src/ui.rs`, add a test in `src/ui.rs` for every row you add, and give the row an Example script (`xtask/src/spec.rs` runs them against the library and the firmware).
 - **Tick off docs/roadmap.md** in the commit that does the work.
 - **Anduril is GPL-3.0.** Read it for facts about the hardware (pins, calibration, timings) and cite the file. Don't copy its code or its ramp tables into this MIT repo.
-- **No runtime 32- or 64-bit multiplication.** There's no hardware multiplier and no libgcc, so it fails to link with `undefined symbol: __mulsi3`. Host tests won't catch it; `cargo fw` will. 16-bit multiplies, all divisions, and `const fn` maths are fine. docs/toolchain.md has the options.
+- **No runtime 32- or 64-bit multiplication.** The chip has an 8×8 hardware multiplier, so 8- and 16-bit multiplies compile to `mul` instructions, but there's no libgcc, so anything wider fails to link with `undefined symbol: __mulsi3`. That includes dividing a `u16` by a constant that isn't a power of two (`x / 10`, `x % 10`), which LLVM turns into a 32-bit multiply. Host tests won't catch it; `cargo fw` will. 8-bit maths, 16-bit multiplies, division by a runtime value, and `const fn` maths are fine. docs/toolchain.md has the options.
 - **Flash is 16 KB and RAM is 2 KB.** Check `cargo xtask size` after changes. No `core::fmt` in the firmware (it pulls in kilobytes), and no floats.
 - **Mark uncertainty.** docs/hardware.md labels facts as confirmed or likely. Keep doing that; don't promote a guess to a fact.
 

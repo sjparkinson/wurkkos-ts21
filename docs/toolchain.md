@@ -24,15 +24,17 @@ How Rust gets onto an ATtiny1616 here, and why it's put together this way.
 
 ### 32-bit multiplication
 
-The rustc book says `avr-none` needs avr-gcc "because a couple of intrinsics (like 32-bit multiplication) rely on libgcc". That's true. The ATtiny1616 has no hardware multiplier, and LLVM lowers a runtime `u32` or `u64` multiply to a call to `__mulsi3`, which `compiler_builtins` doesn't provide for AVR. Without libgcc the link fails with this.
+The rustc book says `avr-none` needs avr-gcc "because a couple of intrinsics (like 32-bit multiplication) rely on libgcc". That's true. The ATtiny1616 does have a hardware multiplier (see [hardware.md](hardware.md)), but it's 8×8, and LLVM lowers a runtime `u32` or `u64` multiply to a call to `__mulsi3`, which `compiler_builtins` doesn't provide for AVR. Without libgcc the link fails with this.
 
 ```
 rust-lld: error: undefined symbol: __mulsi3
 ```
 
-I tested what does work. 8- and 16-bit multiplication, and division and remainder at every width up to 32 bits, all come from `compiler_builtins`. Multiplying constants at compile time (as `src/ramp.rs` does in a `const fn`) is fine too.
+The one that catches you out is dividing a `u16` by a constant. LLVM swaps `x / 10` and `x % 10` for a multiply by a magic number, done in 32 bits, so it calls `__mulsi3` too. I checked this on the nightly-2026-09-23 build: `x % 7` on a `u16` fails to link, and `x % core::hint::black_box(7)` links. Powers of two are shifts, so they're fine.
 
-So for now, keep runtime multiplication to 16 bits. If something genuinely needs a 32-bit product, these are the options, in order of preference.
+I tested what does work. 8- and 16-bit multiplication compile to `mul` and `muls` inline. So does dividing a `u8` by a constant (`x % 10` is a `mul`, a shift and a `muls`). Division and remainder by a runtime value, at every width up to 32 bits, come from `compiler_builtins`. Multiplying constants at compile time (as `src/ramp.rs` does in a `const fn`) is fine too.
+
+So for now, keep runtime multiplication to 16 bits, and divide a `u16` only by a power of two or a runtime value. If something genuinely needs a 32-bit product, these are the options, in order of preference.
 
 1. Split one operand into bytes so each partial product fits 16 bits. When the result is shifted right by 8 anyway, as with the temperature calibration in `src/temp.rs`, the low byte's product only needs its top half and the whole thing stays in 16 bits.
 1. Do it as 16 × 16 → 32 in a small shift-and-add helper in the library, tested on the host.
@@ -54,7 +56,7 @@ Each has a comment where it lives. Remove it when a nightly makes it unnecessary
 | `.cargo/config.toml` | `--cfg no_fp_fmt_parse` | `core`'s float formatting needs a bignum type that only exists for 32- and 64-bit pointers on the pinned nightly, so it fails to compile for AVR. The firmware never formats floats, so cutting it out costs nothing. |
 | `src/main.rs` | `#![feature(asm_experimental_arch)]` | `asm!` and `global_asm!` on AVR aren't stable. |
 | `Cargo.toml` | `panic = "abort"` in both profiles | AVR can't unwind. |
-| Library code | No runtime `u32`/`u64` multiplication | There's no `__mulsi3` without libgcc. See above. |
+| Library code | No runtime `u32`/`u64` multiplication, and no `u16` division by a constant that isn't a power of two | There's no `__mulsi3` without libgcc. See above. |
 | `xtask` | Its own ELF-to-HEX conversion | The `rust-objcopy` in the toolchain directory is rustc's private copy and won't run on its own. `llvm-tools` has a working `llvm-objcopy`, but that's one more thing to install for every flash, and `xtask` needs to parse the ELF to program it anyway. |
 
 ## Looking inside the ELF
