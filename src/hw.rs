@@ -29,15 +29,14 @@ const AUX: u8 = 5; // PB5
 const PORTB_OUTPUTS: u8 = 1 << FET | 1 << LINEAR | 1 << AUX;
 const PORTB_PINS: u8 = 6;
 
-// How software talks to the hardware: every peripheral (the ports, the
-// timers, the clock controller) exposes its settings as bytes at fixed
-// addresses in the same address space as SRAM. Storing a byte at, say,
-// `VPORTB_DIR` doesn't put it in memory; it flips the direction of PORTB's
-// pins. Loading from `VPORTA_IN` reads the voltage on PORTA's pins right
+// Every peripheral (the ports, the timers, the clock controller) exposes
+// its settings as bytes at fixed addresses, in the same address space as
+// SRAM. Storing a byte at `VPORTB_DIR` doesn't put it in memory, it flips
+// the direction of PORTB's pins. Loading from `VPORTA_IN` reads the voltage on PORTA's pins right
 // now. These two helpers are the only way the rest of the file does it.
 //
 // They're `volatile` because the compiler would otherwise treat these as
-// ordinary memory: it could drop a write nobody reads back, or read once
+// ordinary memory, and could drop a write nobody reads back or read once
 // and reuse the value in a loop. `read_volatile` and `write_volatile`
 // promise each access happens, in order, exactly as written.
 
@@ -101,9 +100,9 @@ fn protected_write(addr: usize, value: u8) {
             // The target address has to be in Z specifically, because
             // that's what `st Z` reads.
             in("Z") addr as u16,
-            // Promises to the compiler, which it uses to optimise around
-            // the block: this doesn't touch the stack, and neither `out`
-            // nor `st` changes the status flags in SREG.
+            // Promises the compiler can optimise around. The block doesn't
+            // touch the stack, and neither `out` nor `st` changes the status
+            // flags in SREG.
             options(nostack, preserves_flags),
         );
     }
