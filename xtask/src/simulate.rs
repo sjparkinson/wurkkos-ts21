@@ -231,6 +231,7 @@ pub fn run(actions: &[Action]) -> Run {
         let event = rig.tick(sample.pressed, &sample.world);
         lines.extend(log.note(now, event, rig.level()));
     }
+    lines.extend(log.settle());
     Run {
         lines,
         ticks: samples.len() as u32,
@@ -250,18 +251,85 @@ pub fn script(words: &[&str]) -> Result<(), String> {
 
 /// Turns ticks into log lines: one per click, one per hold (when it ends,
 /// not every tick it's held), and one for any change of level that no
-/// click or hold explains.
+/// click or hold explains. A run of one-level steps a tick apart, all the
+/// same way, is a fade, and gets one line when it stops.
 #[derive(Default)]
 struct Log {
     level: u8,
     /// The tick the press that's being held started on, and the level
     /// before it.
     hold: Option<(u32, u8)>,
+    fade: Option<Fade>,
+}
+
+/// A fade in progress: the tick of its first and latest steps, and the
+/// level before it and now.
+struct Fade {
+    start: u32,
+    last: u32,
+    from: u8,
+    to: u8,
+}
+
+impl Fade {
+    /// Whether a step from `before` to `level` on tick `now` carries on.
+    fn continues(&self, now: u32, before: u8, level: u8) -> bool {
+        self.last + 1 == now && self.to == before && (level > before) == (self.to > self.from)
+    }
 }
 
 impl Log {
-    fn note(&mut self, now: u32, event: Option<Event>, level: u8) -> Option<String> {
+    /// The lines this tick ends up with: usually none, sometimes a fade that
+    /// just stopped and the thing that stopped it.
+    fn note(&mut self, now: u32, event: Option<Event>, level: u8) -> Vec<String> {
         let before = std::mem::replace(&mut self.level, level);
+        let quiet = event.is_none() && self.hold.is_none();
+        if quiet && level.abs_diff(before) == 1 {
+            if let Some(fade) = &mut self.fade
+                && fade.continues(now, before, level)
+            {
+                fade.last = now;
+                fade.to = level;
+                return Vec::new();
+            }
+            let stopped = self.settle();
+            self.fade = Some(Fade {
+                start: now,
+                last: now,
+                from: before,
+                to: level,
+            });
+            return stopped.into_iter().collect();
+        }
+        let mut lines: Vec<String> = self.settle().into_iter().collect();
+        lines.extend(self.line(now, event, before, level));
+        lines
+    }
+
+    /// The line for a fade that's stopped or been interrupted, if there was
+    /// one. A single step shows as a plain change of level.
+    fn settle(&mut self) -> Option<String> {
+        let Fade {
+            start,
+            last,
+            from,
+            to,
+        } = self.fade.take()?;
+        if from.abs_diff(to) == 1 {
+            return Some(format!("{}  {:<16} → {}", Seconds(start), "", Level(to)));
+        }
+        let over = Seconds(last + 1 - start).to_string();
+        Some(
+            format!(
+                "{}  {:<16} → {}",
+                Seconds(start),
+                format!("fade from {:#}", Level(from)),
+                Level(to)
+            ) + &format!(" over {}", over.trim_start()),
+        )
+    }
+
+    fn line(&mut self, now: u32, event: Option<Event>, before: u8, level: u8) -> Option<String> {
         let (what, before) = match event {
             Some(Event::Click(n)) => (format!("{n}C"), before),
             Some(Event::Hold { ticks, .. }) => {
@@ -416,9 +484,9 @@ impl Live {
     fn tick(&mut self) -> Option<String> {
         self.pressed = self.queue.pop_front().unwrap_or(self.held);
         let event = self.torch.tick(self.pressed, &World::NORMAL);
-        let line = self.log.note(self.now, event, self.torch.level());
+        let lines = self.log.note(self.now, event, self.torch.level());
         self.now += 1;
-        line
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 
     /// A brightness bar, the level and duty cycles, the switch and the UI's
@@ -545,12 +613,12 @@ mod tests {
         for ticks in 0..10 {
             let hold = Event::Hold { clicks: 1, ticks };
             let now = u32::from(HOLD_TICKS + ticks);
-            assert_eq!(log.note(now, Some(hold), 0), None);
+            assert!(log.note(now, Some(hold), 0).is_empty());
         }
         let now = u32::from(HOLD_TICKS) + 10;
         let line = log
             .note(now, Some(Event::Release { clicks: 1 }), 0)
-            .unwrap();
+            .remove(0);
         let held = Seconds(now).to_string();
         assert!(
             line.contains(&format!("2H, held {}", held.trim_start())),
@@ -561,8 +629,67 @@ mod tests {
     #[test]
     fn logs_a_change_of_level_with_no_event() {
         let mut log = Log::default();
-        assert!(log.note(0, None, 30).unwrap().ends_with("level 30/150"));
-        assert_eq!(log.note(1, None, 30), None);
+        assert!(log.note(0, None, 30)[0].ends_with("level 30/150"));
+        assert!(log.note(1, None, 30).is_empty());
+        // A lone one-level step shows once the next tick says it's alone.
+        assert!(log.note(2, None, 31).is_empty());
+        let lines = log.note(3, None, 31);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with(&Seconds(2).to_string()), "{lines:?}");
+        assert!(lines[0].ends_with("level 31/150"), "{lines:?}");
+    }
+
+    #[test]
+    fn logs_a_fade_as_one_line_when_it_stops() {
+        let mut log = Log::default();
+        log.note(0, None, 150);
+        for (now, level) in (1..).zip((140..150).rev()) {
+            assert!(log.note(now, None, level).is_empty(), "tick {now}");
+        }
+        let lines = log.note(11, None, 140);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            lines[0],
+            format!(
+                "{}  fade from 150/150 → level 140/150 over 0.15 s",
+                Seconds(1)
+            )
+        );
+    }
+
+    #[test]
+    fn a_click_or_a_turn_stops_a_fade() {
+        let mut log = Log::default();
+        log.note(0, None, 10);
+        log.note(1, None, 9);
+        log.note(2, None, 8);
+        // Turning round starts a new fade.
+        let lines = log.note(3, None, 9);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("fade from 10/150 → level 8/150 "),
+            "{lines:?}"
+        );
+        log.note(4, None, 10);
+        let lines = log.note(5, Some(Event::Click(1)), 0);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].contains("fade from 8/150  → level 10/150 "),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("1C") && lines[1].ends_with("off"),
+            "{lines:?}"
+        );
+        assert_eq!(log.settle(), None);
+    }
+
+    #[test]
+    fn a_low_cell_logs_a_line_per_step_down() {
+        let lines = script("cell:3.05V 1C wait:11s").lines;
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert!(lines[1].contains("fade from 50/150 → level 35/150 over"));
+        assert!(lines[2].contains("fade from 35/150 → level 20/150 over"));
     }
 
     /// Ticks a live session `n` times and keeps the log.
