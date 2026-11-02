@@ -15,9 +15,7 @@
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
-//! `h` holds the switch down until pressed again. Where the terminal speaks
-//! the kitty keyboard protocol (see `terminal.rs`), the space bar is the
-//! switch itself: hold it to hold.
+//! `h` holds the switch down until pressed again.
 
 use std::collections::VecDeque;
 use std::thread;
@@ -28,7 +26,7 @@ use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
 use ts21::torch::Torch;
 
-use crate::terminal::{Input, Kind, Terminal};
+use crate::terminal::{Key, Terminal};
 
 /// How long a scripted click holds the switch down (about 60 ms).
 const PRESS_TICKS: u16 = 4;
@@ -236,9 +234,10 @@ fn ms(ticks: u32) -> u32 {
 }
 
 const HELP: &str = "\
-space  click (or, where the terminal reports key releases, the switch itself)
+space  click
 1-9    that many quick clicks
-h      hold the switch down, or let it go
+h      hold the switch down, or let it go (terminals can't report a key
+       being let go, so holding a key down won't do)
 r      start again from off
 ?      these keys
 q      quit";
@@ -249,31 +248,23 @@ const BAR: usize = 20;
 /// Runs the UI live in the terminal until `q` or Ctrl-C.
 pub fn interactive() -> Result<(), String> {
     let mut terminal = Terminal::open()?;
-    let mut live = Live::new(terminal.kitty);
+    let mut live = Live::new();
     let print = |terminal: &Terminal, text: &str| {
         for line in text.lines() {
             terminal.write(&format!("\r\x1b[2K{line}\n"));
         }
     };
-    print(&terminal, HELP);
-    print(
-        &terminal,
-        if terminal.kitty {
-            "\nThis terminal reports key releases: hold space to hold the switch.\n"
-        } else {
-            "\nThis terminal can't report key releases, so use h for holds.\n"
-        },
-    );
+    print(&terminal, &format!("{HELP}\n"));
 
     let period = Duration::from_micros(1_000_000 / u64::from(TICKS_PER_SECOND));
     let mut next = Instant::now();
     let mut shown = String::new();
     loop {
-        let Some(inputs) = terminal.poll() else {
+        let Some(keys) = terminal.poll() else {
             return Ok(());
         };
-        for input in inputs {
-            match live.input(input) {
+        for key in keys {
+            match live.key(key) {
                 Command::Continue => {}
                 Command::Help => print(&terminal, HELP),
                 Command::Reset => print(&terminal, "reset"),
@@ -314,12 +305,10 @@ struct Live {
     held: bool,
     /// The last sample the torch saw.
     pressed: bool,
-    /// Whether key releases arrive, making space the switch.
-    releases: bool,
 }
 
 impl Live {
-    fn new(releases: bool) -> Self {
+    fn new() -> Self {
         Self {
             torch: Torch::new(),
             log: Log::new(),
@@ -327,24 +316,18 @@ impl Live {
             queue: VecDeque::new(),
             held: false,
             pressed: false,
-            releases,
         }
     }
 
-    fn input(&mut self, input: Input) -> Command {
-        let Input::Key { key, ctrl, kind } = input else {
-            return Command::Continue;
-        };
-        match (key.to_ascii_lowercase(), ctrl, kind) {
-            ('c', true, Kind::Press) | ('q', false, Kind::Press) => return Command::Quit,
-            (' ', false, Kind::Press) if self.releases => self.held = true,
-            (' ', false, Kind::Release) if self.releases => self.held = false,
-            (' ', false, Kind::Press) => self.click(1),
-            (digit @ '1'..='9', false, Kind::Press) => self.click(digit as u8 - b'0'),
-            ('h', false, Kind::Press) => self.held = !self.held,
-            ('?', false, Kind::Press) => return Command::Help,
-            ('r', false, Kind::Press) => {
-                *self = Self::new(self.releases);
+    fn key(&mut self, Key { key, ctrl }: Key) -> Command {
+        match (key.to_ascii_lowercase(), ctrl) {
+            ('c', true) | ('q', false) => return Command::Quit,
+            (' ', false) => self.click(1),
+            (digit @ '1'..='9', false) => self.click(digit as u8 - b'0'),
+            ('h', false) => self.held = !self.held,
+            ('?', false) => return Command::Help,
+            ('r', false) => {
+                *self = Self::new();
                 return Command::Reset;
             }
             _ => {}
@@ -377,7 +360,7 @@ impl Live {
             level => format!("{level}/{LEVELS}"),
         };
         let switch = match (self.pressed, self.held) {
-            (true, true) if !self.releases => "held",
+            (true, true) => "held",
             (true, _) => "down",
             (false, _) => "up",
         };
@@ -509,12 +492,8 @@ mod tests {
         assert_eq!(log.note(1, None, 30), None);
     }
 
-    fn press(key: char) -> Input {
-        Input::Key {
-            key,
-            ctrl: false,
-            kind: Kind::Press,
-        }
+    fn press(key: char) -> Key {
+        Key { key, ctrl: false }
     }
 
     /// Ticks a live session `n` times and keeps the log.
@@ -524,62 +503,43 @@ mod tests {
 
     #[test]
     fn space_clicks_and_digits_click_that_many_times() {
-        let mut live = Live::new(false);
-        live.input(press(' '));
+        let mut live = Live::new();
+        live.key(press(' '));
         let lines = ticks_of(&mut live, 64);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("1C") && live.torch.level() == LEVEL);
 
-        live.input(press('3'));
+        live.key(press('3'));
         let lines = ticks_of(&mut live, 64);
         assert!(lines[0].contains("3C") && live.torch.level() == LEVEL);
     }
 
     #[test]
     fn h_holds_the_switch_until_pressed_again() {
-        let mut live = Live::new(false);
-        live.input(press('h'));
+        let mut live = Live::new();
+        live.key(press('h'));
         assert!(ticks_of(&mut live, 64).is_empty());
         assert!(live.pressed);
-        live.input(press('h'));
+        live.key(press('h'));
         let lines = ticks_of(&mut live, 64);
         assert!(lines[0].contains("1H, held 1.00 s"), "{lines:?}");
         assert!(!live.pressed);
     }
 
     #[test]
-    fn with_key_releases_space_is_the_switch() {
-        let mut live = Live::new(true);
-        live.input(press(' '));
-        ticks_of(&mut live, 3);
-        live.input(Input::Key {
-            key: ' ',
-            ctrl: false,
-            kind: Kind::Release,
-        });
-        let lines = ticks_of(&mut live, 64);
-        assert!(lines[0].contains("1C") && live.torch.level() == LEVEL);
-
-        live.input(press(' '));
-        let hold = ticks_of(&mut live, 64);
-        assert!(hold.is_empty() && live.pressed, "{hold:?}");
-    }
-
-    #[test]
     fn q_and_ctrl_c_quit_and_r_starts_again() {
-        let mut live = Live::new(false);
-        assert_eq!(live.input(press('q')), Command::Quit);
-        let ctrl_c = Input::Key {
+        let mut live = Live::new();
+        assert_eq!(live.key(press('q')), Command::Quit);
+        let ctrl_c = Key {
             key: 'c',
             ctrl: true,
-            kind: Kind::Press,
         };
-        assert_eq!(live.input(ctrl_c), Command::Quit);
-        assert_eq!(live.input(press('?')), Command::Help);
+        assert_eq!(live.key(ctrl_c), Command::Quit);
+        assert_eq!(live.key(press('?')), Command::Help);
 
-        live.input(press(' '));
+        live.key(press(' '));
         ticks_of(&mut live, 64);
-        assert_eq!(live.input(press('r')), Command::Reset);
+        assert_eq!(live.key(press('r')), Command::Reset);
         assert_eq!((live.torch.level(), live.now), (0, 0));
     }
 
@@ -594,8 +554,8 @@ mod tests {
 
     #[test]
     fn the_status_line_fits_the_terminal() {
-        let mut live = Live::new(false);
-        live.input(press(' '));
+        let mut live = Live::new();
+        live.key(press(' '));
         ticks_of(&mut live, 64);
         let status = live.status(60);
         assert!(status.contains(&format!(" {LEVEL}/{LEVELS} ")), "{status}");
