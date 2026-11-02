@@ -22,6 +22,7 @@ src/lib.rs        the no_std library: everything testable, nothing hardware
 src/button.rs     switch samples in, clicks and holds out
 src/ramp.rs       brightness levels to PWM duty cycles
 src/temp.rs       temperature sensor readings to kelvin
+src/battery.rs    battery readings to centivolts, and low-voltage protection
 src/ui.rs         the state machine docs/ui.md describes
 src/torch.rs      one pass of the firmware loop: switch sample in, level out
 src/main.rs       the firmware loop (a stub on the host)

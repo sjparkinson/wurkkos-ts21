@@ -6,6 +6,7 @@
 
 #![no_std]
 
+pub mod battery;
 pub mod button;
 pub mod ramp;
 pub mod temp;
