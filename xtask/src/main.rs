@@ -211,6 +211,21 @@ fn program(port: &str, flash: &[u8], eeprom: Option<&[u8]>) -> Result<(), String
     }
 
     let mut p = connect_for_programming(port)?;
+    let written = write_and_verify(&mut p, flash, eeprom);
+    // Leave programming mode even after a failure, so the chip isn't held in
+    // it until the next power cycle. The first error is the one to report.
+    let left = p.leave();
+    written?;
+    left?;
+    eprintln!("verified and restarted");
+    Ok(())
+}
+
+fn write_and_verify(
+    p: &mut Programmer<Port>,
+    flash: &[u8],
+    eeprom: Option<&[u8]>,
+) -> Result<(), String> {
     eprintln!("erasing and writing {} bytes of flash", flash.len());
     p.erase_and_write_flash(flash)?;
     p.verify(map::FLASH, flash)?;
@@ -219,8 +234,6 @@ fn program(port: &str, flash: &[u8], eeprom: Option<&[u8]>) -> Result<(), String
         p.write(map::EEPROM, map::EEPROM_PAGE, eeprom)?;
         p.verify(map::EEPROM, eeprom)?;
     }
-    p.leave()?;
-    eprintln!("verified and restarted");
     Ok(())
 }
 

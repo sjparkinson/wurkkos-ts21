@@ -213,25 +213,40 @@ impl<W: Wire> Programmer<W> {
     /// The erase and the write stay in one call because a page write can only
     /// clear bits: over flash that isn't blank, it ANDs the new data into the
     /// old. Follow with [`Self::verify`], which catches an erase that didn't
-    /// take.
+    /// take. Refuses an image bigger than flash before erasing anything.
     pub fn erase_and_write_flash(&mut self, data: &[u8]) -> Result<()> {
+        if data.len() > map::FLASH_SIZE {
+            return Err(format!(
+                "the image is {} bytes; the ATtiny1616 has {}",
+                data.len(),
+                map::FLASH_SIZE
+            ));
+        }
         self.chip_erase()?;
-        self.write_pages(map::FLASH, map::FLASH_PAGE, data, NVM_PAGE_WRITE)
+        // Blank pages can be skipped, because the chip erase left them blank.
+        self.write_pages(map::FLASH, map::FLASH_PAGE, data, NVM_PAGE_WRITE, true)
     }
 
-    /// Writes `data` page by page from `addr` with page erase-write, skipping
-    /// pages that are all 0xFF. `addr` must be page aligned. For EEPROM,
-    /// which EESAVE can keep through a chip erase.
+    /// Writes every page of `data` from `addr` with page erase-write. `addr`
+    /// must be page aligned. For EEPROM, which EESAVE can keep through a chip
+    /// erase, so a page that should end up blank still has to be written.
     pub fn write(&mut self, addr: u16, page: usize, data: &[u8]) -> Result<()> {
-        self.write_pages(addr, page, data, NVM_PAGE_ERASE_WRITE)
+        self.write_pages(addr, page, data, NVM_PAGE_ERASE_WRITE, false)
     }
 
-    fn write_pages(&mut self, addr: u16, page: usize, data: &[u8], command: u8) -> Result<()> {
+    fn write_pages(
+        &mut self,
+        addr: u16,
+        page: usize,
+        data: &[u8],
+        command: u8,
+        skip_blank: bool,
+    ) -> Result<()> {
         // Each page write ends by waiting for the NVM controller, so this is
         // the only wait needed before the next one starts.
         self.wait_nvm()?;
         for (i, chunk) in data.chunks(page).enumerate() {
-            if chunk.iter().all(|&b| b == 0xFF) {
+            if skip_blank && chunk.iter().all(|&b| b == 0xFF) {
                 continue;
             }
             self.write_page(offset(addr, i * page)?, chunk, command)?;
@@ -239,7 +254,8 @@ impl<W: Wire> Programmer<W> {
         Ok(())
     }
 
-    /// Reads back what [`Self::write`] wrote and compares.
+    /// Reads `data.len()` bytes from `addr` and compares them with `data`.
+    /// Run it after [`Self::erase_and_write_flash`] and [`Self::write`].
     pub fn verify(&mut self, addr: u16, data: &[u8]) -> Result<()> {
         let actual = self.read(addr, data.len())?;
         match actual.iter().zip(data).position(|(a, b)| a != b) {
@@ -559,7 +575,21 @@ mod tests {
     }
 
     #[test]
-    fn skips_blank_pages() {
+    fn refuses_an_image_bigger_than_flash_before_erasing() {
+        let mut tiny = Tiny::new();
+        tiny.flash.fill(0x42);
+        let mut p = Programmer::connect(tiny).unwrap();
+        p.enter_progmode().unwrap();
+        let err = p
+            .erase_and_write_flash(&vec![0; map::FLASH_SIZE + 1])
+            .unwrap_err();
+        assert!(err.contains("16384"), "{err}");
+        let tiny = p.leave().unwrap();
+        assert!(tiny.flash.iter().all(|&b| b == 0x42), "flash was erased");
+    }
+
+    #[test]
+    fn skips_blank_flash_pages() {
         let mut image = vec![0xFF; 3 * map::FLASH_PAGE];
         image[2 * map::FLASH_PAGE] = 0x12;
         let mut p = Programmer::connect(Tiny::new()).unwrap();
@@ -567,6 +597,41 @@ mod tests {
         p.erase_and_write_flash(&image).unwrap();
         let tiny = p.leave().unwrap();
         assert_eq!(tiny.page_writes, 1);
+        assert_eq!(tiny.page_erase_writes, 0);
+    }
+
+    #[test]
+    fn writes_blank_eeprom_pages_over_eesave_contents() {
+        // A backup whose fourth page is blank, over EEPROM that EESAVE kept.
+        let mut eeprom: Vec<u8> = (0..=255).collect();
+        eeprom[3 * map::EEPROM_PAGE..4 * map::EEPROM_PAGE].fill(0xFF);
+        let mut tiny = Tiny::new();
+        tiny.eesave = true;
+        tiny.eeprom.fill(0x42);
+
+        let mut p = Programmer::connect(tiny).unwrap();
+        p.enter_progmode().unwrap();
+        p.erase_and_write_flash(&[0x12]).unwrap();
+        p.write(map::EEPROM, map::EEPROM_PAGE, &eeprom).unwrap();
+        p.verify(map::EEPROM, &eeprom).unwrap();
+        let tiny = p.leave().unwrap();
+        assert_eq!(tiny.page_erase_writes, 8);
+    }
+
+    #[test]
+    fn eeprom_erase_write_leaves_bytes_it_was_not_given() {
+        // A 40-byte image ends 8 bytes into the second page; the rest of that
+        // page keeps its old contents, as on the chip.
+        let eeprom = vec![0x11; 40];
+        let mut tiny = Tiny::new();
+        tiny.eeprom.fill(0x42);
+
+        let mut p = Programmer::connect(tiny).unwrap();
+        p.enter_progmode().unwrap();
+        p.write(map::EEPROM, map::EEPROM_PAGE, &eeprom).unwrap();
+        let tiny = p.leave().unwrap();
+        assert_eq!(&tiny.eeprom[..40], &eeprom[..]);
+        assert!(tiny.eeprom[40..].iter().all(|&b| b == 0x42));
     }
 
     #[test]
@@ -660,6 +725,8 @@ mod tests {
             ptr: u16,
             repeat: usize,
             page_buffer: Vec<u8>,
+            /// Which page buffer bytes have been written since it was cleared.
+            page_loaded: Vec<bool>,
             page_addr: Option<u16>,
         }
 
@@ -686,6 +753,7 @@ mod tests {
                     ptr: 0,
                     repeat: 1,
                     page_buffer: vec![0xFF; map::FLASH_PAGE],
+                    page_loaded: vec![false; map::FLASH_PAGE],
                     page_addr: None,
                 }
             }
@@ -855,6 +923,7 @@ mod tests {
                         let (_, page) = region(addr);
                         self.page_addr = Some(addr - addr % page as u16);
                         self.page_buffer[usize::from(addr) % page] = value;
+                        self.page_loaded[usize::from(addr) % page] = true;
                     }
                     _ => panic!("store to 0x{addr:04X}"),
                 }
@@ -864,6 +933,7 @@ mod tests {
                 match command {
                     NVM_PAGE_BUFFER_CLEAR => {
                         self.page_buffer.fill(0xFF);
+                        self.page_loaded.fill(false);
                         self.page_addr = None;
                     }
                     NVM_PAGE_WRITE | NVM_PAGE_ERASE_WRITE => {
@@ -876,19 +946,26 @@ mod tests {
                         };
                         let start = usize::from(addr - base);
                         let cells = mem[start..start + page].iter_mut();
+                        let bytes = self.page_buffer.iter().zip(&self.page_loaded);
                         if command == NVM_PAGE_WRITE {
                             // A write can only clear bits; only an erase sets them.
-                            for (cell, &b) in cells.zip(&self.page_buffer) {
+                            for (cell, (&b, _)) in cells.zip(bytes) {
                                 *cell &= b;
                             }
                             self.page_writes += 1;
                         } else {
-                            for (cell, &b) in cells.zip(&self.page_buffer) {
-                                *cell = b;
+                            // Flash erases the whole page. EEPROM erases only
+                            // the bytes loaded into the page buffer (DS40001893A,
+                            // 9.3.1.2: byte granularity on erase-write).
+                            for (cell, (&b, &loaded)) in cells.zip(bytes) {
+                                if base == map::FLASH || loaded {
+                                    *cell = b;
+                                }
                             }
                             self.page_erase_writes += 1;
                         }
                         self.page_buffer.fill(0xFF);
+                        self.page_loaded.fill(false);
                     }
                     NVM_CHIP_ERASE if self.ignores_chip_erase => {}
                     NVM_CHIP_ERASE => {
