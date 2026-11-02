@@ -7,11 +7,9 @@ Rust firmware for the Wurkkos TS21 torch (model 0614), with a smaller UI than [A
 
 ## Using it
 
-For now it's one click on, one click off, at a single level on the linear channel. That's enough to prove the switch, the PWM and the pin map on a real torch. The full UI (ramping, turbo, lockout) is waiting on the `fancy-ui` branch.
+See [docs/ui.md](docs/ui.md) for the full specification.
 
-[docs/ui.md](docs/ui.md) is the full spec, including what's still to come.
-
-To try it without a torch, `cargo xtask simulate` runs the UI live in your terminal, and `cargo xtask simulate 1C 2H:1.5s 3C` runs a script of clicks and holds.
+Try the behaviour out without a torch, `cargo xtask simulate` runs the UI live in your terminal, and `cargo xtask simulate 1C 2H:1.5s 3C` runs a script of clicks and holds.
 
 ## Building
 
@@ -23,7 +21,7 @@ cargo xtask hex     # target/ts21.hex
 cargo xtask size    # flash and RAM use
 ```
 
-[docs/toolchain.md](docs/toolchain.md) explains how it builds and links.
+See [docs/toolchain.md](docs/toolchain.md) for an explanation of how it builds and links.
 
 ## Flashing
 
@@ -35,4 +33,4 @@ cargo xtask backup /dev/cu.usbserial-XXXX
 cargo xtask flash /dev/cu.usbserial-XXXX
 ```
 
-[docs/flashing.md](docs/flashing.md) covers programmers, pad order, restoring the backup and getting back to Anduril.
+See [docs/flashing.md](docs/flashing.md) for programmers, pad order, restoring the backup and getting back to Anduril.
