@@ -18,6 +18,8 @@
 //! `h` holds the switch down until pressed again.
 
 use std::collections::VecDeque;
+use std::fmt;
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,11 +28,11 @@ use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
 use ts21::torch::Torch;
 
-use crate::terminal::{Key, Terminal};
+use crate::terminal::{CTRL_C, Terminal};
 
 /// How long a scripted click holds the switch down (about 60 ms).
 const PRESS_TICKS: u16 = 4;
-/// The pause between scripted clicks in a run, well inside `RELEASE_TICKS`.
+/// The pause after each scripted click, well inside `RELEASE_TICKS`.
 const GAP_TICKS: u16 = 4;
 /// Released samples after a click or hold before the next action: enough
 /// for `button::Clicks` to send the click (see its `RELEASE_TICKS` check).
@@ -48,53 +50,51 @@ pub enum Action {
     Wait(u16),
 }
 
-/// Runs a script and prints what happened.
-pub fn script(words: &[&str]) -> Result<(), String> {
-    for line in run(&parse(words)?) {
-        println!("{line}");
+impl FromStr for Action {
+    type Err = String;
+
+    /// `3C`, `2H`, `1H:500ms` or `wait:2s`.
+    fn from_str(word: &str) -> Result<Self, String> {
+        if let Some(duration) = word.strip_prefix("wait:") {
+            return Ok(Self::Wait(ticks(duration)?));
+        }
+        let (head, duration) = match word.split_once(':') {
+            Some((head, duration)) => (head, Some(duration)),
+            None => (word, None),
+        };
+        let split = head.len().saturating_sub(1);
+        let (count, kind) = head.split_at(split);
+        let count: u8 = match count.parse() {
+            Ok(n) if n > 0 => n,
+            _ => return Err("expected a count of 1 or more, like 1C, 2H or wait:1s".into()),
+        };
+        match (kind, duration) {
+            ("C" | "c", None) => Ok(Self::Clicks(count)),
+            ("C" | "c", Some(_)) => Err("clicks don't take a duration; holds do (1H:2s)".into()),
+            ("H" | "h", duration) => {
+                let ticks = duration.map_or(Ok(DEFAULT_HOLD_TICKS), ticks)?;
+                if ticks <= HOLD_TICKS {
+                    return Err(format!(
+                        "that's a click; a hold needs longer than {} ms",
+                        u32::from(HOLD_TICKS) * 1000 / u32::from(TICKS_PER_SECOND)
+                    ));
+                }
+                Ok(Self::Hold {
+                    clicks: count - 1,
+                    ticks,
+                })
+            }
+            _ => Err("expected C (clicks), H (hold) or wait:".into()),
+        }
     }
-    Ok(())
 }
 
+/// Parses a script, word by word.
 pub fn parse(words: &[&str]) -> Result<Vec<Action>, String> {
     words
         .iter()
-        .map(|&word| parse_word(word).map_err(|e| format!("`{word}`: {e}")))
+        .map(|word| word.parse().map_err(|e| format!("`{word}`: {e}")))
         .collect()
-}
-
-fn parse_word(word: &str) -> Result<Action, String> {
-    if let Some(duration) = word.strip_prefix("wait:") {
-        return Ok(Action::Wait(ticks(duration)?));
-    }
-    let (head, duration) = match word.split_once(':') {
-        Some((head, duration)) => (head, Some(duration)),
-        None => (word, None),
-    };
-    let split = head.len().saturating_sub(1);
-    let (count, kind) = (&head[..split], &head[split..]);
-    let count: u8 = match count.parse() {
-        Ok(n) if n > 0 => n,
-        _ => return Err("expected a count of 1 or more, like 1C, 2H or wait:1s".into()),
-    };
-    match (kind, duration) {
-        ("C" | "c", None) => Ok(Action::Clicks(count)),
-        ("C" | "c", Some(_)) => Err("clicks don't take a duration; holds do (1H:2s)".into()),
-        ("H" | "h", duration) => {
-            let ticks = duration.map_or(Ok(DEFAULT_HOLD_TICKS), ticks)?;
-            if ticks <= HOLD_TICKS {
-                return Err(format!(
-                    "that's a click; a hold needs longer than {} ms",
-                    ms(u32::from(HOLD_TICKS))
-                ));
-            }
-            Ok(Action::Hold {
-                clicks: count - 1,
-                ticks,
-            })
-        }
-        _ => Err("expected C (clicks), H (hold) or wait:".into()),
-    }
 }
 
 /// Ticks from `500ms`, `2s` or `1.5s`, rounded to the nearest tick.
@@ -121,32 +121,22 @@ fn ticks(duration: &str) -> Result<u16, String> {
     }
 }
 
-/// The level a fresh torch ends at after a script.
-#[cfg(test)]
-pub fn level_after(actions: &[Action]) -> u8 {
-    let mut torch = Torch::new();
-    for pressed in samples(actions) {
-        torch.tick(pressed);
-    }
-    torch.level()
-}
-
 /// The switch, one sample per tick, for a whole script.
 pub fn samples(actions: &[Action]) -> Vec<bool> {
     let mut out = Vec::new();
     for &action in actions {
         match action {
-            Action::Clicks(n) => {
-                out.extend(clicks(n));
-                out.extend(span(false, SETTLE_TICKS - GAP_TICKS));
-            }
+            Action::Clicks(n) => out.extend(clicks(n)),
             Action::Hold { clicks: n, ticks } => {
                 out.extend(clicks(n));
                 out.extend(span(true, ticks));
-                out.extend(span(false, SETTLE_TICKS));
             }
-            Action::Wait(ticks) => out.extend(span(false, ticks)),
+            Action::Wait(ticks) => {
+                out.extend(span(false, ticks));
+                continue;
+            }
         }
+        out.extend(span(false, SETTLE_TICKS));
     }
     out
 }
@@ -156,62 +146,74 @@ fn clicks(n: u8) -> impl Iterator<Item = bool> {
     (0..n).flat_map(|_| span(true, PRESS_TICKS).chain(span(false, GAP_TICKS)))
 }
 
-fn span(pressed: bool, ticks: u16) -> impl Iterator<Item = bool> + Clone {
-    (0..ticks).map(move |_| pressed)
+fn span(pressed: bool, ticks: u16) -> impl Iterator<Item = bool> {
+    std::iter::repeat_n(pressed, ticks.into())
 }
 
-/// Runs a script on a fresh torch and returns the log, ending with where
-/// the light was left.
-pub fn run(actions: &[Action]) -> Vec<String> {
+/// What a script did to a fresh torch.
+pub struct Run {
+    /// One line per click and hold.
+    pub lines: Vec<String>,
+    pub ticks: u32,
+    /// Where the light was left.
+    pub level: u8,
+}
+
+/// Runs a script on a fresh torch.
+pub fn run(actions: &[Action]) -> Run {
     let mut torch = Torch::new();
-    let mut log = Log::new();
+    let mut log = Log::default();
     let mut lines = Vec::new();
     let samples = samples(actions);
-    for (now, &pressed) in samples.iter().enumerate() {
+    for (now, &pressed) in (0..).zip(&samples) {
         let event = torch.tick(pressed);
-        lines.extend(log.note(now as u32, event, torch.level()));
+        lines.extend(log.note(now, event, torch.level()));
     }
-    lines.push(format!(
-        "{}  ends {}",
-        seconds(samples.len() as u32),
-        describe(torch.level())
-    ));
-    lines
+    Run {
+        lines,
+        ticks: samples.len() as u32,
+        level: torch.level(),
+    }
+}
+
+/// Runs a script and prints what happened.
+pub fn script(words: &[&str]) -> Result<(), String> {
+    let run = run(&parse(words)?);
+    for line in &run.lines {
+        println!("{line}");
+    }
+    println!("{}  ends {}", Seconds(run.ticks), Level(run.level));
+    Ok(())
 }
 
 /// Turns ticks into log lines: one per click, one per hold (when it ends,
 /// not every tick it's held), and one for any change of level that no
 /// click or hold explains.
-pub struct Log {
+#[derive(Default)]
+struct Log {
     level: u8,
-    /// The latest `Event::Hold` ticks and the level before the hold began.
-    hold: Option<(u16, u8)>,
+    /// The tick the press that's being held started on, and the level
+    /// before it.
+    hold: Option<(u32, u8)>,
 }
 
 impl Log {
-    pub fn new() -> Self {
-        Self {
-            level: 0,
-            hold: None,
-        }
-    }
-
-    pub fn note(&mut self, now: u32, event: Option<Event>, level: u8) -> Option<String> {
-        let before = self.level;
-        self.level = level;
+    fn note(&mut self, now: u32, event: Option<Event>, level: u8) -> Option<String> {
+        let before = std::mem::replace(&mut self.level, level);
         let (what, before) = match event {
             Some(Event::Click(n)) => (format!("{n}C"), before),
             Some(Event::Hold { ticks, .. }) => {
-                let start = self.hold.map_or(before, |(_, start)| start);
-                self.hold = Some((ticks, start));
+                // The first Hold comes HOLD_TICKS into the press.
+                let start = now - u32::from(HOLD_TICKS) - u32::from(ticks);
+                self.hold.get_or_insert((start, before));
                 return None;
             }
             Some(Event::Release { clicks }) => {
-                let (ticks, start) = self.hold.take().unwrap_or((0, before));
-                let held = u32::from(HOLD_TICKS) + u32::from(ticks) + 1;
+                let (start, before) = self.hold.take().unwrap_or((now, before));
+                let held = Seconds(now - start).to_string();
                 (
-                    format!("{}H, held {}", clicks + 1, seconds(held).trim_start()),
-                    start,
+                    format!("{}H, held {}", clicks + 1, held.trim_start()),
+                    before,
                 )
             }
             None if self.hold.is_none() && level != before => (String::new(), before),
@@ -220,27 +222,34 @@ impl Log {
         let unchanged = if level == before { " (no change)" } else { "" };
         Some(format!(
             "{}  {what:<16} → {}{unchanged}",
-            seconds(now),
-            describe(level)
+            Seconds(now),
+            Level(level)
         ))
     }
 }
 
-/// `"  1.50 s"` for 96 ticks.
-pub fn seconds(ticks: u32) -> String {
-    let per = u32::from(TICKS_PER_SECOND);
-    format!("{:>3}.{:02} s", ticks / per, ticks % per * 100 / per)
-}
+/// Ticks shown as seconds: `  1.50 s` for 96 ticks.
+struct Seconds(u32);
 
-pub fn describe(level: u8) -> String {
-    match level {
-        0 => "off".into(),
-        level => format!("level {level}/{LEVELS}"),
+impl fmt::Display for Seconds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let per = u32::from(TICKS_PER_SECOND);
+        write!(f, "{:>3}.{:02} s", self.0 / per, self.0 % per * 100 / per)
     }
 }
 
-fn ms(ticks: u32) -> u32 {
-    ticks * 1000 / u32::from(TICKS_PER_SECOND)
+/// A level as people read it: `off` or `level 50/150`, or with `{:#}`, the
+/// shorter `50/150`.
+struct Level(u8);
+
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            0 => f.pad("off"),
+            n if f.alternate() => f.pad(&format!("{n}/{LEVELS}")),
+            n => f.pad(&format!("level {n}/{LEVELS}")),
+        }
+    }
 }
 
 const HELP: &str = "\
@@ -258,7 +267,7 @@ const BAR: usize = 20;
 /// Runs the UI live in the terminal until `q` or Ctrl-C.
 pub fn interactive() -> Result<(), String> {
     let mut terminal = Terminal::open()?;
-    let mut live = Live::new();
+    let mut live = Live::default();
     let print = |terminal: &Terminal, text: &str| {
         for line in text.lines() {
             terminal.write(&format!("\r\x1b[2K{line}\n"));
@@ -305,6 +314,7 @@ enum Command {
 }
 
 /// A live session, minus the terminal: keys in, ticks, a status line out.
+#[derive(Default)]
 struct Live {
     torch: Torch,
     log: Log,
@@ -318,26 +328,15 @@ struct Live {
 }
 
 impl Live {
-    fn new() -> Self {
-        Self {
-            torch: Torch::new(),
-            log: Log::new(),
-            now: 0,
-            queue: VecDeque::new(),
-            held: false,
-            pressed: false,
-        }
-    }
-
-    fn key(&mut self, Key { key, ctrl }: Key) -> Command {
-        match (key.to_ascii_lowercase(), ctrl) {
-            ('c', true) | ('q', false) => return Command::Quit,
-            (' ', false) => self.click(1),
-            (digit @ '1'..='9', false) => self.click(digit as u8 - b'0'),
-            ('h', false) => self.held = !self.held,
-            ('?', false) => return Command::Help,
-            ('r', false) => {
-                *self = Self::new();
+    fn key(&mut self, key: char) -> Command {
+        match key.to_ascii_lowercase() {
+            'q' | CTRL_C => return Command::Quit,
+            ' ' => self.click(1),
+            digit @ '1'..='9' => self.click(digit as u8 - b'0'),
+            'h' => self.held = !self.held,
+            '?' => return Command::Help,
+            'r' => {
+                *self = Self::default();
                 return Command::Reset;
             }
             _ => {}
@@ -365,17 +364,14 @@ impl Live {
         let level = self.torch.level();
         let output = ramp::output(level);
         let lit = lit(level);
-        let level_text = match level {
-            0 => "off".into(),
-            level => format!("{level}/{LEVELS}"),
-        };
         let switch = match (self.pressed, self.held) {
             (true, true) => "held",
-            (true, _) => "down",
+            (true, false) => "down",
             (false, _) => "up",
         };
         let text = format!(
-            " {level_text:>7}  linear {:>3}  FET {:>3}  switch {switch:<4}  {:?}",
+            " {:>#7}  linear {:>3}  FET {:>3}  switch {switch:<4}  {:?}",
+            Level(level),
             output.linear,
             output.fet,
             self.torch.ui()
@@ -400,18 +396,18 @@ mod tests {
     use super::*;
     use ts21::ui::LEVEL;
 
-    fn words(script: &str) -> Vec<&str> {
-        script.split_whitespace().collect()
-    }
-
-    fn ends(script: &str) -> String {
-        run(&parse(&words(script)).unwrap()).pop().unwrap()
+    fn script(script: &str) -> Run {
+        let words: Vec<_> = script.split_whitespace().collect();
+        run(&parse(&words).unwrap())
     }
 
     #[test]
     fn parses_clicks_holds_and_waits() {
+        let words: Vec<_> = "1C 3c 1H 2H:500ms wait:1.5s wait:2s"
+            .split_whitespace()
+            .collect();
         assert_eq!(
-            parse(&words("1C 3c 1H 2H:500ms wait:1.5s wait:2s")),
+            parse(&words),
             Ok(vec![
                 Action::Clicks(1),
                 Action::Clicks(3),
@@ -446,7 +442,7 @@ mod tests {
             "wait:9999s",
             "256C",
         ] {
-            assert!(parse(&[word]).is_err(), "{word:?} parsed");
+            assert!(word.parse::<Action>().is_err(), "{word:?} parsed");
         }
     }
 
@@ -461,34 +457,38 @@ mod tests {
 
     #[test]
     fn a_click_turns_it_on_and_another_turns_it_off() {
-        assert!(ends("1C").ends_with(&format!("ends level {LEVEL}/{LEVELS}")));
-        assert!(ends("1C 1C").ends_with("ends off"));
+        assert_eq!(script("1C").level, LEVEL);
+        assert_eq!(script("1C 1C").level, 0);
     }
 
     #[test]
     fn everything_else_leaves_it_alone() {
-        assert!(ends("2C 1H 3H:2s").ends_with("ends off"));
-        assert!(ends("1C 2C 1H").ends_with(&format!("ends level {LEVEL}/{LEVELS}")));
+        assert_eq!(script("2C 1H 3H:2s").level, 0);
+        assert_eq!(script("1C 2C 1H").level, LEVEL);
     }
 
     #[test]
     fn logs_one_line_per_click_and_per_hold() {
-        let lines = run(&parse(&words("1C 1H:1s 2C")).unwrap());
-        assert_eq!(lines.len(), 4, "{lines:#?}");
-        assert!(lines[0].contains("1C") && lines[0].ends_with(&describe(LEVEL)));
+        let lines = script("1C 1H:1s 2C").lines;
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert!(lines[0].contains("1C") && lines[0].ends_with(&Level(LEVEL).to_string()));
         assert!(lines[1].contains("1H, held 1.00 s") && lines[1].ends_with("(no change)"));
         assert!(lines[2].contains("2C") && lines[2].ends_with("(no change)"));
     }
 
     #[test]
-    fn a_held_switch_counts_its_holds_ticks() {
-        let mut log = Log::new();
+    fn times_a_hold_from_the_start_of_the_press() {
+        let mut log = Log::default();
         for ticks in 0..10 {
             let hold = Event::Hold { clicks: 1, ticks };
-            assert_eq!(log.note(u32::from(ticks), Some(hold), 0), None);
+            let now = u32::from(HOLD_TICKS + ticks);
+            assert_eq!(log.note(now, Some(hold), 0), None);
         }
-        let line = log.note(10, Some(Event::Release { clicks: 1 }), 0).unwrap();
-        let held = seconds(u32::from(HOLD_TICKS) + 10);
+        let now = u32::from(HOLD_TICKS) + 10;
+        let line = log
+            .note(now, Some(Event::Release { clicks: 1 }), 0)
+            .unwrap();
+        let held = Seconds(now).to_string();
         assert!(
             line.contains(&format!("2H, held {}", held.trim_start())),
             "{line}"
@@ -497,13 +497,9 @@ mod tests {
 
     #[test]
     fn logs_a_change_of_level_with_no_event() {
-        let mut log = Log::new();
+        let mut log = Log::default();
         assert!(log.note(0, None, 30).unwrap().ends_with("level 30/150"));
         assert_eq!(log.note(1, None, 30), None);
-    }
-
-    fn press(key: char) -> Key {
-        Key { key, ctrl: false }
     }
 
     /// Ticks a live session `n` times and keeps the log.
@@ -513,24 +509,24 @@ mod tests {
 
     #[test]
     fn space_clicks_and_digits_click_that_many_times() {
-        let mut live = Live::new();
-        live.key(press(' '));
+        let mut live = Live::default();
+        live.key(' ');
         let lines = ticks_of(&mut live, 64);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("1C") && live.torch.level() == LEVEL);
 
-        live.key(press('3'));
+        live.key('3');
         let lines = ticks_of(&mut live, 64);
         assert!(lines[0].contains("3C") && live.torch.level() == LEVEL);
     }
 
     #[test]
     fn h_holds_the_switch_until_pressed_again() {
-        let mut live = Live::new();
-        live.key(press('h'));
+        let mut live = Live::default();
+        live.key('h');
         assert!(ticks_of(&mut live, 64).is_empty());
         assert!(live.pressed);
-        live.key(press('h'));
+        live.key('h');
         let lines = ticks_of(&mut live, 64);
         assert!(lines[0].contains("1H, held 1.00 s"), "{lines:?}");
         assert!(!live.pressed);
@@ -538,18 +534,14 @@ mod tests {
 
     #[test]
     fn q_and_ctrl_c_quit_and_r_starts_again() {
-        let mut live = Live::new();
-        assert_eq!(live.key(press('q')), Command::Quit);
-        let ctrl_c = Key {
-            key: 'c',
-            ctrl: true,
-        };
-        assert_eq!(live.key(ctrl_c), Command::Quit);
-        assert_eq!(live.key(press('?')), Command::Help);
+        let mut live = Live::default();
+        assert_eq!(live.key('q'), Command::Quit);
+        assert_eq!(live.key(CTRL_C), Command::Quit);
+        assert_eq!(live.key('?'), Command::Help);
 
-        live.key(press(' '));
+        live.key(' ');
         ticks_of(&mut live, 64);
-        assert_eq!(live.key(press('r')), Command::Reset);
+        assert_eq!(live.key('r'), Command::Reset);
         assert_eq!((live.torch.level(), live.now), (0, 0));
     }
 
@@ -564,8 +556,8 @@ mod tests {
 
     #[test]
     fn the_status_line_fits_the_terminal() {
-        let mut live = Live::new();
-        live.key(press(' '));
+        let mut live = Live::default();
+        live.key(' ');
         ticks_of(&mut live, 64);
         let status = live.status(60);
         assert!(status.contains(&format!(" {LEVEL}/{LEVELS} ")), "{status}");
@@ -575,9 +567,12 @@ mod tests {
     }
 
     #[test]
-    fn formats_time_in_seconds() {
-        assert_eq!(seconds(0), "  0.00 s");
-        assert_eq!(seconds(96), "  1.50 s");
-        assert_eq!(seconds(64 * 125 + 1), "125.01 s");
+    fn shows_levels_and_seconds() {
+        assert_eq!(Level(0).to_string(), "off");
+        assert_eq!(Level(50).to_string(), "level 50/150");
+        assert_eq!(format!("{:>#7}", Level(50)), " 50/150");
+        assert_eq!(Seconds(0).to_string(), "  0.00 s");
+        assert_eq!(Seconds(96).to_string(), "  1.50 s");
+        assert_eq!(Seconds(64 * 125 + 1).to_string(), "125.01 s");
     }
 }

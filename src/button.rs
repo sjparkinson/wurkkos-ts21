@@ -78,6 +78,62 @@ impl Clicks {
     }
 }
 
+/// Endless random switching, as (pressed, ticks) spans that alternate,
+/// starting released. Most lengths sit right at the edges [`Clicks`] cares
+/// about. It's for tests: this crate's own, and xtask's check of the
+/// firmware against the library. The firmware never uses it.
+///
+/// Xorshift underneath, so a seed always gives the same switching.
+#[derive(Clone, Debug)]
+pub struct RandomSwitching {
+    state: u32,
+    pressed: bool,
+}
+
+impl RandomSwitching {
+    /// Span lengths worth hitting exactly.
+    const EDGES: [u16; 10] = [
+        1,
+        2,
+        4,
+        HOLD_TICKS - 1,
+        HOLD_TICKS,
+        HOLD_TICKS + 1,
+        HOLD_TICKS + 2,
+        RELEASE_TICKS - 1,
+        RELEASE_TICKS,
+        RELEASE_TICKS + 1,
+    ];
+
+    pub const fn new(seed: u32) -> Self {
+        // Xorshift never leaves zero.
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+            pressed: true,
+        }
+    }
+
+    fn random(&mut self) -> u32 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 17;
+        self.state ^= self.state << 5;
+        self.state
+    }
+}
+
+impl Iterator for RandomSwitching {
+    type Item = (bool, u16);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.pressed = !self.pressed;
+        let ticks = match self.random() % 3 {
+            0 => 1 + (self.random() % 100) as u16,
+            _ => Self::EDGES[self.random() as usize % Self::EDGES.len()],
+        };
+        Some((self.pressed, ticks))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,52 +301,23 @@ mod tests {
         out
     }
 
-    /// Xorshift, so the runs are random but the same every time.
-    struct Rng(u32);
-
-    impl Rng {
-        fn next(&mut self) -> u32 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 17;
-            self.0 ^= self.0 << 5;
-            self.0
-        }
-
-        /// A span length, mostly near the edges the rules care about.
-        fn len(&mut self) -> u32 {
-            let (hold, release) = (u32::from(HOLD_TICKS), u32::from(RELEASE_TICKS));
-            let edges = [
-                1,
-                2,
-                4,
-                hold - 1,
-                hold,
-                hold + 1,
-                hold + 2,
-                release - 1,
-                release,
-                release + 1,
-            ];
-            match self.next() % 3 {
-                0 => 1 + self.next() % 100,
-                _ => edges[self.next() as usize % edges.len()],
-            }
+    #[test]
+    fn matches_the_model_on_random_switching() {
+        for seed in 1..=500 {
+            let runs: Vec<_> = RandomSwitching::new(seed)
+                .take(60)
+                .map(|(pressed, ticks)| (pressed, u32::from(ticks)))
+                .collect();
+            assert_eq!(actual(&runs), model(&runs), "seed {seed}: {runs:?}");
         }
     }
 
     #[test]
-    fn matches_the_model_on_random_switching() {
-        for seed in 1..=500 {
-            let mut rng = Rng(seed);
-            let mut pressed = rng.next().is_multiple_of(2);
-            let runs: Vec<_> = (0..60)
-                .map(|_| {
-                    pressed = !pressed;
-                    (pressed, rng.len())
-                })
-                .collect();
-            assert_eq!(actual(&runs), model(&runs), "seed {seed}: {runs:?}");
-        }
+    fn random_switching_alternates_from_released() {
+        let spans: Vec<_> = RandomSwitching::new(0).take(1000).collect();
+        assert!(spans.iter().step_by(2).all(|&(pressed, _)| !pressed));
+        assert!(spans.iter().skip(1).step_by(2).all(|&(pressed, _)| pressed));
+        assert!(spans.iter().all(|&(_, ticks)| (1..=100).contains(&ticks)));
     }
 
     #[test]
