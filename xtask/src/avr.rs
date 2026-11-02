@@ -81,7 +81,29 @@ impl Cpu {
                         self.r[d] = self.r[r];
                         self.r[d + 1] = self.r[r + 1];
                     }
-                    2 | 3 => return Err(no_multiplier(w)),
+                    2 => {
+                        // muls, r16 to r31 only.
+                        let (a, b) = (self.r[hi] as i8, self.r[16 + usize::from(w & 0xF)] as i8);
+                        self.product((i16::from(a) * i16::from(b)) as u16, false);
+                    }
+                    3 => {
+                        // mulsu, fmul, fmuls and fmulsu, r16 to r23 only.
+                        let (a, b) = (
+                            self.r[16 + usize::from((w >> 4) & 7)],
+                            self.r[16 + usize::from(w & 7)],
+                        );
+                        // Which operands are signed, and whether it's fractional.
+                        let (sa, sb, fractional) = match w & 0x88 {
+                            0x00 => (true, false, false), // mulsu
+                            0x08 => (false, false, true), // fmul
+                            0x80 => (true, true, true),   // fmuls
+                            _ => (true, false, true),     // fmulsu
+                        };
+                        let a = if sa { i16::from(a as i8) } else { i16::from(a) };
+                        let b = if sb { i16::from(b as i8) } else { i16::from(b) };
+                        // 255 * 255 doesn't fit an i16, but its bits are right.
+                        self.product(a.wrapping_mul(b) as u16, fractional);
+                    }
                     _ => return Err(unknown(w)),
                 },
                 1 => {
@@ -310,7 +332,11 @@ impl Cpu {
                     }
                 }
             }
-            _ => return Err(no_multiplier(w)),
+            _ => {
+                // mul: 1001 11rd dddd rrrr, any registers.
+                let r = usize::from(w & 0x0F | (w >> 5) & 0x10);
+                self.product(u16::from(rd) * u16::from(self.r[r]), false);
+            }
         }
         Ok(())
     }
@@ -376,6 +402,16 @@ impl Cpu {
         self.nzs(v);
         self.set(Z, zero);
         v
+    }
+
+    /// Every multiply leaves its result in r1:r0, with C from bit 15 and Z
+    /// set if it's zero. The fractional ones (fmul, fmuls, fmulsu) shift the
+    /// result left one place, and C comes from bit 15 before the shift.
+    fn product(&mut self, p: u16, fractional: bool) {
+        let v = if fractional { p << 1 } else { p };
+        self.set_pair(0, v);
+        self.set(C, p & 0x8000 != 0);
+        self.set(Z, v == 0);
     }
 
     fn jump_relative(&mut self, w: u16) {
@@ -493,12 +529,6 @@ pub fn is_two_words(w: u16) -> bool {
 
 fn unknown(w: u16) -> String {
     format!("opcode {w:#06x}, which the simulator doesn't decode")
-}
-
-fn no_multiplier(w: u16) -> String {
-    format!(
-        "multiply opcode {w:#06x}, but the ATtiny1616 has no hardware multiplier (docs/hardware.md)"
-    )
 }
 
 #[cfg(test)]
@@ -726,16 +756,17 @@ mod tests {
     }
 
     #[test]
-    fn refuses_multiplies_and_unknown_opcodes() {
+    fn refuses_unknown_opcodes() {
+        // 0x0001 sits next to nop, movw and the multiplies.
         let mut bus = TestBus {
-            flash: vec![0x9F01, 0xFFFF],
+            flash: vec![0x0001, 0xFFFF],
             data: vec![0; 0x10000],
         };
         let mut cpu = Cpu::new(&RAM);
         assert!(
             cpu.step(&mut bus)
                 .unwrap_err()
-                .contains("no hardware multiplier")
+                .contains("0x0000: opcode 0x0001")
         );
         assert!(
             cpu.step(&mut bus)
@@ -743,5 +774,152 @@ mod tests {
                 .contains("0x0002: opcode 0xffff")
         );
         assert!(cpu.step(&mut bus).unwrap_err().contains("outside flash"));
+    }
+
+    /// Runs one multiply with `a` in its Rd and `b` in its Rr, and returns
+    /// r1:r0, C and Z. r1:r0 start non-zero, so Z has to be earned.
+    fn multiply(w: u16, (d, a): (usize, u8), (r, b): (usize, u8)) -> (u16, bool, bool) {
+        let (cpu, _) = run(&[w], |cpu, _| {
+            cpu.set_pair(0, 0xA5A5);
+            cpu.r[d] = a;
+            cpu.r[r] = b;
+        });
+        (cpu.pair(0), cpu.flag(C), cpu.flag(Z))
+    }
+
+    // The multiply words in these tests come from LLVM's AVR assembler (llc
+    // -mcpu=attiny1616, then llvm-objdump), as a check on the decoding.
+
+    #[test]
+    fn mul_is_unsigned_on_any_registers() {
+        // mul r22, r24
+        assert_eq!(
+            multiply(0x9F68, (22, 200), (24, 100)),
+            (20_000, false, false)
+        );
+        assert_eq!(
+            multiply(0x9F68, (22, 0xFF), (24, 0xFF)),
+            (0xFE01, true, false)
+        );
+        assert_eq!(multiply(0x9F68, (22, 0), (24, 0x80)), (0, false, true));
+        // mul r1, r31 reads r1 before overwriting it.
+        assert_eq!(multiply(0x9E1F, (1, 3), (31, 5)), (15, false, false));
+        // mul r24, r24
+        assert_eq!(multiply(0x9F88, (24, 16), (24, 16)), (256, false, false));
+    }
+
+    #[test]
+    fn muls_is_signed_on_r16_to_r31() {
+        // muls r16, r31
+        let muls = |a: i8, b: i8| multiply(0x020F, (16, a as u8), (31, b as u8));
+        assert_eq!(muls(-128, -128), (0x4000, false, false));
+        assert_eq!(muls(-1, -1), (1, false, false));
+        assert_eq!(muls(-1, 1), (0xFFFF, true, false));
+        assert_eq!(muls(127, -128), (-16_256i16 as u16, true, false));
+        assert_eq!(muls(0, -5), (0, false, true));
+        // muls r22, r25
+        assert_eq!(
+            multiply(0x0269, (22, 0xFE), (25, 3)),
+            (-6i16 as u16, true, false)
+        );
+    }
+
+    #[test]
+    fn mulsu_is_signed_by_unsigned_on_r16_to_r23() {
+        // mulsu r17, r22
+        let mulsu = |a: i8, b: u8| multiply(0x0316, (17, a as u8), (22, b));
+        assert_eq!(mulsu(-1, 255), (-255i16 as u16, true, false));
+        assert_eq!(mulsu(-128, 255), (-32_640i16 as u16, true, false));
+        assert_eq!(mulsu(127, 255), (32_385, false, false));
+        assert_eq!(mulsu(2, 0x80), (256, false, false), "Rr isn't signed");
+        assert_eq!(mulsu(-128, 0), (0, false, true));
+    }
+
+    #[test]
+    fn fmul_shifts_left_and_takes_c_from_before_the_shift() {
+        // fmul r18, r21. 0.5 * 0.5 in 1.7 format is 0.25, 0x2000 in 1.15.
+        let fmul = |a: u8, b: u8| multiply(0x032D, (18, a), (21, b));
+        assert_eq!(fmul(0x40, 0x40), (0x2000, false, false));
+        // 1.5 * 1.5 doesn't fit: the product 0x9000 loses bit 15 to C.
+        assert_eq!(fmul(0xC0, 0xC0), (0x2000, true, false));
+        assert_eq!(fmul(0xFF, 0xFF), (0xFC02, true, false));
+        // The product 0x4000 shifts into bit 15, but C comes from before.
+        assert_eq!(fmul(0x80, 0x80), (0x8000, false, false));
+        assert_eq!(fmul(0x80, 0), (0, false, true));
+    }
+
+    #[test]
+    fn fmuls_and_fmulsu_are_signed() {
+        // fmuls r23, r16. -1 * -1 in 1.7 format overflows to -1 in 1.15.
+        let fmuls = |a: i8, b: i8| multiply(0x03F0, (23, a as u8), (16, b as u8));
+        assert_eq!(fmuls(-128, -128), (0x8000, false, false));
+        assert_eq!(fmuls(-1, -1), (2, false, false));
+        assert_eq!(fmuls(-1, 1), (0xFFFE, true, false));
+        assert_eq!(fmuls(0, -1), (0, false, true));
+        // fmulsu r20, r19
+        let fmulsu = |a: i8, b: u8| multiply(0x03CB, (20, a as u8), (19, b));
+        assert_eq!(fmulsu(-1, 255), (-510i16 as u16, true, false));
+        assert_eq!(fmulsu(64, 0x80), (0x4000, false, false), "Rr isn't signed");
+        // -128 * 128 is 0xC000, which shifts to 0x8000.
+        assert_eq!(fmulsu(-128, 0x80), (0x8000, true, false));
+        assert_eq!(fmulsu(0, 0x80), (0, false, true));
+    }
+
+    /// What the pinned nightly compiles `a.wrapping_mul(b)` on two `u16`s,
+    /// and `a % 10` on a `u8`, to for the ATtiny1616, with the `ret` left off.
+    #[test]
+    fn runs_what_llvm_emits_for_u16_multiply_and_u8_remainder() {
+        let mul_u16 = [
+            0x0269, // muls r22, r25
+            0x2D90, // mov r25, r0
+            0x2411, // clr r1
+            0x9F68, // mul r22, r24
+            0x2D20, // mov r18, r0
+            0x2D31, // mov r19, r1
+            0x2411, // clr r1
+            0x0F39, // add r19, r25
+            0x0278, // muls r23, r24
+            0x2411, // clr r1
+            0x2D80, // mov r24, r0
+            0x0F83, // add r24, r19
+            0x2F48, // mov r20, r24
+            0x2755, // clr r21
+            0x2F54, // mov r21, r20
+            0x2744, // clr r20
+            0x2F82, // mov r24, r18
+            0x2799, // clr r25
+            0x2B84, // or r24, r20
+            0x2B95, // or r25, r21
+        ];
+        let rem_u8 = [
+            0xEC9D, // ldi r25, 0xcd
+            0x9F89, // mul r24, r25
+            0x2D91, // mov r25, r1
+            0x2411, // clr r1
+            0x9596, // lsr r25
+            0x9596, // lsr r25
+            0x9596, // lsr r25
+            0xE02A, // ldi r18, 0xa
+            0x0292, // muls r25, r18
+            0x2411, // clr r1
+            0x1980, // sub r24, r0
+        ];
+        let values = [
+            0u16, 1, 2, 9, 10, 99, 0x7F, 0x80, 0xFF, 0x100, 0x1234, 0x7FFF, 0x8000, 0xFFFF,
+        ];
+        for a in values {
+            for b in values {
+                let (cpu, _) = run(&mul_u16, |cpu, _| {
+                    cpu.set_pair(24, a);
+                    cpu.set_pair(22, b);
+                });
+                assert_eq!(cpu.pair(24), a.wrapping_mul(b), "{a} * {b}");
+                assert_eq!(cpu.r[1], 0, "r1 is back to zero");
+            }
+        }
+        for a in 0..=u8::MAX {
+            let (cpu, _) = run(&rem_u8, |cpu, _| cpu.r[24] = a);
+            assert_eq!(cpu.r[24], a % 10, "{a} % 10");
+        }
     }
 }
