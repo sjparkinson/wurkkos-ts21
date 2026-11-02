@@ -25,7 +25,7 @@ cargo xtask size                                           # flash/RAM use, afte
 - **Every register address and bit mask lives in `src/regs.rs` and comes from the ATDF** (`vendor/attiny1617.atdf`), with a comment naming the register. No bare register numbers in `src/hw.rs` or `src/rt.rs`. Add a check for each new constant to `xtask/src/atdf.rs`; an unchecked one is dead code there and fails clippy. Use the `register-checker` agent after touching `src/regs.rs`, `src/hw.rs` or `src/rt.rs`, for what the ATDF can't express.
 - **16-bit peripheral registers: low byte first.** Use `write16` in `src/hw.rs`.
 - **Logic goes in the library** (`src/lib.rs` and its modules), which is `no_std`, has no `unsafe`, and is tested on the host. `src/main.rs` stays a thin loop.
-- **docs/ui.md is the UI spec.** Change it in the same commit as `src/ui.rs`, and add a test in `src/ui.rs` for every row you add.
+- **docs/ui.md is the UI spec.** Change it in the same commit as `src/ui.rs`, add a test in `src/ui.rs` for every row you add, and give the row an Example script (`xtask/src/spec.rs` runs them against the library and the firmware).
 - **Tick off docs/roadmap.md** in the commit that does the work.
 - **Anduril is GPL-3.0.** Read it for facts about the hardware (pins, calibration, timings) and cite the file. Don't copy its code or its ramp tables into this MIT repo.
 - **No runtime 32- or 64-bit multiplication.** There's no hardware multiplier and no libgcc, so it fails to link with `undefined symbol: __mulsi3`. Host tests won't catch it; `cargo fw` will. 16-bit multiplies, all divisions, and `const fn` maths are fine. docs/toolchain.md has the options.
