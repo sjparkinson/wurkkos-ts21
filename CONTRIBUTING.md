@@ -23,6 +23,7 @@ src/button.rs     switch samples in, clicks and holds out
 src/ramp.rs       brightness levels to PWM duty cycles
 src/temp.rs       temperature sensor readings to kelvin
 src/ui.rs         the state machine docs/ui.md describes
+src/torch.rs      one pass of the firmware loop: switch sample in, level out
 src/main.rs       the firmware loop (a stub on the host)
 src/regs.rs       register addresses and bit values, checked against the ATDF
 src/hw.rs         pins and register access (AVR only)

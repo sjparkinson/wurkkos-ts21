@@ -18,19 +18,16 @@ mod rt;
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
-    use ts21::{button::Clicks, ramp, ui::Ui};
+    use ts21::{ramp, torch::Torch};
 
     hw::init();
 
-    let mut clicks = Clicks::new();
-    let mut ui = Ui::new();
+    let mut torch = Torch::new();
 
     loop {
         hw::wait_for_tick();
-        if let Some(event) = clicks.tick(hw::switch_pressed()) {
-            ui.handle(event);
-        }
-        hw::set_output(ramp::output(ui.output_level()));
+        torch.tick(hw::switch_pressed());
+        hw::set_output(ramp::output(torch.level()));
     }
 }
 
