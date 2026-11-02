@@ -33,6 +33,6 @@ cargo xtask backup /dev/cu.usbserial-XXXX
 cargo xtask flash /dev/cu.usbserial-XXXX
 ```
 
-Every merge to main publishes a [release](https://github.com/sjparkinson/wurkkos-ts21/releases) with the firmware attached as `wurkkos-ts21-0614-<version>.hex`. To flash one of those rather than your own build, pass it to `cargo xtask flash /dev/cu.usbserial-XXXX wurkkos-ts21-0614-<version>.hex`.
+Every merge to main publishes a [release](https://github.com/sjparkinson/wurkkos-ts21/releases) with the firmware attached as `wurkkos-ts21-0614-<version>.hex`. To flash one of those rather than your own build, pass it to `cargo xtask flash /dev/cu.usbserial-XXXX wurkkos-ts21-0614-<version>.hex`. Each file has a build provenance attestation, so `gh attestation verify wurkkos-ts21-0614-<version>.hex -R sjparkinson/wurkkos-ts21` checks it came from this repo's CI.
 
 See [docs/flashing.md](docs/flashing.md) for programmers, pad order, restoring the backup and getting back to Anduril.
