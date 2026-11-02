@@ -6,8 +6,8 @@
 //! # A short AVR primer for reading this file
 //!
 //! The CPU has 32 eight-bit registers, `r0` to `r31`. The top six pair up
-//! into three 16-bit pointer registers that the load and store instructions
-//! can address memory through:
+//! into three 16-bit pointer registers, which the load and store
+//! instructions use to address memory.
 //!
 //! | Pair        | Name |
 //! |-------------|------|
@@ -39,13 +39,11 @@ use crate::regs;
 // function. The `{irqs}` and `{sreg}` placeholders are filled from the
 // `const` arguments at the bottom, so the numbers still come from regs.rs.
 global_asm!(
-    // ---- The vector table ----------------------------------------------
-    //
-    // On reset, and whenever an interrupt fires, the CPU doesn't look
-    // anything up: it jumps to a fixed flash address. Reset goes to address
-    // 0, interrupt number n goes to n slots after that. Each slot is only
-    // big enough for one jump instruction, so the table is a row of jumps
-    // to the real code.
+    // The vector table. On reset, and whenever an interrupt fires, the CPU
+    // jumps to a fixed flash address without looking anything up. Reset
+    // goes to address 0, and interrupt n goes to n slots after that. Each
+    // slot is only big enough for one jump instruction, so the table is a
+    // row of jumps to the real code.
     //
     // The ATtiny1616 has 31 slots (reset plus 30 interrupts,
     // `regs::VECTORS`). With 16 KB of flash each one is a two-word (4-byte)
@@ -53,31 +51,30 @@ global_asm!(
     //
     // `.section .vectors` puts this in its own section, and link.x pins
     // that section to the very start of flash. "ax" marks it allocated
-    // (takes space in the image) and executable; @progbits means it has
-    // real bytes in the file.
+    // (it takes space in the image) and executable, and @progbits means it
+    // has real bytes in the file.
     ".section .vectors, \"ax\", @progbits",
     ".global __vectors",
     "__vectors:",
-    // Slot 0: reset.
+    // Slot 0 is reset.
     "  jmp __reset",
-    // Slots 1 to 30: `.rept`/`.endr` makes the assembler repeat the line.
-    // Nothing enables interrupts yet, so these can't fire, but if one did
+    // Slots 1 to 30 are the interrupts. `.rept` and `.endr` make the
+    // assembler repeat the line between them. Nothing enables interrupts yet, so these can't fire, but if one did
     // it would land on a harmless `reti` rather than random code.
     "  .rept {irqs}",
     "  jmp __unhandled_interrupt",
     "  .endr",
     "",
-    // `reti` returns from an interrupt handler: it pops the return address
-    // the CPU pushed on the way in and tells the interrupt controller the
+    // `reti` returns from an interrupt handler. It pops the return address
+    // the CPU pushed on the way in, and tells the interrupt controller the
     // handler has finished.
     ".section .text.__unhandled_interrupt, \"ax\", @progbits",
     "__unhandled_interrupt:",
     "  reti",
     "",
-    // ---- Reset: get the chip ready for Rust ----------------------------
-    //
-    // `.global` exports the symbol so the linker can see it; link.x names
-    // `__reset` as the ELF entry point too.
+    // Reset, which gets the chip ready for Rust. `.global` exports the
+    // symbol so the linker can see it, and link.x also names `__reset` as
+    // the ELF entry point.
     ".section .text.__reset, \"ax\", @progbits",
     ".global __reset",
     "__reset:",
@@ -89,7 +86,7 @@ global_asm!(
     // holds the flags (carry, zero and so on) and the global interrupt
     // enable bit. It's already zero after reset, but say so anyway.
     //
-    // SP, the stack pointer, already points at the top of SRAM: the
+    // SP, the stack pointer, already points at the top of SRAM. The
     // hardware sets that on reset, so there's nothing to do for it.
     "  clr r1",
     "  out {sreg}, r1",
@@ -102,10 +99,9 @@ global_asm!(
     // link.x), so the copy reads it with an ordinary `ld`.
     //
     // `ldi` (load immediate) puts a constant in a register, one byte at a
-    // time:
-    //   X  (r27:r26) = where in SRAM to write, starting at __data_start
-    //   Z  (r31:r30) = where in flash to read, starting at __data_load
-    //   r25:r24      = __data_end, where to stop
+    // time. X starts at __data_start, the SRAM address to write to. Z starts
+    // at __data_load, the flash address to read from. r25:r24 holds
+    // __data_end, where to stop.
     "  ldi r26, lo8(__data_start)",
     "  ldi r27, hi8(__data_start)",
     "  ldi r30, lo8(__data_load)",
@@ -119,8 +115,8 @@ global_asm!(
     "  ld r0, Z+",
     "  st X+, r0",
     "2:",
-    // Compare X with the end, as a 16-bit number: `cp` compares the low
-    // bytes, `cpc` the high bytes, carrying over from the first. The zero
+    // Compare X with the end as a 16-bit number. `cp` compares the low
+    // bytes, then `cpc` the high bytes, carrying over from the first. The zero
     // flag ends up set only if both bytes matched, and `brne` (branch if not
     // equal) loops back while they differ.
     "  cp r26, r24",
