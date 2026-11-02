@@ -26,6 +26,19 @@ const FLASH_SIZE: u32 = map::FLASH_SIZE as u32;
 const RETI: u16 = 0x9518;
 
 pub fn check(elf: &Elf) -> Result<(), String> {
+    memory(elf)?;
+    let text = elf.section(".text").ok_or("no .text section")?;
+    let image = elf.flash_image();
+    let text = image
+        .get(text.start as usize..text.end as usize)
+        .ok_or(".text isn't in the flash image")?;
+    protected_writes(text)?;
+    Ok(())
+}
+
+/// The checks that are about link.x and src/rt.rs rather than the firmware,
+/// which the link probe (src/bin/link_probe.rs) gets too.
+pub fn memory(elf: &Elf) -> Result<(), String> {
     let symbol = |name| {
         elf.symbol(name)
             .ok_or_else(|| format!("no `{name}` symbol"))
@@ -49,14 +62,7 @@ pub fn check(elf: &Elf) -> Result<(), String> {
         data_load: symbol("__data_load")?,
     };
     ram(&ram_layout, elf.segments())?;
-    mapped(elf.segments())?;
-
-    let text = elf.section(".text").ok_or("no .text section")?;
-    let text = image
-        .get(text.start as usize..text.end as usize)
-        .ok_or(".text isn't in the flash image")?;
-    protected_writes(text)?;
-    Ok(())
+    mapped(elf.segments())
 }
 
 /// Every slot is a `jmp`. Slot 0 goes to `__reset`, the rest somewhere in

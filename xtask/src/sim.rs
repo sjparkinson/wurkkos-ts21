@@ -17,7 +17,7 @@
 //! Touching a register it doesn't model is an error too, so new peripheral
 //! code fails here until the model learns about it.
 //!
-//! With that in place it runs three things:
+//! With that in place it runs four things:
 //!
 //! 1. Reset to `main`, with SRAM full of junk, checking .data and .bss come
 //!    out right.
@@ -26,6 +26,9 @@
 //!    src/rt.rs run zero times.
 //! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip.
 //! 4. Twenty thousand ticks of random clicks and holds.
+//!
+//! `probe` separately runs src/bin/link_probe.rs, which has real statics,
+//! and checks it reads them from where link.x put them.
 //!
 //! Both drive `ts21::torch` alongside the firmware and check the LEDs show
 //! the library's level on every tick; the examples then check where the
@@ -141,6 +144,47 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     against_the_library(sim, &mut report)
         .map_err(|e| format!("random switching, against the library: {e}"))?;
     Ok(report)
+}
+
+/// What src/bin/link_probe.rs's `main` leaves in `LINK_PROBE_COPY`: its
+/// .rodata table, then its .data static's starting values, then a byte it
+/// doesn't touch.
+const PROBE_EXPECTED: [u8; 7] = [0x12, 0x34, 0x56, 0x9A, 0xBC, 0xDE, 0];
+
+/// Runs the link probe from reset with SRAM full of junk, and checks it read
+/// its const table through the mapped-flash window and its .data static
+/// from where the startup code copied it. The firmware has no statics yet,
+/// so this is the only end-to-end check of those parts of link.x.
+pub fn probe(elf: &Elf) -> Result<(), String> {
+    let symbol = |name| {
+        elf.symbol(name)
+            .ok_or_else(|| format!("no `{name}` symbol"))
+    };
+    let sram = |name| -> Result<u16, String> { Ok((symbol(name)? - DATA_SPACE) as u16) };
+    let linked = Layout {
+        data: sram("__data_start")?..sram("__data_end")?,
+        bss: sram("__bss_start")?..sram("__bss_end")?,
+        load: symbol("__data_load")? as u16,
+    };
+    let rodata = elf.section(".rodata").ok_or("no .rodata section")?;
+    if rodata.is_empty() || linked.data.is_empty() || linked.bss.is_empty() {
+        return Err(".rodata, .data or .bss is empty, so there's nothing to check".into());
+    }
+
+    let mut sim = Sim::new(elf.flash_image(), linked.bss.end)?;
+    sim.run_to(symbol("main")? / 2, BOOT_BUDGET)
+        .and_then(|()| check_startup(&sim.chip, &linked))
+        .map_err(|e| format!("startup: {e}"))?;
+    sim.run_to(symbol("link_probe_done")? / 2, BOOT_BUDGET)?;
+
+    let copy = sram("LINK_PROBE_COPY")?;
+    let got = sim.chip.sram(&(copy..copy + PROBE_EXPECTED.len() as u16));
+    if got != PROBE_EXPECTED {
+        return Err(format!(
+            "LINK_PROBE_COPY holds {got:02x?}, expected {PROBE_EXPECTED:02x?}"
+        ));
+    }
+    Ok(())
 }
 
 /// Where src/rt.rs's startup copies and zeroes, as data-space addresses.
