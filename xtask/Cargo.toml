@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Build helpers for the TS21 firmware: hex, size, flash, backup."
+description = "Build helpers for the TS21 firmware: hex, size, flash, backup, simulate."
 publish = false
 edition.workspace = true
 authors.workspace = true
@@ -9,3 +9,8 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+# The firmware's own library, which `cargo xtask simulate` runs. It's this
+# workspace's root package, not a crate from crates.io.
+[dependencies]
+ts21 = { path = ".." }
