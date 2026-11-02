@@ -369,6 +369,32 @@ mod tests {
             (regs::addr::TCA0_PERBUF, "TCA0", single, "PERBUF", 2),
             (regs::addr::TCA0_CMP0BUF, "TCA0", single, "CMP0BUF", 2),
             (regs::addr::TCA0_CMP1BUF, "TCA0", single, "CMP1BUF", 2),
+            (regs::addr::VREF_CTRLA, "VREF", None, "CTRLA", 1),
+            (regs::addr::VREF_CTRLB, "VREF", None, "CTRLB", 1),
+            (regs::addr::ADC0_CALIB, "ADC0", None, "CALIB", 1),
+            (regs::addr::ADC0_CTRLA, "ADC0", None, "CTRLA", 1),
+            (regs::addr::ADC0_CTRLB, "ADC0", None, "CTRLB", 1),
+            (regs::addr::ADC0_CTRLC, "ADC0", None, "CTRLC", 1),
+            (regs::addr::ADC0_CTRLD, "ADC0", None, "CTRLD", 1),
+            (regs::addr::ADC0_SAMPCTRL, "ADC0", None, "SAMPCTRL", 1),
+            (regs::addr::ADC0_MUXPOS, "ADC0", None, "MUXPOS", 1),
+            (regs::addr::ADC0_COMMAND, "ADC0", None, "COMMAND", 1),
+            (regs::addr::ADC0_INTFLAGS, "ADC0", None, "INTFLAGS", 1),
+            (regs::addr::ADC0_RES, "ADC0", None, "RES", 2),
+            (
+                regs::addr::SIGROW_TEMPSENSE0,
+                "SIGROW",
+                None,
+                "TEMPSENSE0",
+                1,
+            ),
+            (
+                regs::addr::SIGROW_TEMPSENSE1,
+                "SIGROW",
+                None,
+                "TEMPSENSE1",
+                1,
+            ),
         ] {
             let (address, theirs) = at(instance, mode, name);
             assert!(
@@ -404,6 +430,23 @@ mod tests {
         let pitctrla = atdf.register("RTC", None, "PITCTRLA");
         let pitstatus = atdf.register("RTC", None, "PITSTATUS");
         let pitintflags = atdf.register("RTC", None, "PITINTFLAGS");
+        let vref = atdf.register("VREF", None, "CTRLA");
+        let adc_ctrla = atdf.register("ADC0", None, "CTRLA");
+        let adc_ctrlb = atdf.register("ADC0", None, "CTRLB");
+        let adc_ctrlc = atdf.register("ADC0", None, "CTRLC");
+        let adc_ctrld = atdf.register("ADC0", None, "CTRLD");
+        let adc_muxpos = atdf.register("ADC0", None, "MUXPOS");
+        let adc_command = atdf.register("ADC0", None, "COMMAND");
+        let adc_intflags = atdf.register("ADC0", None, "INTFLAGS");
+
+        // SAMPLEN is a count, not a named value: it only has to fit.
+        let samplen = atdf.register("ADC0", None, "SAMPCTRL").mask("SAMPLEN");
+        assert_eq!(
+            u32::from(regs::ADC_SAMPLEN_32US) & !samplen,
+            0,
+            "ADC0.SAMPCTRL.SAMPLEN={} spills out of its mask {samplen:#04x}",
+            regs::ADC_SAMPLEN_32US
+        );
 
         for (ours, theirs, label) in [
             (
@@ -460,6 +503,87 @@ mod tests {
                 "RTC.PITSTATUS.CTRLBUSY",
             ),
             (regs::RTC_PI, pitintflags.mask("PI"), "RTC.PITINTFLAGS.PI"),
+            (
+                regs::VREF_ADC0REFSEL_1V1,
+                vref.value("ADC0REFSEL", "1V1"),
+                "VREF.CTRLA.ADC0REFSEL=1V1",
+            ),
+            (
+                regs::VREF_ADC0REFSEL_1V5,
+                vref.value("ADC0REFSEL", "1V5"),
+                "VREF.CTRLA.ADC0REFSEL=1V5",
+            ),
+            (
+                regs::VREF_ADC0REFEN,
+                atdf.register("VREF", None, "CTRLB").mask("ADC0REFEN"),
+                "VREF.CTRLB.ADC0REFEN",
+            ),
+            (
+                regs::ADC_DUTYCYC_DUTY25,
+                atdf.register("ADC0", None, "CALIB")
+                    .value("DUTYCYC", "DUTY25"),
+                "ADC0.CALIB.DUTYCYC=DUTY25",
+            ),
+            (
+                regs::ADC_ENABLE,
+                adc_ctrla.mask("ENABLE"),
+                "ADC0.CTRLA.ENABLE",
+            ),
+            (
+                regs::ADC_SAMPNUM_ACC1,
+                adc_ctrlb.value("SAMPNUM", "ACC1"),
+                "ADC0.CTRLB.SAMPNUM=ACC1",
+            ),
+            (
+                regs::ADC_SAMPNUM_ACC4,
+                adc_ctrlb.value("SAMPNUM", "ACC4"),
+                "ADC0.CTRLB.SAMPNUM=ACC4",
+            ),
+            (
+                regs::ADC_PRESC_DIV16,
+                adc_ctrlc.value("PRESC", "DIV16"),
+                "ADC0.CTRLC.PRESC=DIV16",
+            ),
+            (
+                regs::ADC_REFSEL_INTREF,
+                adc_ctrlc.value("REFSEL", "INTREF"),
+                "ADC0.CTRLC.REFSEL=INTREF",
+            ),
+            (
+                regs::ADC_REFSEL_VDDREF,
+                adc_ctrlc.value("REFSEL", "VDDREF"),
+                "ADC0.CTRLC.REFSEL=VDDREF",
+            ),
+            (
+                regs::ADC_SAMPCAP,
+                adc_ctrlc.mask("SAMPCAP"),
+                "ADC0.CTRLC.SAMPCAP",
+            ),
+            (
+                regs::ADC_INITDLY_DLY32,
+                adc_ctrld.value("INITDLY", "DLY32"),
+                "ADC0.CTRLD.INITDLY=DLY32",
+            ),
+            (
+                regs::ADC_MUXPOS_INTREF,
+                adc_muxpos.value("MUXPOS", "INTREF"),
+                "ADC0.MUXPOS=INTREF",
+            ),
+            (
+                regs::ADC_MUXPOS_TEMPSENSE,
+                adc_muxpos.value("MUXPOS", "TEMPSENSE"),
+                "ADC0.MUXPOS=TEMPSENSE",
+            ),
+            (
+                regs::ADC_STCONV,
+                adc_command.mask("STCONV"),
+                "ADC0.COMMAND.STCONV",
+            ),
+            (
+                regs::ADC_RESRDY,
+                adc_intflags.mask("RESRDY"),
+                "ADC0.INTFLAGS.RESRDY",
+            ),
         ] {
             assert!(
                 u32::from(ours) == theirs,

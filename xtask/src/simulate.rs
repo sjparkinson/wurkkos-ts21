@@ -13,6 +13,11 @@
 //! `wait:2s` leaves the switch alone. Every click or hold is followed by
 //! enough of a pause for it to count, so `1C 1C` is two single clicks.
 //!
+//! A few words set what the ADC sees from then on, taking no time: `cell:3.05V`
+//! for the cell (as the 0614 calibration reports it, 3.8 V to start), `temp:60C`
+//! for the MCU (25 °C to start), and `adc:0` for a broken ADC whose every
+//! conversion reads that number. So `cell:3.05V 1C wait:6s` is a low cell.
+//!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
 //! `h` holds the switch down until pressed again.
@@ -23,10 +28,10 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::world::{Rig, World};
 use ts21::TICKS_PER_SECOND;
 use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
-use ts21::torch::Torch;
 
 use crate::terminal::{CTRL_C, Terminal};
 
@@ -48,13 +53,37 @@ pub enum Action {
     Hold { clicks: u8, ticks: u16 },
     /// The switch left alone for this many ticks.
     Wait(u16),
+    /// The cell from now on, in centivolts.
+    Cell(u16),
+    /// The MCU's temperature from now on, in kelvin.
+    Temp(u16),
+    /// Every ADC conversion reads this from now on.
+    Adc(u16),
 }
 
 impl FromStr for Action {
     type Err = String;
 
-    /// `3C`, `2H`, `1H:500ms` or `wait:2s`.
+    /// `3C`, `2H`, `1H:500ms`, `wait:2s`, `cell:3.05V`, `temp:60C` or `adc:0`.
     fn from_str(word: &str) -> Result<Self, String> {
+        if let Some(volts) = word.strip_prefix("cell:") {
+            return centivolts(volts).map(Self::Cell);
+        }
+        if let Some(celsius) = word.strip_prefix("temp:") {
+            let bad = || format!("expected a temperature like 60C, not `{celsius}`");
+            let degrees: u8 = celsius
+                .strip_suffix('C')
+                .ok_or_else(bad)?
+                .parse()
+                .map_err(|_| bad())?;
+            return Ok(Self::Temp(ts21::thermal::celsius(degrees)));
+        }
+        if let Some(raw) = word.strip_prefix("adc:") {
+            let raw = raw
+                .parse()
+                .map_err(|_| format!("expected a raw reading like adc:0, not `{raw}`"))?;
+            return Ok(Self::Adc(raw));
+        }
         if let Some(duration) = word.strip_prefix("wait:") {
             return Ok(Self::Wait(ticks(duration)?));
         }
@@ -121,22 +150,55 @@ fn ticks(duration: &str) -> Result<u16, String> {
     }
 }
 
-/// The switch, one sample per tick, for a whole script.
-pub fn samples(actions: &[Action]) -> Vec<bool> {
+/// Centivolts from `3.05V`.
+fn centivolts(volts: &str) -> Result<u16, String> {
+    let bad = || format!("expected a voltage like 3.05V, not `{volts}`");
+    let number = volts.strip_suffix('V').ok_or_else(bad)?;
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if fraction.len() > 2 || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let whole: u16 = whole.parse().map_err(|_| bad())?;
+    let fraction: u16 = format!("{fraction:0<2}").parse().map_err(|_| bad())?;
+    whole
+        .checked_mul(100)
+        .and_then(|cv| cv.checked_add(fraction))
+        .ok_or_else(bad)
+}
+
+/// One tick of a script: the switch, and what the ADC sees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    pub pressed: bool,
+    pub world: World,
+}
+
+/// The switch and the world, one sample per tick, for a whole script.
+pub fn samples(actions: &[Action]) -> Vec<Sample> {
     let mut out = Vec::new();
+    let mut world = World::NORMAL;
     for &action in actions {
-        match action {
-            Action::Clicks(n) => out.extend(clicks(n)),
-            Action::Hold { clicks: n, ticks } => {
-                out.extend(clicks(n));
-                out.extend(span(true, ticks));
-            }
-            Action::Wait(ticks) => {
-                out.extend(span(false, ticks));
+        let pressed: Vec<bool> = match action {
+            Action::Clicks(n) => clicks(n).chain(span(false, SETTLE_TICKS)).collect(),
+            Action::Hold { clicks: n, ticks } => clicks(n)
+                .chain(span(true, ticks))
+                .chain(span(false, SETTLE_TICKS))
+                .collect(),
+            Action::Wait(ticks) => span(false, ticks).collect(),
+            Action::Cell(cell) => {
+                world.cell = cell;
                 continue;
             }
-        }
-        out.extend(span(false, SETTLE_TICKS));
+            Action::Temp(kelvin) => {
+                world.kelvin = kelvin;
+                continue;
+            }
+            Action::Adc(raw) => {
+                world.stuck = Some(raw);
+                continue;
+            }
+        };
+        out.extend(pressed.into_iter().map(|pressed| Sample { pressed, world }));
     }
     out
 }
@@ -161,18 +223,18 @@ pub struct Run {
 
 /// Runs a script on a fresh torch.
 pub fn run(actions: &[Action]) -> Run {
-    let mut torch = Torch::new();
+    let mut rig = Rig::default();
     let mut log = Log::default();
     let mut lines = Vec::new();
     let samples = samples(actions);
-    for (now, &pressed) in (0..).zip(&samples) {
-        let event = torch.tick(pressed);
-        lines.extend(log.note(now, event, torch.level()));
+    for (now, sample) in (0..).zip(&samples) {
+        let event = rig.tick(sample.pressed, &sample.world);
+        lines.extend(log.note(now, event, rig.level()));
     }
     Run {
         lines,
         ticks: samples.len() as u32,
-        level: torch.level(),
+        level: rig.level(),
     }
 }
 
@@ -316,7 +378,8 @@ enum Command {
 /// A live session, minus the terminal: keys in, ticks, a status line out.
 #[derive(Default)]
 struct Live {
-    torch: Torch,
+    /// The torch, with a 3.8 V cell at 25 °C.
+    torch: Rig,
     log: Log,
     now: u32,
     /// Scripted samples from clicks, played before `held` counts.
@@ -352,7 +415,7 @@ impl Live {
     /// One 64 Hz tick, and a log line if it did something.
     fn tick(&mut self) -> Option<String> {
         self.pressed = self.queue.pop_front().unwrap_or(self.held);
-        let event = self.torch.tick(self.pressed);
+        let event = self.torch.tick(self.pressed, &World::NORMAL);
         let line = self.log.note(self.now, event, self.torch.level());
         self.now += 1;
         line
@@ -374,7 +437,7 @@ impl Live {
             Level(level),
             output.linear,
             output.fet,
-            self.torch.ui()
+            self.torch.torch.ui()
         );
         let text: String = text.chars().take(width.saturating_sub(BAR + 1)).collect();
         format!(

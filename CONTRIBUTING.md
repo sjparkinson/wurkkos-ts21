@@ -25,8 +25,10 @@ src/ramp.rs       brightness levels to PWM duty cycles
 src/temp.rs       temperature sensor readings to kelvin
 src/battery.rs    battery readings to centivolts, and low-voltage protection
 src/thermal.rs    temperatures in, a ceiling on the level out
+src/sensors.rs    which ADC channel to read each tick, and when a reading's due
+src/limits.rs     ADC readings in, the UI's level capped by the cell and the heat out
 src/ui.rs         the state machine docs/ui.md describes
-src/torch.rs      one pass of the firmware loop: switch sample in, level out
+src/torch.rs      one pass of the firmware loop: switch sample and ADC result in, level out
 src/main.rs       the firmware loop (a stub on the host)
 src/regs.rs       register addresses and bit values, checked against the ATDF
 src/hw.rs         pins and register access (AVR only)
