@@ -45,6 +45,7 @@ use crate::elf::{DATA_SPACE, Elf, RAM};
 use crate::simulate;
 use crate::spec::{self, Example};
 use crate::switching::RandomSwitching;
+use crate::updi::map;
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
@@ -57,9 +58,10 @@ use regs::addr as reg;
 
 /// SRAM as data-space addresses.
 const SRAM: Range<u16> = (RAM.start - DATA_SPACE) as u16..(RAM.end - DATA_SPACE) as u16;
-/// Where flash appears in data space, and how much of it there is.
-const MAPPED: u16 = 0x8000;
-const FLASH_SIZE: usize = 16 * 1024;
+/// Where flash appears in data space, and how much of it there is. updi.rs
+/// checks both against the ATDF.
+const MAPPED: u16 = map::FLASH;
+const FLASH_SIZE: usize = map::FLASH_SIZE;
 
 /// SRAM's contents before startup. Real SRAM powers up holding anything; a
 /// fixed pattern makes a byte that should have been written stand out.

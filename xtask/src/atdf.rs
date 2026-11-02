@@ -484,6 +484,108 @@ mod tests {
     }
 
     #[test]
+    fn sram_matches_the_atdf() {
+        let sram = Atdf::load().segment("INTERNAL_SRAM");
+        let start = crate::elf::DATA_SPACE + sram.start;
+        assert_eq!(crate::elf::RAM, start..start + sram.size, "elf::RAM");
+    }
+
+    /// link.x's MEMORY regions, and every other address in it, against the
+    /// ATDF. 0x800000 (`elf::DATA_SPACE`) is where AVR ELF files put data
+    /// space, a toolchain convention the ATDF doesn't record.
+    #[test]
+    fn linker_script_matches_the_atdf() {
+        let atdf = Atdf::load();
+        let data = crate::elf::DATA_SPACE;
+        let flash = atdf.segment("PROGMEM");
+        let mapped = atdf.segment("MAPPED_PROGMEM");
+        let sram = atdf.segment("INTERNAL_SRAM");
+
+        let script = link_x();
+        let (memory, sections) = linker_script(&script);
+        assert_eq!(
+            memory,
+            [
+                ("FLASH".into(), flash.start, flash.size),
+                ("MAPPED".into(), data + mapped.start, mapped.size),
+                ("RAM".into(), data + sram.start, sram.size),
+            ],
+            "link.x MEMORY"
+        );
+        // SECTIONS turns flash addresses into mapped ones, as ELF addresses
+        // for .rodata and as data-space ones for __data_load.
+        for n in sections {
+            assert!(
+                n == data + mapped.start || n == mapped.start,
+                "link.x SECTIONS has {n:#x}, which isn't the mapped-flash window"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_a_linker_script() {
+        let (memory, sections) = linker_script(
+            "/* MEMORY { X : ORIGIN = 1 } 0x1 */\n\
+             MEMORY {\n  A (rx) : ORIGIN = 0x10, LENGTH = 2K\n  B : ORIGIN = 0, LENGTH = 0x20\n}\n\
+             SECTIONS { .a (0x800 + 1) : AT(0x9) { } }",
+        );
+        assert_eq!(memory, [("A".into(), 0x10, 2048), ("B".into(), 0, 0x20)]);
+        assert_eq!(sections, [0x800, 0x9]);
+    }
+
+    fn link_x() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../link.x");
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// Just enough of a GNU ld script: the (name, origin, length) of each
+    /// MEMORY region, and the hex numbers anywhere after MEMORY. Comments
+    /// are dropped first.
+    fn linker_script(script: &str) -> (Vec<(String, u32, u32)>, Vec<u32>) {
+        let mut text = String::new();
+        let mut rest = script;
+        while let Some(at) = rest.find("/*") {
+            text.push_str(&rest[..at]);
+            let end = rest[at..].find("*/").expect("unterminated comment");
+            rest = &rest[at + end + 2..];
+        }
+        text.push_str(rest);
+
+        let start = text.find("MEMORY").expect("no MEMORY block");
+        let open = start + text[start..].find('{').expect("no { after MEMORY");
+        let close = open + text[open..].find('}').expect("no } after MEMORY");
+        let memory = text[open + 1..close]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let (name, spec) = line.split_once(':').expect("region without :");
+                let name = name.split_whitespace().next().expect("region name");
+                let field = |key: &str| {
+                    let value = spec
+                        .split(',')
+                        .find_map(|f| f.trim().strip_prefix(key))
+                        .and_then(|f| f.trim().strip_prefix('='))
+                        .unwrap_or_else(|| panic!("{name} has no {key}"))
+                        .trim();
+                    match value.strip_suffix('K') {
+                        Some(k) => num(k) * 1024,
+                        None => num(value),
+                    }
+                };
+                (name.to_string(), field("ORIGIN"), field("LENGTH"))
+            })
+            .collect();
+
+        let numbers = text[close + 1..]
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| w.starts_with("0x"))
+            .map(num)
+            .collect();
+        (memory, numbers)
+    }
+
+    #[test]
     fn simulator_cpu_registers_match_the_atdf() {
         let atdf = Atdf::load();
         for (ours, name) in [
