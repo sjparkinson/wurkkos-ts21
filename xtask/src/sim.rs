@@ -24,24 +24,27 @@
 //! 2. The same startup code with .data and .bss moved and given contents,
 //!    because the firmware has no statics yet, so as linked both loops in
 //!    src/rt.rs run zero times.
-//! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
-//!    checking the LEDs at the end.
-//! 4. Twenty thousand ticks of random clicks and holds, checking the LEDs
-//!    match `ts21::torch` on every tick.
+//! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip.
+//! 4. Twenty thousand ticks of random clicks and holds.
+//!
+//! Both drive `ts21::torch` alongside the firmware and check the LEDs show
+//! the library's level on every tick; the examples then check where the
+//! library ended up.
 //!
 //! Throughout, it measures how deep the stack goes and checks every pass of
 //! the main loop fits in a 64 Hz tick.
 
+use std::iter;
 use std::ops::Range;
 
-use ts21::button::{HOLD_TICKS, RELEASE_TICKS};
+use ts21::button::RandomSwitching;
 use ts21::ramp;
 use ts21::torch::Torch;
 
 use crate::avr::{Bus, Cpu, is_two_words};
 use crate::elf::{DATA_SPACE, Elf, RAM};
 use crate::simulate;
-use crate::spec::{self, Example, Expect};
+use crate::spec::{self, Example};
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
@@ -272,43 +275,47 @@ fn word(bytes: &[u8], at: usize) -> Option<u16> {
 /// minutes of a torch being clicked and held.
 const RANDOM_TICKS: usize = 20_000;
 
-/// Runs one of docs/ui.md's examples on the firmware, from just after
-/// `main`, and checks the LEDs at the end.
-fn ui_example(mut sim: Sim, example: &Example, report: &mut Report) -> Result<(), String> {
-    sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
-    for pressed in simulate::samples(&example.actions) {
-        let took = sim.tick(pressed)?;
-        report.loop_instructions = report.loop_instructions.max(took);
-    }
-    report.stack = report.stack.max(sim.stack());
-
-    let leds = sim.chip.leds();
-    let holds = match example.expect {
-        Expect::Off => leds == (0, 0),
-        Expect::On => leds != (0, 0),
-        Expect::Level(level) => leds == duty(level),
-    };
-    if !holds {
-        return Err(format!(
-            "expected {:?}, but (linear, FET) duty is {leds:?}",
+/// Runs one of docs/ui.md's examples on the firmware and the library in
+/// step, then checks where the library ended up against the example.
+fn ui_example(sim: Sim, example: &Example, report: &mut Report) -> Result<(), String> {
+    let level = in_step(sim, simulate::samples(&example.actions), report)?;
+    if example.expect.holds(level) {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected {:?}, but it ends at level {level}",
             example.expect
-        ));
+        ))
     }
-    Ok(())
 }
 
-/// Switches the firmware and `ts21::torch` the same random way, and checks
-/// the LEDs match the library's level on every tick. The host tests trust
-/// the library; this checks the AVR build of it, and `hw.rs`'s pins and
-/// channels, do what it says.
-fn against_the_library(mut sim: Sim, report: &mut Report) -> Result<(), String> {
+/// Switches the firmware and the library the same random way. The host
+/// tests trust the library; this checks the AVR build of it, and `hw.rs`'s
+/// pins and channels, do what it says.
+fn against_the_library(sim: Sim, report: &mut Report) -> Result<(), String> {
+    let samples = RandomSwitching::new(0x5EED)
+        .flat_map(|(pressed, ticks)| iter::repeat_n(pressed, ticks.into()))
+        .take(RANDOM_TICKS);
+    in_step(sim, samples, report).map(drop)
+}
+
+/// Feeds the same switch samples to the firmware, from just after `main`,
+/// and to `ts21::torch`, and checks the LEDs show the library's level on
+/// every tick. Returns the level it ends at.
+fn in_step(
+    mut sim: Sim,
+    samples: impl IntoIterator<Item = bool>,
+    report: &mut Report,
+) -> Result<u8, String> {
     sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
     let mut torch = Torch::new();
-    for (tick, pressed) in random_switching(RANDOM_TICKS).into_iter().enumerate() {
+    for (tick, pressed) in samples.into_iter().enumerate() {
         let took = sim.tick(pressed).map_err(|e| format!("tick {tick}: {e}"))?;
         report.loop_instructions = report.loop_instructions.max(took);
         torch.tick(pressed);
-        let (leds, want) = (sim.chip.leds(), duty(torch.level()));
+        let output = ramp::output(torch.level());
+        let want = (output.linear.into(), output.fet.into());
+        let leds = sim.chip.leds();
         if leds != want {
             return Err(format!(
                 "tick {tick}: the firmware's (linear, FET) duty is {leds:?}, \
@@ -318,50 +325,7 @@ fn against_the_library(mut sim: Sim, report: &mut Report) -> Result<(), String> 
         }
     }
     report.stack = report.stack.max(sim.stack());
-    Ok(())
-}
-
-/// What the LEDs should show for a level, as `Chip::leds` reports it.
-fn duty(level: u8) -> (u16, u16) {
-    let output = ramp::output(level);
-    (output.linear.into(), output.fet.into())
-}
-
-/// Presses and gaps of random lengths, mostly near the edges of what
-/// src/button.rs counts as a click, a hold and the end of a run of clicks.
-/// Xorshift with a fixed seed, so a failure always comes back.
-fn random_switching(ticks: usize) -> Vec<bool> {
-    let mut state: u32 = 0x5EED;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-        state
-    };
-    let (hold, release) = (u32::from(HOLD_TICKS), u32::from(RELEASE_TICKS));
-    let edges = [
-        1,
-        2,
-        4,
-        hold - 1,
-        hold,
-        hold + 1,
-        release - 1,
-        release,
-        release + 1,
-    ];
-    let mut out = Vec::with_capacity(ticks);
-    let mut pressed = false;
-    while out.len() < ticks {
-        let len = match next() % 3 {
-            0 => 1 + next() % 100,
-            _ => edges[next() as usize % edges.len()],
-        };
-        out.extend((0..len).map(|_| pressed));
-        pressed = !pressed;
-    }
-    out.truncate(ticks);
-    out
+    Ok(torch.level())
 }
 
 struct Sim {

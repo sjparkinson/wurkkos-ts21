@@ -38,7 +38,6 @@ pub enum Expect {
 }
 
 impl Expect {
-    #[cfg(test)]
     pub fn holds(self, level: u8) -> bool {
         match self {
             Expect::Off => level == 0,
@@ -140,7 +139,7 @@ mod tests {
         let examples = examples(UI_MD).unwrap();
         assert!(!examples.is_empty());
         for example in examples {
-            let level = simulate::level_after(&example.actions);
+            let level = simulate::run(&example.actions).level;
             assert!(
                 example.expect.holds(level),
                 "{}: expected {:?}, but the library ends at level {level}",
