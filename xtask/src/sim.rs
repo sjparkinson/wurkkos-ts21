@@ -682,8 +682,10 @@ fn plain(addr: usize) -> bool {
 
 /// The registers that decide what a conversion measures. Changing one
 /// mid-conversion is a mistake the firmware shouldn't make.
-const ADC_SETUP: [usize; 7] = [
+const ADC_SETUP: [usize; 9] = [
     reg::VREF_CTRLA,
+    reg::VREF_CTRLB,
+    reg::ADC0_CALIB,
     reg::ADC0_CTRLA,
     reg::ADC0_CTRLB,
     reg::ADC0_CTRLC,
@@ -872,8 +874,9 @@ impl Bus for Chip {
                 }
             }
             reg::ADC0_INTFLAGS => {
-                // Writing a 1 clears RESRDY.
-                if value & regs::ADC_RESRDY != 0 {
+                // Writing a 1 clears RESRDY. It only clears the flag: a
+                // conversion that's still running finishes and sets it again.
+                if value & regs::ADC_RESRDY != 0 && !self.converting() {
                     self.adc.ready_at = None;
                 }
             }
@@ -1040,6 +1043,36 @@ mod tests {
         c.read(reg::ADC0_RES as u16).unwrap();
         c.read(reg::ADC0_RES as u16 + 1).unwrap();
         assert_eq!(c.read(reg::ADC0_INTFLAGS as u16), Ok(0));
+    }
+
+    #[test]
+    fn clearing_resrdy_mid_conversion_leaves_the_conversion_running() {
+        let mut c = chip();
+        adc_setup(&mut c, Channel::Voltage);
+        c.write(reg::ADC0_COMMAND as u16, regs::ADC_STCONV).unwrap();
+        c.write(reg::ADC0_INTFLAGS as u16, regs::ADC_RESRDY)
+            .unwrap();
+        c.now += CONVERSION_INSTRUCTIONS;
+        assert_eq!(c.read(reg::ADC0_INTFLAGS as u16), Ok(regs::ADC_RESRDY));
+        // Once it's done, clearing the flag throws the result away.
+        c.write(reg::ADC0_INTFLAGS as u16, regs::ADC_RESRDY)
+            .unwrap();
+        assert_eq!(c.read(reg::ADC0_INTFLAGS as u16), Ok(0));
+        assert!(c.read(reg::ADC0_RES as u16).is_err());
+    }
+
+    #[test]
+    fn the_reference_and_duty_cycle_stay_put_mid_conversion() {
+        for (register, value) in [(reg::VREF_CTRLB, 0), (reg::ADC0_CALIB, 0)] {
+            let mut c = chip();
+            adc_setup(&mut c, Channel::Voltage);
+            c.write(reg::ADC0_COMMAND as u16, regs::ADC_STCONV).unwrap();
+            let err = c.write(register as u16, value).unwrap_err();
+            assert!(
+                err.contains(&format!("{} mid-conversion", name(register))),
+                "{err}"
+            );
+        }
     }
 
     #[test]
