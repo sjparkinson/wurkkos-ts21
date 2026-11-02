@@ -17,7 +17,7 @@ You need [rustup](https://rustup.rs). The pinned nightly, `rust-src` and everyth
 
 ```sh
 cargo fw            # target/avr-none/release/ts21.elf
-cargo xtask hex     # target/ts21.hex
+cargo xtask hex     # target/wurkkos-ts21-0614.hex
 cargo xtask size    # flash and RAM use
 ```
 
