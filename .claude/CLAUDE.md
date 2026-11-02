@@ -52,7 +52,6 @@ Agents in `.claude/agents/` report back and never edit. Use them rather than doi
 
 ## Things that look wrong but aren't
 
-- `--cfg no_fp_fmt_parse` in `.cargo/config.toml` works around `core` failing to build for 16-bit targets on the pinned nightly. See docs/toolchain.md.
 - `.rodata` is linked at 0x808000 and up: AVR ELF files put data space at 0x800000, plus the mapped-flash window at 0x8000. It's how const tables are read without `lpm`.
 - `src/main.rs` has a host `fn main()` that exits with an error. It's there so the workspace builds and tests on the host.
 - `hw::wait_for_tick` busy-waits. Sleep is roadmap stage 2.
