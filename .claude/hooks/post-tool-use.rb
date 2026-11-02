@@ -25,7 +25,7 @@ def rust(path, dir)
   return fmt if fmt
 
   if FIRMWARE_ONLY.include?(relative)
-    run('cargo', 'fw-clippy', '-q', chdir: dir)
+    run('cargo', '-q', 'fw-clippy', chdir: dir)
   else
     run('cargo', 'clippy', '--workspace', '--all-targets', '--locked', '-q', '--', '-D', 'warnings', chdir: dir)
   end
