@@ -60,21 +60,8 @@ Never write fuses. Changing `SYSCFG0` can disable UPDI, and then the light needs
 
 ## Bumping the nightly
 
-AVR is a tier 3 target. Pick a nightly at least a week old, change `rust-toolchain.toml`, run every check above, and compare `cargo xtask size` before and after. Then see whether the workarounds in [docs/toolchain.md](docs/toolchain.md) are still needed.
+AVR is a tier 3 target. Pick a nightly, change `rust-toolchain.toml`, run every check above, and compare `cargo xtask size` before and after. Then see whether the workarounds in [docs/toolchain.md](docs/toolchain.md) are still needed.
 
 ## Commits
 
 Single-line [Conventional Commits](https://www.conventionalcommits.org), such as `feat(ui): add battery check on 3C`. PRs merge by rebase only, so every commit on a branch lands on main.
-
-## Workflows
-
-Actions are pinned in `.github/workflows/actions.lock`, a [workflow lockfile](https://docs.github.com/actions/concepts/security/workflow-dependency-lockfiles) that records the commit each `uses:` resolves to. Rerun `gh actions-lock` (`gh extension install github/gh-actions-lock`) after adding a workflow or changing any `uses:`, and commit the lockfile with it. Dependabot updates the lockfile in its own PRs.
-
-## Claude Code
-
-`.claude/CLAUDE.md` has the project instructions. `.claude/agents/` holds read-only review agents (registers, AVR codegen, the simulator, the UI spec, hardware research). `.claude/settings.json` denies `cargo xtask ping`, `backup`, `flash` and `restore`, so only a person drives the hardware.
-
-It also wires up two Ruby hooks (standard library only).
-
-- `.claude/hooks/post-tool-use.rb` runs after every Edit or Write. It runs `rustfmt --check` and clippy for `.rs` files (`cargo fw-clippy` for `src/hw.rs` and `src/rt.rs`), `ruby -wc` for `.rb` files, and `gh actions-lock --verify-local` for workflows.
-- `.claude/hooks/pre-tool-use.rb` runs before any `git commit`. It rejects a message that isn't a Conventional Commit, then runs `cargo test --workspace --locked -q` and blocks the commit if it fails.
