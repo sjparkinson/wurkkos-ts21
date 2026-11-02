@@ -63,6 +63,9 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -76,11 +79,18 @@ jobs:
 
       - run: |
           version="0.1.$(git rev-list --count HEAD)"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
           mv dist/ts21.hex "dist/wurkkos-ts21-0614-$version.hex"
           mv dist/avr-none/release/ts21.elf "dist/wurkkos-ts21-0614-$version.elf"
-          gh release create "v$version" dist/wurkkos-ts21-0614-* \
+
+      - uses: actions/attest@v4.2.2
+        with:
+          subject-path: dist/wurkkos-ts21-0614-*
+
+      - run: |
+          gh release create "v$VERSION" dist/wurkkos-ts21-0614-* \
             --target "$GITHUB_SHA" \
-            --title "$version+$(git rev-parse --short HEAD)" \
+            --title "$VERSION+$(git rev-parse --short HEAD)" \
             --generate-notes
         env:
           GITHUB_TOKEN: ${{ github.token }}
