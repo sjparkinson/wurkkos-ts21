@@ -20,8 +20,18 @@
 //!   and it isn't warming up, step back up the same way, but slower and never
 //!   more than a level a reading. In between, hold. That gap, the slow climb
 //!   and the lookahead are what stop it hunting.
-//! - Never step down below a floor, by default a third of the ramp
-//!   (Anduril's `MIN_THERM_STEPDOWN` is `RAMP_SIZE / 3`).
+//! - Never step down below a floor, by default the top of the linear
+//!   channel. The linear regulator tops out around 350 mA, which can't
+//!   overheat the head, so that's the brightest level that's always safe.
+//!   Anduril's build for this light (model 0614) floors at 60, with the
+//!   linear channel full at 75 (`MIN_THERM_STEPDOWN` and `MAX_1x7135` in
+//!   `hw/sofirn/blf-q8-t1616/anduril.h`), so it's on the linear channel too.
+//!
+//! Only sample while the light's on. Anduril leaves the temperature alone
+//! in standby because the ADC costs about 250 µA against about 20 µA asleep
+//! (`fsm/adc.c`), and the torch will sleep when off. Call [`Thermal::reset`]
+//! when it turns on, so the readings and ceiling from last time don't carry
+//! over. A light that turns on hot then steps down from the first readings.
 //! - Ignore a reading that's impossible or far from the last one, unless a
 //!   few in a row agree. If the sensor keeps reading impossible values, step
 //!   down to the floor, since a broken sensor can't say it's cool.
@@ -30,7 +40,7 @@
 //! yet, so expect them to change once one's been run up to temperature.
 
 use crate::gradual::Gradual;
-use crate::ramp::LEVELS;
+use crate::ramp::{LEVELS, LINEAR_MAX};
 
 /// How many ticks apart to take readings: four a second.
 pub const SAMPLE_TICKS: u16 = 16;
@@ -49,10 +59,11 @@ pub struct Config {
 }
 
 impl Config {
-    /// 45 °C, Anduril's default, and a floor of a third of the ramp.
+    /// 45 °C, Anduril's default, and a floor at the top of the linear
+    /// channel.
     pub const DEFAULT: Self = Self {
         limit: celsius(45),
-        floor: LEVELS / 3,
+        floor: LINEAR_MAX,
     };
 }
 
@@ -143,6 +154,13 @@ impl Thermal {
         self.ceiling.level()
     }
 
+    /// Forgets everything but the config: no ceiling, and the next reading
+    /// starts the smoothing and the trend afresh. Call it when the light
+    /// turns on, since nothing's sampled while it's off.
+    pub fn reset(&mut self) {
+        *self = Self::new(self.config);
+    }
+
     /// One tick: moves the ceiling a step towards where it's heading and
     /// returns it.
     pub fn tick(&mut self) -> u8 {
@@ -150,7 +168,7 @@ impl Thermal {
     }
 
     /// One temperature reading in kelvin, taken every [`SAMPLE_TICKS`]
-    /// ticks, and the level the light is at right now (`0` if it's off).
+    /// ticks while the light's on, and the level it's at right now.
     pub fn sample(&mut self, kelvin: u16, level: u8) {
         let smooth = match self.smooth {
             _ if !PLAUSIBLE.contains(&kelvin) => {
@@ -602,13 +620,65 @@ mod tests {
     }
 
     #[test]
-    fn heat_while_off_still_lowers_the_ceiling() {
+    fn the_floor_is_the_top_of_the_linear_channel() {
+        assert_eq!(FLOOR, LINEAR_MAX);
+    }
+
+    /// Turns the light off (no readings while it is) and on again.
+    fn off_and_on(run: &mut Run) {
+        run.output = 0;
+        run.thermal.reset();
+    }
+
+    #[test]
+    fn a_reset_forgets_the_ceiling_and_the_old_readings() {
         let mut run = Run::new();
-        run.hold(celsius(30), 0, 20);
-        run.hold(LIMIT + 10, 0, 4 * 60);
-        assert_eq!(run.thermal.ceiling(), FLOOR);
-        // Turning on while hot comes on at the ceiling.
-        assert_eq!(run.sample(LIMIT + 10, LEVELS), FLOOR);
+        run.hold(celsius(30), LEVELS, 20);
+        assert_eq!(run.hold(LIMIT + 10, LEVELS, 4 * 60), FLOOR);
+        off_and_on(&mut run);
+        assert_eq!(run.thermal.ceiling(), LEVELS);
+        // Cooled while off. It's a fresh start, not a jump to ignore, and
+        // there's no trend from the hot readings to predict with.
+        assert_eq!(run.hold(celsius(30), LEVELS, 4 * 60), LEVELS);
+    }
+
+    #[test]
+    fn turning_on_hot_steps_down_from_the_first_readings() {
+        let mut run = Run::new();
+        run.hold(celsius(30), LEVELS, 20);
+        off_and_on(&mut run);
+        // Turned on at turbo while still 10 °C over: the first reading has
+        // no history, and it still steps down straight away.
+        assert!(run.sample(LIMIT + 10, LEVELS) < LEVELS);
+        let mut samples = 1;
+        while run.output > FLOOR {
+            run.sample(LIMIT + 10, LEVELS);
+            samples += 1;
+        }
+        assert!(samples <= 4 * 10, "took {samples} readings");
+    }
+
+    #[test]
+    fn turning_on_hot_at_a_low_level_steps_down_from_there() {
+        let mut run = Run::new();
+        let ui = LINEAR_MAX + 30;
+        off_and_on(&mut run);
+        run.sample(LIMIT + 10, ui);
+        // The first step down shows, rather than spending a second or two
+        // bringing the ceiling down from the top.
+        run.hold(LIMIT + 10, ui, 2);
+        assert!(run.output < ui);
+    }
+
+    #[test]
+    fn a_reset_keeps_the_config() {
+        let config = Config {
+            limit: celsius(50),
+            floor: 100,
+        };
+        let mut thermal = Thermal::new(config);
+        thermal.reset();
+        assert_eq!(thermal.config, config);
     }
 
     #[test]
@@ -639,11 +709,12 @@ mod tests {
     }
 
     #[test]
-    fn a_cool_day_runs_the_linear_channel_flat_out() {
+    fn a_cool_day_leaves_a_low_fet_level_alone() {
         let mut run = Run::new();
         let mut head = Head::new(celsius(20));
         let mut noise = Noise(9);
-        closed_loop(&mut run, &mut head, LINEAR_MAX, 4 * 60 * 20, &mut noise, 1);
-        assert_eq!(run.output, LINEAR_MAX);
+        let ui = LINEAR_MAX + 20;
+        let stretch = closed_loop(&mut run, &mut head, ui, 4 * 60 * 20, &mut noise, 1);
+        assert_eq!((stretch.lowest, stretch.highest), (ui, ui), "{stretch:?}");
     }
 }
