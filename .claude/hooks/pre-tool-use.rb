@@ -1,12 +1,10 @@
 #!/usr/bin/env ruby
-# frozen_string_literal: true
-
 # PreToolUse hook on Bash. When the command is a `git commit`, it checks the
 # message is a Conventional Commit and runs the host tests first. Exit 2 blocks
 # the commit and hands stderr back to Claude.
 
-require 'json'
-require 'open3'
+require "json"
+require "open3"
 
 TYPES = %w[feat fix docs refactor test ci build perf style chore revert].freeze
 CONVENTIONAL = /\A(?:#{TYPES.join('|')})(?:\([a-z0-9._\/-]+\))?!?: \S/
@@ -28,7 +26,7 @@ end
 # Returns nil when the subject line is fine, or a reason when it isn't.
 def problem(msg)
   subject = msg.lines.first.to_s.chomp
-  return 'the commit message is empty' if subject.strip.empty?
+  return "the commit message is empty" if subject.strip.empty?
   return nil if CONVENTIONAL.match?(subject)
 
   "#{subject.inspect} isn't a Conventional Commit. Use `type(scope): summary` " \
@@ -41,7 +39,7 @@ def block(reason)
 end
 
 input = JSON.parse($stdin.read)
-command = input.dig('tool_input', 'command').to_s
+command = input.dig("tool_input", "command").to_s
 exit 0 unless COMMIT.match?(command)
 
 # No inline message (-F, --amend --no-edit, the editor): nothing to check.
@@ -52,7 +50,7 @@ if msg
 end
 
 # The checkout the session is in, which may be a worktree rather than CLAUDE_PROJECT_DIR.
-top, status = Open3.capture2('git', 'rev-parse', '--show-toplevel')
+top, status = Open3.capture2("git", "rev-parse", "--show-toplevel")
 dir = status.success? ? top.chomp : Dir.pwd
-out, status = Open3.capture2e('cargo', 'test', '--workspace', '--locked', '-q', chdir: dir)
+out, status = Open3.capture2e("cargo", "test", "--workspace", "--locked", "-q", chdir: dir)
 block("cargo test --workspace --locked -q failed, so the commit is blocked:\n#{out.lines.last(60).join}") unless status.success?
