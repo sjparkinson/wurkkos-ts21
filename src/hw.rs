@@ -166,7 +166,9 @@ pub fn init() {
     // conversion asks for it. The datasheet doesn't say how long a request
     // lasts, and a 1.5 V reference caught starting up reads low, which
     // reads as a fuller cell than it is. It costs a little current, which
-    // matters once the torch sleeps (roadmap stage 2), not before.
+    // matters once the torch sleeps (roadmap stage 2), not before. If sleep
+    // turns this or the ADC off, `sensors::Schedule` has to forget the
+    // channel it last set up, so the next turn sets the ADC up again.
     write(reg::VREF_CTRLB, regs::VREF_ADC0REFEN);
     // The ATDF says CALIB resets to 50% duty, the datasheet says 25%, and
     // 25% is what it wants at this clock (section 30.5.17), so say so.
@@ -204,6 +206,12 @@ pub fn temperature_calibration() -> Calibration {
 /// Starts an ADC conversion, setting the ADC up for its channel first if
 /// asked. The setups are Anduril's (`arch/attiny1616.c`) for the voltage and
 /// the datasheet's (section 30.3.2.6) for the temperature.
+/// `sensors::Schedule` only asks when the channel changes, so with the light
+/// off the registers are written once and left alone.
+///
+/// It never clears RESRDY. That works because [`adc_result`] runs every
+/// tick and reading the result clears it, so a stale one is never read
+/// twice.
 pub fn adc_start(convert: Convert) {
     if convert.setup {
         let (vref, refsel, muxpos, sampnum) = match convert.channel {

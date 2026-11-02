@@ -56,7 +56,7 @@ pub struct Limits {
     thermal: Thermal,
     /// Whether the UI was on last tick.
     on: bool,
-    /// The level last tick.
+    /// The level the light's at, as of the last tick.
     level: u8,
     /// True until the first temperature reading's in.
     first: bool,
@@ -91,6 +91,12 @@ impl Limits {
         self.convert
     }
 
+    /// The level the light's at, `0` meaning off: the last tick's
+    /// [`Step::level`].
+    pub fn level(&self) -> u8 {
+        self.level
+    }
+
     /// The battery and thermal ceilings right now.
     pub fn ceilings(&self) -> (u8, u8) {
         (self.battery.level(), self.thermal.ceiling())
@@ -104,6 +110,14 @@ impl Limits {
             self.thermal.reset();
         }
         self.on = on;
+        // The level the light's at this tick, before the ceilings move. It's
+        // last tick's level while the UI holds steady, and the UI's on the
+        // tick it turns on. The blink isn't a load worth judging the cell
+        // by, so it counts as off.
+        let level = match on {
+            true => ui.min(self.thermal.ceiling()).min(self.battery.level()),
+            false => 0,
+        };
 
         let (reading, convert) = self.schedule.tick(result, on || self.first);
         self.convert = convert;
@@ -112,11 +126,9 @@ impl Limits {
             Some(Reading::Voltage(raw)) => {
                 let centivolts = battery::centivolts(raw);
                 self.diagnose(battery::plausible(centivolts));
-                // The blink isn't a load worth judging the cell by.
-                let level = if on { self.level } else { 0 };
                 match self.protection.sample(centivolts, level) {
                     Verdict::Off => off = true,
-                    Verdict::Ceiling(ceiling) => self.battery_ceiling(ceiling),
+                    Verdict::Ceiling(ceiling) => self.battery_ceiling(ceiling, level),
                 }
             }
             Some(Reading::Temperature(raw)) => {
@@ -127,7 +139,7 @@ impl Limits {
                 }
                 self.first = false;
                 if on {
-                    self.thermal.sample(kelvin, self.level);
+                    self.thermal.sample(kelvin, level);
                 }
             }
             None => {}
@@ -150,15 +162,13 @@ impl Limits {
         }
     }
 
-    /// A new battery ceiling. Like thermal's, a ceiling above the light's
-    /// level does nothing, so it's pulled down to the level first, out of
-    /// sight, and the fade shows from its first step.
-    fn battery_ceiling(&mut self, ceiling: u8) {
+    /// A new battery ceiling, with the light at `level`. Like thermal's, a
+    /// ceiling above the light's level does nothing, so it's pulled down to
+    /// the level first, out of sight, and the fade shows from its first
+    /// step.
+    fn battery_ceiling(&mut self, ceiling: u8, level: u8) {
         if ceiling < self.battery.level() {
-            self.battery.cap(match self.on {
-                true => self.level.max(ceiling),
-                false => ceiling,
-            });
+            self.battery.cap(level.max(ceiling));
         }
         self.battery_target = ceiling;
     }
@@ -177,14 +187,14 @@ mod tests {
     use super::*;
     use crate::TICKS_PER_SECOND;
     use crate::ramp::LINEAR_MAX;
-    use crate::sensors::FakeAdc;
+    use crate::testing::{Adc, CALIBRATION, temperature_reading, voltage_reading};
     use std::vec::Vec;
 
     /// Limits and a fake ADC, a tick at a time, checking the output never
     /// jumps by more than a level while the UI holds steady.
     struct Run {
         limits: Limits,
-        adc: FakeAdc,
+        adc: Adc,
         ui: u8,
         uis: Vec<u8>,
         levels: Vec<u8>,
@@ -194,8 +204,8 @@ mod tests {
     impl Run {
         fn new() -> Self {
             Self {
-                limits: Limits::new(FakeAdc::CALIBRATION),
-                adc: FakeAdc::new(),
+                limits: Limits::new(CALIBRATION),
+                adc: Adc::new(),
                 ui: 0,
                 uis: Vec::new(),
                 levels: Vec::new(),
@@ -237,19 +247,9 @@ mod tests {
         }
     }
 
-    /// The raw voltage reading for a calibrated `cv`, as near as it gets.
-    fn volts(cv: u16) -> u16 {
-        (1..4 * 1023)
-            .min_by_key(|&raw| battery::centivolts(raw).abs_diff(cv))
-            .unwrap()
-    }
-
     /// The raw temperature reading for `degrees` Celsius.
     fn celsius(degrees: u8) -> u16 {
-        let kelvin = thermal::celsius(degrees);
-        (0..1024)
-            .min_by_key(|&raw| FakeAdc::CALIBRATION.kelvin(raw).abs_diff(kelvin))
-            .unwrap()
+        temperature_reading(thermal::celsius(degrees))
     }
 
     #[test]
@@ -278,6 +278,21 @@ mod tests {
     }
 
     #[test]
+    fn a_hot_head_never_goes_under_the_floor_and_comes_back_up_as_it_cools() {
+        let mut run = Run::new();
+        run.ui = LEVELS;
+        run.adc.temperature = celsius(80);
+        assert_eq!(run.secs(120), LINEAR_MAX);
+        assert!(run.levels.iter().all(|&l| l >= LINEAR_MAX));
+        run.adc.temperature = celsius(25);
+        let level = run.secs(5);
+        assert!(level > LINEAR_MAX && level < LEVELS, "{level}");
+        assert_eq!(run.secs(120), LEVELS);
+        assert_eq!(run.limits.ceilings().1, LEVELS);
+        assert_eq!(run.offs, 0);
+    }
+
+    #[test]
     fn heat_leaves_a_level_under_the_floor_alone() {
         let mut run = Run::new();
         run.ui = 50;
@@ -288,7 +303,7 @@ mod tests {
     #[test]
     fn a_low_cell_steps_down_gradually_then_turns_off() {
         let mut run = Run::new();
-        run.adc.voltage = volts(305);
+        run.adc.voltage = voltage_reading(305);
         run.ui = 50;
         assert_eq!(run.secs(4), 50);
         assert_eq!(run.secs(2), 35);
@@ -307,23 +322,56 @@ mod tests {
         let mut run = Run::new();
         run.ui = LEVELS;
         run.secs(1);
-        run.adc.voltage = volts(290);
+        run.adc.voltage = voltage_reading(290);
         // The filter takes four seconds or so to fall under 2.99 V, then the
         // hold a second, so it's still at the top.
         assert_eq!(run.secs(5), LEVELS);
         assert_eq!(run.offs, 0);
-        // Then it fades towards the linear channel, and with the cell still
-        // flat a second later it turns off, without ever jumping on the way.
+        // Then it fades to the linear channel, without ever jumping, and
+        // with the cell still flat it turns off once it's had a second of
+        // samples there.
         run.secs(5);
         assert_eq!(run.offs, 1);
-        let lit = run.levels.iter().rev().skip_while(|&&l| l == 0);
-        assert!(lit.take(10).all(|&l| l < LEVELS - 50));
+        let lit: Vec<u8> = run
+            .levels
+            .iter()
+            .rev()
+            .skip_while(|&&l| l == 0)
+            .copied()
+            .collect();
+        let linear = lit.iter().take_while(|&&l| l == LINEAR_MAX).count();
+        let hold = usize::from(battery::HOLD_SAMPLES);
+        let sample = usize::from(battery::SAMPLE_TICKS);
+        assert!(
+            (hold - 1) * sample <= linear && linear < hold * sample,
+            "{linear} ticks at the top of the linear channel"
+        );
+        assert_eq!(lit[linear], LINEAR_MAX + 1, "faded the whole way");
+    }
+
+    #[test]
+    fn a_voltage_reading_on_the_tick_it_turns_on_counts() {
+        // Voltage readings come due on the third tick of each round of 16.
+        let sample = usize::from(battery::SAMPLE_TICKS);
+        let mut run = Run::new();
+        run.adc.voltage = voltage_reading(290);
+        let on_at = 4 * sample + 2;
+        run.ticks(on_at as u32);
+        run.ui = 50;
+        run.ticks(1);
+        assert_eq!(run.levels[on_at], 50);
+        run.secs(2);
+        // A second of flat samples, the first on the turn-on tick itself.
+        let off_at = on_at + (usize::from(battery::HOLD_SAMPLES) - 1) * sample;
+        assert!(run.levels[on_at..off_at].iter().all(|&l| l == 50));
+        assert_eq!(run.levels[off_at], 0);
+        assert_eq!(run.offs, 1);
     }
 
     #[test]
     fn a_flat_cell_turns_off_again_after_turning_back_on() {
         let mut run = Run::new();
-        run.adc.voltage = volts(290);
+        run.adc.voltage = voltage_reading(290);
         run.ui = 50;
         run.secs(3);
         assert_eq!(run.offs, 1);
@@ -361,7 +409,7 @@ mod tests {
 
     #[test]
     fn no_result_at_all_is_garbage_too() {
-        let mut limits = Limits::new(FakeAdc::CALIBRATION);
+        let mut limits = Limits::new(CALIBRATION);
         for _ in 0..30 * TICKS_PER_SECOND {
             limits.tick(LEVELS, None);
         }
