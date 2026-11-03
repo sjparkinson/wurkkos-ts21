@@ -8,7 +8,7 @@
 //! startup code copies from flash) into a static that starts at zero (.bss),
 //! then stops in `link_probe_done`. xtask/src/sim.rs runs it and checks what
 //! landed in `LINK_PROBE_COPY`, so keep the values here in step with
-//! `PROBE_EXPECTED` there. `cargo fw` builds this alongside the firmware;
+//! `PROBE_EXPECTED` there. `cargo xtask hex` builds this alongside the firmware;
 //! it's never flashed.
 
 #![cfg_attr(target_arch = "avr", no_std, no_main)]

@@ -20,7 +20,7 @@ cargo xtask hex     # build the firmware, write target/wurkkos-ts21-0614.hex and
 cargo test --workspace
 ```
 
-Plain `cargo build` builds for your machine, where the firmware is a stub, because the library and its tests live there. `cargo xtask hex` runs `cargo fw` (the AVR build, `target/avr-none/release/wurkkos-ts21-0614.elf`) before it writes the hex. `cargo xtask` lists everything else.
+Plain `cargo build` builds for your machine, where the firmware is a stub, because the library and its tests live there. `cargo xtask hex` does the AVR build (`target/avr-none/release/wurkkos-ts21-0614.elf`) before it writes the hex. `cargo xtask` lists everything else.
 
 See [docs/toolchain.md](docs/toolchain.md) for an explanation of how it builds and links.
 

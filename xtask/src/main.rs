@@ -1,4 +1,5 @@
-//! `cargo xtask <command>`: the steps around `cargo fw` that cargo can't do.
+//! `cargo xtask <command>`: the AVR build and the steps around it that cargo
+//! can't do.
 //!
 //! No dependencies beyond the firmware's own library. ELF reading, Intel
 //! HEX, the UPDI programmer and the AVR simulator are all small enough to do
@@ -47,7 +48,7 @@ or /dev/ttyUSB0 on Linux.
 ";
 
 const ELF: &str = "target/avr-none/release/wurkkos-ts21-0614.elf";
-/// src/bin/link_probe.rs, which `cargo fw` builds alongside the firmware.
+/// src/bin/link_probe.rs, which `build` builds alongside the firmware.
 const PROBE: &str = "target/avr-none/release/link-probe.elf";
 const HEX: &str = "target/wurkkos-ts21-0614.hex";
 
@@ -89,9 +90,19 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Builds the firmware for the AVR, then checks the ELF's layout and runs it
+/// on the simulator. The ELF is left in place even if the checks fail.
 fn build() -> Result<(elf::Elf, sim::Report), String> {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    run(Command::new(cargo).current_dir(root()).arg("fw"))?;
+    run(Command::new(cargo).current_dir(root()).args([
+        "build",
+        "--package",
+        "ts21",
+        "--release",
+        "--target",
+        "avr-none",
+        "-Zbuild-std=core",
+    ]))?;
     let path = root().join(ELF);
     let bytes = fs::read(&path).map_err(at(&path))?;
     let elf = elf::Elf::parse(&bytes).map_err(at(&path))?;

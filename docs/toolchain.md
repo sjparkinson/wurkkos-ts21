@@ -10,7 +10,7 @@ How Rust gets onto an ATtiny1616 here, and why it's put together this way.
 - Registers written out by hand in `src/hw.rs`, with zero crate dependencies. (Rebuilding `core` pulls a few crates of its own, see [First build](#first-build).)
 - The UPDI programmer lives in `xtask`, so rustup is the only thing to install.
 
-`cargo fw` builds `target/avr-none/release/wurkkos-ts21-0614.elf`. `cargo xtask hex` runs `cargo fw` and turns the ELF into Intel HEX, padded to all 16 KB of flash with the CRC the firmware checks at power-on in the last two bytes. Cargo has no post-build step, so the hex can't come out of `cargo build` itself, and making `avr-none` the default target would break `cargo test` for the library.
+`cargo xtask hex` builds `target/avr-none/release/wurkkos-ts21-0614.elf` and turns it into Intel HEX, padded to all 16 KB of flash with the CRC the firmware checks at power-on in the last two bytes. Cargo has no post-build step, so the hex can't come out of `cargo build` itself, and making `avr-none` the default target would break `cargo test` for the library.
 
 ## Linking with rust-lld
 
@@ -76,7 +76,7 @@ LLVM="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/
 ELF=target/avr-none/release/wurkkos-ts21-0614.elf
 ```
 
-Then, after `cargo fw`:
+Then, after `cargo xtask hex` (it leaves the ELF behind even when its checks fail):
 
 ```sh
 "$LLVM/llvm-objdump" -d --no-show-raw-insn "$ELF"                          # everything, vector table first
@@ -89,8 +89,8 @@ Then, after `cargo fw`:
 
 ## Host builds
 
-`cargo test`, `cargo clippy` and `cargo fmt` run on your machine as normal. The library (`src/lib.rs` and below) is `no_std` and has no hardware access, so it builds for both. `src/main.rs` compiles to a stub on anything but AVR, and `src/hw.rs` and `src/rt.rs` only exist on AVR. That's why there's a separate `cargo clippy-fw`.
+`cargo test`, `cargo clippy` and `cargo fmt` run on your machine as normal. The library (`src/lib.rs` and below) is `no_std` and has no hardware access, so it builds for both. `src/main.rs` compiles to a stub on anything but AVR, and `src/hw.rs` and `src/rt.rs` only exist on AVR. That's why CI runs a second clippy, `cargo clippy --package ts21 --release --target avr-none -Zbuild-std=core -- -D warnings`.
 
 ## First build
 
-The first `cargo fw` downloads the pinned nightly with `rust-src`, and then the handful of crates that `core`'s build needs from crates.io. After that it's offline.
+The first `cargo xtask hex` downloads the pinned nightly with `rust-src`, and then the handful of crates that `core`'s build needs from crates.io. After that it's offline.
