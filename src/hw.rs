@@ -305,18 +305,27 @@ pub fn temperature_calibration() -> Calibration {
 ///
 /// STATUS.OK reads 1 from reset, before any scan, and the scan only starts
 /// three cycles after ENABLE while the CPU carries on (DS §27.3.1). So
-/// three `nop`s go between the write and the first read, or a read could
-/// see the reset value and pass a flash that's wrong. Then it waits for
-/// BUSY to clear, which it should already have done, since the CPU was
-/// stalled.
+/// `nop`s go between the write and the first read, or a read could see the
+/// reset value and pass a flash that's wrong. Three would do if the three
+/// cycles count from the end of the `sts`; the datasheet doesn't say, so
+/// there's a fourth. Then it waits for BUSY to clear, which it should
+/// already have done, since the CPU was stalled.
 pub fn flash_ok() -> bool {
     write(
         reg::CRCSCAN_CTRLB,
         regs::CRCSCAN_SRC_FLASH | regs::CRCSCAN_MODE_PRIORITY,
     );
     write(reg::CRCSCAN_CTRLA, regs::CRCSCAN_ENABLE);
-    // SAFETY: three `nop`s, which touch nothing.
-    unsafe { asm!("nop", "nop", "nop", options(nostack, preserves_flags)) };
+    // SAFETY: four `nop`s, which touch nothing.
+    unsafe {
+        asm!(
+            "nop",
+            "nop",
+            "nop",
+            "nop",
+            options(nostack, preserves_flags)
+        )
+    };
     while read(reg::CRCSCAN_STATUS) & regs::CRCSCAN_BUSY != 0 {}
     read(reg::CRCSCAN_STATUS) & regs::CRCSCAN_OK != 0
 }

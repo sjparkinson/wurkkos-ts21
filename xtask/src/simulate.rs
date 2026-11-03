@@ -31,7 +31,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::world::{FUSE_NAMES, Rig, World};
+use crate::world::{FUSE_NAMES, Rig, World, unmodelled_fuse};
 use ts21::TICKS_PER_SECOND;
 use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
@@ -147,7 +147,7 @@ impl FromStr for Action {
 /// Parses a script, word by word.
 pub fn parse(words: &[&str]) -> Result<Vec<Action>, String> {
     let mut started = false;
-    words
+    let actions = words
         .iter()
         .map(|word| {
             let action: Action = word.parse().map_err(|e| format!("`{word}`: {e}"))?;
@@ -160,7 +160,15 @@ pub fn parse(words: &[&str]) -> Result<Vec<Action>, String> {
             started |= action.takes_time();
             Ok(action)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if !started && actions.iter().any(|a| a.power_on()) {
+        return Err(
+            "a fuse or flash setting needs something after it that takes time, \
+                    or nothing runs to check it"
+                .into(),
+        );
+    }
+    Ok(actions)
 }
 
 /// A fuse byte from `OSCCFG=0x01`.
@@ -176,6 +184,9 @@ fn fuse(setting: &str) -> Result<Action, String> {
         })?;
     let value = value.strip_prefix("0x").ok_or_else(bad)?;
     let value = u8::from_str_radix(value, 16).map_err(|_| bad())?;
+    if let Some(why) = unmodelled_fuse(offset, value) {
+        return Err(format!("{name}={value:#04x}: {why}"));
+    }
     Ok(Action::Fuse {
         offset: offset as u8,
         value,
@@ -662,12 +673,22 @@ mod tests {
 
     #[test]
     fn fuses_and_flash_only_go_before_anything_that_takes_time() {
-        assert!(parse(&["cell:3.1V", "fuse:WDTCFG=0x0B", "flash:corrupt", "1C"]).is_ok());
-        for late in ["fuse:WDTCFG=0x0B", "flash:corrupt"] {
+        assert!(parse(&["cell:3.1V", "fuse:WDTCFG=0x10", "flash:corrupt", "1C"]).is_ok());
+        for late in ["fuse:WDTCFG=0x10", "flash:corrupt"] {
             let err = parse(&["wait:1s", late]).unwrap_err();
             assert!(err.contains("power-on"), "{err}");
         }
         assert!("flash:fine".parse::<Action>().is_err());
+        let err = parse(&["flash:corrupt"]).unwrap_err();
+        assert!(err.contains("takes time"), "nothing would check it: {err}");
+    }
+
+    #[test]
+    fn refuses_fuses_that_would_stop_a_real_chip() {
+        for word in ["fuse:WDTCFG=0x0B", "fuse:SYSCFG0=0x04"] {
+            let err = word.parse::<Action>().unwrap_err();
+            assert!(err.contains("doesn't model"), "{word}: {err}");
+        }
     }
 
     #[test]

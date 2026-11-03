@@ -463,11 +463,12 @@ fn in_step(
     let power_on = samples.peek().map_or(World::NORMAL, |s| s.world);
     sim.chip.world = power_on;
     if power_on.corrupt_flash {
-        // A byte of the padding, as a flash cut short would leave it.
+        // The checksum's high byte, which is never code, so the firmware
+        // still runs however big it gets.
         let byte = sim
             .chip
             .flash
-            .get_mut(crc::CHECKSUM_AT - 1)
+            .get_mut(crc::CHECKSUM_AT)
             .ok_or("can't corrupt flash: the image isn't padded to all of flash")?;
         *byte ^= 0x01;
     }
@@ -710,6 +711,11 @@ const CRC_START_INSTRUCTIONS: u64 = 3;
 /// it; this makes sure the firmware waits if it does.
 const CRC_BUSY_READS: u8 = 2;
 
+/// Instructions after which a scan's over even if nothing polled it. The
+/// real one stalls the CPU for 8,192 words at three clocks each (§27.3.2),
+/// so this is generous.
+const CRC_DONE_INSTRUCTIONS: u64 = 100;
+
 /// ADC0's state beyond its plain registers.
 #[derive(Default)]
 struct Adc {
@@ -929,7 +935,7 @@ impl Chip {
     fn crc_status(&mut self) -> u8 {
         match self.crc.started {
             Some((at, before)) if self.now <= at + CRC_START_INSTRUCTIONS => before,
-            Some(_) if self.crc.busy_reads > 0 => {
+            Some(_) if self.crc_busy() => {
                 self.crc.busy_reads -= 1;
                 regs::CRCSCAN_BUSY
             }
@@ -937,9 +943,13 @@ impl Chip {
         }
     }
 
+    /// Whether a scan's still running. It ends after its stale window and
+    /// BUSY reads, or after `CRC_DONE_INSTRUCTIONS` whether or not anything
+    /// read STATUS, as the real scan finishes on its own.
     fn crc_busy(&self) -> bool {
         self.crc.started.is_some_and(|(at, _)| {
-            self.now <= at + CRC_START_INSTRUCTIONS || self.crc.busy_reads > 0
+            self.now <= at + CRC_START_INSTRUCTIONS
+                || (self.crc.busy_reads > 0 && self.now <= at + CRC_DONE_INSTRUCTIONS)
         })
     }
 
@@ -947,7 +957,11 @@ impl Chip {
     /// erased bytes reading 0xFF, passing if it comes to 0.
     fn start_crc(&mut self) -> Result<(), String> {
         if self.crc_busy() {
-            return Err("starts a CRC scan while one's still running".into());
+            return Err(
+                "starts a CRC scan while one's still running, which the datasheet \
+                 doesn't say what it does"
+                    .into(),
+            );
         }
         let ctrlb = self.io[reg::CRCSCAN_CTRLB];
         if ctrlb != regs::CRCSCAN_SRC_FLASH | regs::CRCSCAN_MODE_PRIORITY {
@@ -2207,6 +2221,16 @@ mod tests {
         assert_eq!(c.read(status), Ok(regs::CRCSCAN_BUSY));
         assert_eq!(c.read(status), Ok(regs::CRCSCAN_BUSY));
         assert_eq!(c.read(status), Ok(0), "failed");
+    }
+
+    #[test]
+    fn the_crc_scan_ends_on_its_own_without_a_poll() {
+        let mut c = Chip::new(crc::sign(&[]).unwrap());
+        c.write(reg::CRCSCAN_CTRLA as u16, regs::CRCSCAN_ENABLE)
+            .unwrap();
+        c.now += 1000;
+        assert_eq!(c.write(reg::CRCSCAN_CTRLB as u16, 0), Ok(()));
+        assert_eq!(c.read(reg::CRCSCAN_STATUS as u16), Ok(regs::CRCSCAN_OK));
     }
 
     #[test]
