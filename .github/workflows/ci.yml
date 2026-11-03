@@ -55,7 +55,7 @@ jobs:
           name: wurkkos-ts21-0614
           path: |
             target/wurkkos-ts21-0614.hex
-            target/avr-none/release/ts21.elf
+            target/avr-none/release/wurkkos-ts21-0614.elf
 
   release:
     needs: test
@@ -81,7 +81,7 @@ jobs:
           version="0.1.$(git rev-list --count HEAD)"
           echo "VERSION=$version" >> "$GITHUB_ENV"
           mv dist/wurkkos-ts21-0614.hex "dist/wurkkos-ts21-0614-$version.hex"
-          mv dist/avr-none/release/ts21.elf "dist/wurkkos-ts21-0614-$version.elf"
+          mv dist/avr-none/release/wurkkos-ts21-0614.elf "dist/wurkkos-ts21-0614-$version.elf"
 
       - uses: actions/attest@v4.2.2
         with:

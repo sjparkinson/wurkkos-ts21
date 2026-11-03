@@ -27,15 +27,17 @@ authors.workspace = true
 repository.workspace = true
 license.workspace = true
 # So a bare `cargo run` reaches the host stub's pointer to `cargo xtask hex`.
-default-run = "ts21"
+default-run = "wurkkos-ts21-0614"
 
 [features]
 # The fake ADC and reading helpers in src/testing.rs, for xtask's
 # simulators. Never on in the firmware.
 testing = []
 
+# Named after the model, like the hex, so the ELF is wurkkos-ts21-0614.elf.
 [[bin]]
-name = "ts21"
+name = "wurkkos-ts21-0614"
+path = "src/main.rs"
 test = false
 bench = false
 
