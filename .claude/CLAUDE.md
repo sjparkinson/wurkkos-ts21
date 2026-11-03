@@ -8,21 +8,20 @@ Firmware for the Wurkkos TS21 torch (model 0614) (ATtiny1616), in Rust, with zer
 cargo fmt --check                                          # formatting, as CI runs it
 cargo test --workspace --locked -q                         # host tests, run these constantly
 cargo clippy --workspace --all-targets --locked -- -D warnings   # host lints
-cargo fw                                                   # firmware ELF
-cargo clippy-fw                                            # lint hw.rs and rt.rs, which the host never compiles
-cargo xtask hex                                            # hex, plus flash/RAM use, after any firmware change
+cargo clippy --package ts21 --release --target avr-none -Zbuild-std=core -- -D warnings   # firmware lints: the only place hw.rs and rt.rs get linted
+cargo xtask hex                                            # firmware ELF and hex, plus flash/RAM use, after any firmware change
 ```
 
 CONTRIBUTING.md lists every check CI runs. Plain `cargo test` only tests the root package, so always pass `--workspace`.
 
-`cargo fw`, `clippy-fw` and the xtask commands rebuild `core` with `-Zbuild-std`. The first run on a machine fetches crates from crates.io and writes to `~/.cargo` and `~/.rustup`, which the sandbox may block. If it does, rerun outside the sandbox; nothing else in this repo needs that.
+The firmware clippy and the xtask commands rebuild `core` with `-Zbuild-std`. The first run on a machine fetches crates from crates.io and writes to `~/.cargo` and `~/.rustup`, which the sandbox may block. If it does, rerun outside the sandbox; nothing else in this repo needs that.
 
 ## Agents
 
 Agents in `.claude/agents/` report back and never edit. Use them rather than doing the same work inline:
 
 - `register-checker`: after touching `src/regs.rs`, `src/hw.rs` or `src/rt.rs`.
-- `avr-codegen`: when `cargo fw` fails to link, or flash or RAM grows and you want to know why.
+- `avr-codegen`: when `cargo xtask hex` fails to link, or flash or RAM grows and you want to know why.
 - `sim-checker`: after touching `xtask/src/sim.rs`, `avr.rs`, `world.rs` or `simulate.rs`, or when the simulator and the library disagree.
 - `ui-spec-checker`: after changing docs/ui.md, `src/ui.rs`, `src/limits.rs` or `src/torch.rs`.
 - `hardware-researcher`: before writing a new fact into docs/hardware.md.
@@ -47,7 +46,7 @@ Agents in `.claude/agents/` report back and never edit. Use them rather than doi
 - **docs/ui.md is the UI spec.** Change it in the same commit as the code, add a test for every row you add, and give the row an Example script (`xtask/src/spec.rs` runs them against the library and the firmware). Click rows are tested in `src/ui.rs`. The "Low battery and heat" rows describe limits, not clicks, so their tests live in `src/limits.rs` or `src/torch.rs`.
 - **Tick off docs/roadmap.md** in the commit that does the work.
 - **Anduril is GPL-3.0.** Read it for facts about the hardware (pins, calibration, timings) and cite the file. Don't copy its code or its ramp tables into this MIT repo.
-- **No runtime 32- or 64-bit multiplication.** The chip has an 8×8 hardware multiplier, so 8- and 16-bit multiplies compile to `mul` instructions, but there's no libgcc, so anything wider fails to link with `undefined symbol: __mulsi3`. That includes dividing a `u16` by a constant that isn't a power of two (`x / 10`, `x % 10`), which LLVM turns into a 32-bit multiply. Host tests won't catch it; `cargo fw` will. 8-bit maths, 16-bit multiplies, division by a runtime value, and `const fn` maths are fine. docs/toolchain.md has the options.
+- **No runtime 32- or 64-bit multiplication.** The chip has an 8×8 hardware multiplier, so 8- and 16-bit multiplies compile to `mul` instructions, but there's no libgcc, so anything wider fails to link with `undefined symbol: __mulsi3`. That includes dividing a `u16` by a constant that isn't a power of two (`x / 10`, `x % 10`), which LLVM turns into a 32-bit multiply. Host tests won't catch it; `cargo xtask hex` will. 8-bit maths, 16-bit multiplies, division by a runtime value, and `const fn` maths are fine. docs/toolchain.md has the options.
 - **Flash is 16 KB and RAM is 2 KB.** Check `cargo xtask hex` after changes. No `core::fmt` in the firmware (it pulls in kilobytes), and no floats.
 - **Mark uncertainty.** docs/hardware.md labels facts as confirmed or likely. Keep doing that; don't promote a guess to a fact.
 

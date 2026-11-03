@@ -1,8 +1,8 @@
 //! The firmware: sample the switch, step the UI, set the PWM, 64 times a second.
 //!
 //! On the host this builds to a stub, so `cargo test` and `cargo clippy`
-//! work across the workspace. `cargo fw` builds the real thing, and
-//! `cargo xtask hex` builds it and writes the hex.
+//! work across the workspace. `cargo xtask hex` builds the real thing and
+//! writes the hex.
 
 #![cfg_attr(target_arch = "avr", no_std, no_main)]
 #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]

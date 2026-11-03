@@ -2,7 +2,7 @@
 # PostToolUse hook on Edit and Write. Lints the file that changed and, on a
 # problem, exits 2 so stderr goes back to Claude to fix.
 #
-#   .rs  rustfmt --check, then clippy (clippy-fw for hw.rs and rt.rs, which
+#   .rs  rustfmt --check, then clippy (the AVR target's clippy for hw.rs and rt.rs, which
 #        the host never compiles)
 #   .rb  ruby -wc
 #   .github/workflows/*.yml  gh actions-lock --verify-local (lockfile coverage)
@@ -23,7 +23,8 @@ def rust(path, dir)
   return fmt if fmt
 
   if FIRMWARE_ONLY.include?(relative)
-    run("cargo", "-q", "clippy-fw", chdir: dir)
+    run("cargo", "clippy", "-q", "--package", "ts21", "--release", "--target", "avr-none",
+        "-Zbuild-std=core", "--", "-D", "warnings", chdir: dir)
   else
     run("cargo", "clippy", "--workspace", "--all-targets", "--locked", "-q", "--", "-D", "warnings", chdir: dir)
   end
