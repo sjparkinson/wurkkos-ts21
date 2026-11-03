@@ -128,7 +128,7 @@ fn hex() -> Result<(), String> {
         "ram   {ram:>5} / {ram_size} bytes ({}%), plus the stack",
         ram * 100 / ram_size
     );
-    println!("stack {:>5} bytes at most, in the simulator", sim.stack);
+    println!("stack {:>5} bytes at most", sim.stack);
     println!(
         "loop  {:>5} instructions at most per 64 Hz tick (budget {})",
         sim.loop_instructions, sim.loop_budget
