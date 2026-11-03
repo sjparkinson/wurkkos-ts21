@@ -10,7 +10,7 @@ cargo test --workspace --locked -q                         # host tests, run the
 cargo clippy --workspace --all-targets --locked -- -D warnings   # host lints
 cargo fw                                                   # firmware ELF
 cargo clippy-fw                                            # lint hw.rs and rt.rs, which the host never compiles
-cargo xtask size                                           # flash/RAM use, after any firmware change
+cargo xtask hex                                            # hex, plus flash/RAM use, after any firmware change
 ```
 
 CONTRIBUTING.md lists every check CI runs. Plain `cargo test` only tests the root package, so always pass `--workspace`.
@@ -48,7 +48,7 @@ Agents in `.claude/agents/` report back and never edit. Use them rather than doi
 - **Tick off docs/roadmap.md** in the commit that does the work.
 - **Anduril is GPL-3.0.** Read it for facts about the hardware (pins, calibration, timings) and cite the file. Don't copy its code or its ramp tables into this MIT repo.
 - **No runtime 32- or 64-bit multiplication.** The chip has an 8×8 hardware multiplier, so 8- and 16-bit multiplies compile to `mul` instructions, but there's no libgcc, so anything wider fails to link with `undefined symbol: __mulsi3`. That includes dividing a `u16` by a constant that isn't a power of two (`x / 10`, `x % 10`), which LLVM turns into a 32-bit multiply. Host tests won't catch it; `cargo fw` will. 8-bit maths, 16-bit multiplies, division by a runtime value, and `const fn` maths are fine. docs/toolchain.md has the options.
-- **Flash is 16 KB and RAM is 2 KB.** Check `cargo xtask size` after changes. No `core::fmt` in the firmware (it pulls in kilobytes), and no floats.
+- **Flash is 16 KB and RAM is 2 KB.** Check `cargo xtask hex` after changes. No `core::fmt` in the firmware (it pulls in kilobytes), and no floats.
 - **Mark uncertainty.** docs/hardware.md labels facts as confirmed or likely. Keep doing that; don't promote a guess to a fact.
 
 ## Things that look wrong but aren't

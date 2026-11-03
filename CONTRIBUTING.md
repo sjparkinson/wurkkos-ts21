@@ -9,11 +9,10 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo clippy-fw
-cargo xtask size
 cargo xtask hex
 ```
 
-The first three run on your machine's own target. `cargo clippy-fw` lints the firmware as the AVR sees it, which is the only place `src/hw.rs` and `src/rt.rs` get linted. `cargo xtask size` builds the real firmware, checks the linked image against what those two files assume (`xtask/src/layout.rs`: the vector table, where startup copies and zeroes memory, and that each protected-register unlock is followed straight away by its write), runs it on a simulated ATtiny1616 (`xtask/src/avr.rs` and `sim.rs`: startup, register rules like low-byte-first and the CCP window, that the watchdog is on in window mode and every feed lands in the open window, interrupts and idle sleep, the fuse row and a CRCSCAN that sums the same signed image `cargo xtask hex` writes, every example in docs/ui.md, and twenty thousand ticks of random clicks and holds checked against the library tick by tick), does the same layout checks and a simulator run on `src/bin/link_probe.rs` (a throwaway program with a const table, a `.data` static and a `.bss` static, since the firmware has none of those yet), and prints how much of the 16 KB of flash and 2 KB of RAM it uses, and `cargo xtask hex` writes the file you'd flash, padded to 16 KB with the CRC the firmware checks at power-on. CI keeps that hex and the ELF as a build artefact.
+The first three run on your machine's own target. `cargo clippy-fw` lints the firmware as the AVR sees it, which is the only place `src/hw.rs` and `src/rt.rs` get linted. `cargo xtask hex` builds the real firmware, checks the linked image against what those two files assume (`xtask/src/layout.rs`: the vector table, where startup copies and zeroes memory, and that each protected-register unlock is followed straight away by its write), runs it on a simulated ATtiny1616 (`xtask/src/avr.rs` and `sim.rs`: startup, register rules like low-byte-first and the CCP window, that the watchdog is on in window mode and every feed lands in the open window, interrupts and idle sleep, the fuse row and a CRCSCAN that sums the same signed image it writes, every example in docs/ui.md, and twenty thousand ticks of random clicks and holds checked against the library tick by tick), does the same layout checks and a simulator run on `src/bin/link_probe.rs` (a throwaway program with a const table, a `.data` static and a `.bss` static, since the firmware has none of those yet), writes the file you'd flash, padded to 16 KB with the CRC the firmware checks at power-on, and prints how much of the 16 KB of flash and 2 KB of RAM it uses. CI keeps that hex and the ELF as a build artefact.
 
 ## Layout
 
@@ -53,7 +52,7 @@ Then add a row for it to the tests in `xtask/src/atdf.rs`, which parse the ATDF 
 
 The tests only cover what the ATDF can say: addresses, widths, masks and named values. Write order, timing and which flags set without their interrupt enabled are in the datasheet, so have someone (or the `register-checker` agent in `.claude/agents/`) read those against it. A wrong address compiles fine and does something to the hardware you didn't ask for.
 
-The simulator in `xtask/src/sim.rs` refuses any register it doesn't model, so the first `cargo xtask size` after you touch a new one fails until you teach the fake chip about it. Model what the datasheet says the register does, including any rule the real chip enforces by quietly ignoring a write, and add a test for it in `sim.rs`.
+The simulator in `xtask/src/sim.rs` refuses any register it doesn't model, so the first `cargo xtask hex` after you touch a new one fails until you teach the fake chip about it. Model what the datasheet says the register does, including any rule the real chip enforces by quietly ignoring a write, and add a test for it in `sim.rs`.
 
 Never write fuses. Changing `SYSCFG0` can disable UPDI, and then the light needs a high-voltage programmer to recover.
 
@@ -63,7 +62,7 @@ Never write fuses. Changing `SYSCFG0` can disable UPDI, and then the light needs
 
 ## Bumping the nightly
 
-AVR is a tier 3 target. Pick a nightly, change `rust-toolchain.toml`, run every check above, and compare `cargo xtask size` before and after. Then see whether the workarounds in [docs/toolchain.md](docs/toolchain.md) are still needed.
+AVR is a tier 3 target. Pick a nightly, change `rust-toolchain.toml`, run every check above, and compare `cargo xtask hex` before and after. Then see whether the workarounds in [docs/toolchain.md](docs/toolchain.md) are still needed.
 
 ## Commits
 

@@ -12,7 +12,7 @@
 //! ```
 //!
 //! `cargo test` runs each against the library (`ts21::torch`), and
-//! `cargo xtask size` runs each against the firmware on the simulated chip
+//! `cargo xtask hex` runs each against the firmware on the simulated chip
 //! (`sim.rs`).
 
 use crate::simulate::{self, Action};
