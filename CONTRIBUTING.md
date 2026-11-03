@@ -37,6 +37,7 @@ src/bin/link_probe.rs  a program with one static of each kind, so xtask can chec
 link.x            memory layout for the linker, checked against the ATDF in xtask/src/atdf.rs
 xtask/            hex, size, the UPDI programmer (ping, backup, flash, restore) and the UI simulator
 docs/             hardware, flashing, toolchain, UI spec, roadmap
+docs/microchip/   a list of Microchip's datasheet and app notes; the PDFs go here locally, gitignored
 vendor/           Microchip's ATDF for the part (Apache-2.0)
 ```
 

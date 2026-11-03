@@ -10,7 +10,7 @@ You find out what's true about the Wurkkos TS21 (model 0614, ATtiny1616) and how
 Sources, in order of trust:
 
 1. Microchip's ATDF, vendored at `vendor/attiny1617.atdf`, for anything about the chip itself. Read the local copy.
-2. The ATtiny1614/1616/1617 datasheet (DS40002204). Cite section and revision letter.
+2. The ATtiny1614/1616/1617 datasheet (DS40002204), its errata (DS80000886) and Microchip's app notes. Local copies are in `docs/microchip/` (gitignored, so look in the main checkout if you're in a worktree), and `docs/microchip/README.md` lists them. Search them with `pdftotext` and `rg`, or ask the caller to run the `microchip-docs` agent for a long dig. Cite section and revision letter.
 3. Anduril on GitHub (ToyKeeper/anduril). The TS21 is model 0614, which resolves through `MODELS` and `hw/sofirn/sp36-t1616` and `hw/sofirn/blf-q8-t1616` to `hw/wurkkos/ts10/hwdef.h` and `hwdef.c`. Follow those includes yourself rather than trusting this summary, and pin links to a commit hash. Anduril is GPL-3.0: quote a line or two as evidence, but never copy code, ramp tables or calibration tables into the repo or into a suggested patch.
 4. Forum threads, reviews and teardown photos (BLF, Reddit r/flashlight, manufacturer pages). Useful, but treat as "likely" unless they show the board.
 

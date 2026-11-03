@@ -26,6 +26,7 @@ Agents in `.claude/agents/` report back and never edit. Use them rather than doi
 - `sim-checker`: after touching `xtask/src/sim.rs`, `avr.rs`, `world.rs` or `simulate.rs`, or when the simulator and the library disagree.
 - `ui-spec-checker`: after changing docs/ui.md, `src/ui.rs`, `src/limits.rs` or `src/torch.rs`.
 - `hardware-researcher`: before writing a new fact into docs/hardware.md.
+- `microchip-docs`: when you need what the datasheet, errata or an app note says. It searches the local PDFs in `docs/microchip/`, which are gitignored and only exist in the main checkout.
 
 ## Working in this repo
 
