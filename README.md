@@ -16,8 +16,7 @@ Try the behaviour out without a torch, `cargo xtask simulate` runs the UI live i
 You need [rustup](https://rustup.rs). The pinned nightly, `rust-src` and everything else come down on the first build.
 
 ```sh
-cargo xtask hex     # build the firmware and write target/wurkkos-ts21-0614.hex
-cargo xtask size    # build it and print flash and RAM use
+cargo xtask hex     # build the firmware, write target/wurkkos-ts21-0614.hex and print flash and RAM use
 cargo test --workspace
 ```
 

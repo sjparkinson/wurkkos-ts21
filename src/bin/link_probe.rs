@@ -95,6 +95,6 @@ mod probe {
 
 #[cfg(not(target_arch = "avr"))]
 fn main() {
-    eprintln!("this is a linker check for the ATtiny1616; `cargo xtask size` runs it");
+    eprintln!("this is a linker check for the ATtiny1616; `cargo xtask hex` runs it");
     std::process::exit(1);
 }

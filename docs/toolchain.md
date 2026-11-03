@@ -85,7 +85,7 @@ Then, after `cargo fw`:
 "$LLVM/llvm-objdump" -h "$ELF"                                             # section addresses
 ```
 
-`-S` works because the release profile keeps debug info. I checked all four on the nightly-2026-09-23 build: `llvm-size -A` adds `.text` and `.rodata` up to the same 1250 bytes `cargo xtask size` reports, so that command stays the one to use for budgets. These are for when you want to know *why*, such as which function grew, or whether an interrupt handler saves more registers than it should.
+`-S` works because the release profile keeps debug info. I checked all four on the nightly-2026-09-23 build: `llvm-size -A` adds `.text` and `.rodata` up to the same 1250 bytes `cargo xtask hex` reports, so that command stays the one to use for budgets. These are for when you want to know *why*, such as which function grew, or whether an interrupt handler saves more registers than it should.
 
 ## Host builds
 

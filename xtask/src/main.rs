@@ -33,8 +33,8 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  hex                     build the firmware and write target/wurkkos-ts21-0614.hex
-  size                    build the firmware and print flash and RAM use
+  hex                     build the firmware, write target/wurkkos-ts21-0614.hex
+                          and print flash, RAM, stack and loop use
   ping <port>             check the programmer can see the chip, change nothing
   backup <port>           save the torch's flash, EEPROM and fuses into backup/
   flash <port> [file.hex] build and flash the firmware, or flash file.hex
@@ -57,7 +57,6 @@ fn main() -> ExitCode {
 
     let result = match args.as_slice() {
         ["hex"] => hex(),
-        ["size"] => size(),
         ["ping", port] => ping(port),
         ["backup", port] => backup(port),
         ["flash", port] => build()
@@ -109,9 +108,10 @@ fn build() -> Result<(elf::Elf, sim::Report), String> {
 
 /// Writes the image `flash` would: the firmware padded to all of flash with
 /// 0xFF and its CRC in the last two bytes, which the firmware checks at
-/// power-on (`crc.rs`).
+/// power-on (`crc.rs`). Then prints flash, RAM, stack and loop use.
 fn hex() -> Result<(), String> {
-    let firmware = build()?.0.flash_image();
+    let (elf, sim) = build()?;
+    let firmware = elf.flash_image();
     let image = crc::sign(&firmware)?;
     write(&root().join(HEX), &ihex::encode(&image))?;
     eprintln!(
@@ -119,12 +119,8 @@ fn hex() -> Result<(), String> {
         firmware.len(),
         image.len()
     );
-    Ok(())
-}
 
-fn size() -> Result<(), String> {
-    let (elf, sim) = build()?;
-    let flash = elf.flash_image().len() as u32;
+    let flash = firmware.len() as u32;
     let flash_size = map::FLASH_SIZE as u32;
     let ram = elf.ram_bytes();
     let ram_size = elf::RAM.end - elf::RAM.start;

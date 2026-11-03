@@ -47,7 +47,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo clippy-fw
-      - run: cargo xtask size
       - run: cargo xtask hex
 
       - uses: actions/upload-artifact@v7.0.2
