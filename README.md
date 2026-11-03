@@ -16,10 +16,12 @@ Try the behaviour out without a torch, `cargo xtask simulate` runs the UI live i
 You need [rustup](https://rustup.rs). The pinned nightly, `rust-src` and everything else come down on the first build.
 
 ```sh
-cargo fw            # target/avr-none/release/ts21.elf
-cargo xtask hex     # target/wurkkos-ts21-0614.hex
-cargo xtask size    # flash and RAM use
+cargo xtask hex     # build the firmware and write target/wurkkos-ts21-0614.hex
+cargo xtask size    # build it and print flash and RAM use
+cargo test --workspace
 ```
+
+Plain `cargo build` builds for your machine, where the firmware is a stub, because the library and its tests live there. `cargo xtask hex` runs `cargo fw` (the AVR build, `target/avr-none/release/ts21.elf`) before it writes the hex. `cargo xtask` lists everything else.
 
 See [docs/toolchain.md](docs/toolchain.md) for an explanation of how it builds and links.
 
@@ -30,7 +32,7 @@ Put a serial UPDI programmer on the R, G and V pads and `cargo xtask` does the r
 ```sh
 cargo xtask ping /dev/cu.usbserial-XXXX
 cargo xtask backup /dev/cu.usbserial-XXXX
-cargo xtask flash /dev/cu.usbserial-XXXX
+cargo xtask flash /dev/cu.usbserial-XXXX    # builds first
 ```
 
 Every merge to main publishes a [release](https://github.com/sjparkinson/wurkkos-ts21/releases) with the firmware attached as `wurkkos-ts21-0614-<version>.hex`. To flash one of those rather than your own build, pass it to `cargo xtask flash /dev/cu.usbserial-XXXX wurkkos-ts21-0614-<version>.hex`. Each file has a build provenance attestation, so `gh attestation verify wurkkos-ts21-0614-<version>.hex -R sjparkinson/wurkkos-ts21` checks it came from this repo's CI.

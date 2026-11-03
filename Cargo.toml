@@ -26,6 +26,8 @@ edition.workspace = true
 authors.workspace = true
 repository.workspace = true
 license.workspace = true
+# So a bare `cargo run` reaches the host stub's pointer to `cargo xtask hex`.
+default-run = "ts21"
 
 [features]
 # The fake ADC and reading helpers in src/testing.rs, for xtask's
