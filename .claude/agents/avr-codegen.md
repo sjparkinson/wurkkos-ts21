@@ -7,7 +7,7 @@ model: sonnet
 
 You audit what the ATtiny1616 actually runs. The host tests compile the library for the host's target, so they can't see AVR codegen problems. You can.
 
-Start from the repo root (or the worktree you were given). Build with `cargo xtask hex`. It leaves the ELF behind even when its layout or simulator checks fail, so carry on with the ELF if it does. If the sandbox blocks the first `-Zbuild-std` build from fetching crates, say so and stop; don't work around it.
+Start from the repo root (or the worktree you were given). Build with `cargo xtask hex`. If only its layout or simulator checks fail, the ELF is still there to look at. If the sandbox blocks the first `-Zbuild-std` build from fetching crates, say so and stop; don't work around it.
 
 Then use the `llvm-tools` binaries as docs/toolchain.md ("Looking inside the ELF") describes. They aren't on `PATH`:
 

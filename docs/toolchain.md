@@ -76,7 +76,7 @@ LLVM="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/
 ELF=target/avr-none/release/wurkkos-ts21-0614.elf
 ```
 
-Then, after `cargo xtask hex` (it leaves the ELF behind even when its checks fail):
+Then, after `cargo xtask hex`:
 
 ```sh
 "$LLVM/llvm-objdump" -d --no-show-raw-insn "$ELF"                          # everything, vector table first
