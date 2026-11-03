@@ -359,6 +359,8 @@ mod tests {
         for (ours, instance, mode, name, size) in [
             (regs::addr::CPU_CCP, "CPU", None, "CCP", 1),
             (regs::addr::CPU_SREG, "CPU", None, "SREG", 1),
+            (regs::addr::CPU_SPL, "CPU", None, "SPL", 1),
+            (regs::addr::CPU_SPH, "CPU", None, "SPH", 1),
             (regs::addr::VPORTA_IN, "VPORTA", None, "IN", 1),
             (regs::addr::VPORTB_DIR, "VPORTB", None, "DIR", 1),
             (
@@ -449,6 +451,7 @@ mod tests {
     fn bitfield_values_match_the_atdf() {
         let atdf = Atdf::load();
         let ccp = atdf.register("CPU", None, "CCP");
+        let sreg = atdf.register("CPU", None, "SREG");
         let mclkctrlb = atdf.register("CLKCTRL", None, "MCLKCTRLB");
         let pinctrl = atdf.register("PORTA", None, "PIN0CTRL");
         let ctrla = atdf.register("TCA0", Some("SINGLE"), "CTRLA");
@@ -487,6 +490,7 @@ mod tests {
                 ccp.value("CCP", "IOREG"),
                 "CPU.CCP=IOREG",
             ),
+            (regs::CPU_SREG_I, sreg.mask("I"), "CPU.SREG.I"),
             (
                 regs::CLKCTRL_PEN,
                 mclkctrlb.mask("PEN"),
@@ -745,6 +749,11 @@ mod tests {
         let sram = Atdf::load().segment("INTERNAL_SRAM");
         let start = crate::elf::DATA_SPACE + sram.start;
         assert_eq!(crate::elf::RAM, start..start + sram.size, "elf::RAM");
+        assert_eq!(
+            (regs::addr::SRAM_START, regs::addr::SRAM_END),
+            (sram.start as usize, (sram.start + sram.size) as usize),
+            "regs::addr::SRAM_START and SRAM_END"
+        );
     }
 
     /// link.x's MEMORY regions, and every other address in it, against the

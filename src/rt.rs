@@ -98,6 +98,209 @@ global_asm!(
     ".section .text.__reset, \"ax\", @progbits",
     ".global __reset",
     "__reset:",
+    // The FET and linear pins are inputs after reset, so their gates float
+    // until `hw::init` drives them. That used to be microseconds; the
+    // self-tests below take tens of milliseconds, and a failure stops here
+    // for good. So drive both low first. PORTB.OUT is 0 from reset, and
+    // `sbi` (set bit in I/O register) needs no CPU register, which hasn't
+    // been tested yet. VPORTB.DIR sits low enough in I/O space for it.
+    "  sbi {vportb_dir}, {fet}",
+    "  sbi {vportb_dir}, {linear}",
+    //
+    // # The CPU register test (AN2632 §3.1 and §5)
+    //
+    // Each register gets 0x55 and then 0xAA, which flips every bit both
+    // ways, and is read back after each. That finds a stuck bit, and two
+    // bits in one register that short together. It doesn't look for faults
+    // between registers, and neither does AN2632.
+    //
+    // A failure jumps to `__selftest_failed`, which does nothing, forever.
+    // Rust code can't run safely on a broken register file, so there's no
+    // gentler way out (AN2632 §5: "if an error is found no functions should
+    // be activated"). The branches lean on SREG's Z flag before SREG is
+    // tested; there's no way round that.
+    //
+    // `or_fail` follows each compare. A conditional branch only reaches 64
+    // words, so it hops over an `rjmp`, which reaches all of flash. Its label
+    // is 9 so it can't clash with the loops' labels further down.
+    ".macro or_fail",
+    "  breq 9f",
+    "  rjmp __selftest_failed",
+    "9:",
+    ".endm",
+    // r16 to r31 can take an immediate: load it, compare against it.
+    // `.irp` repeats the block once per number, with `\\reg` replaced.
+    ".irp reg, 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
+    "  ldi r\\reg, {a}",
+    "  cpi r\\reg, {a}",
+    "  or_fail",
+    "  ldi r\\reg, {b}",
+    "  cpi r\\reg, {b}",
+    "  or_fail",
+    ".endr",
+    // r0 to r15 can't, so the value goes through r16, which passed above.
+    // r16 gets the opposite pattern before it reads the register back, so
+    // a register that reads as r16 doesn't pass by echoing it.
+    ".irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
+    "  ldi r16, {a}",
+    "  mov r\\reg, r16",
+    "  ldi r16, {b}",
+    "  mov r16, r\\reg",
+    "  cpi r16, {a}",
+    "  or_fail",
+    "  com r16",
+    "  mov r\\reg, r16",
+    "  ldi r16, {a}",
+    "  mov r16, r\\reg",
+    "  cpi r16, {b}",
+    "  or_fail",
+    ".endr",
+    // SREG, with the same patterns minus the interrupt enable, so nothing
+    // could fire mid-test. Read back into r17 before the compare, since
+    // `cpi` itself changes SREG.
+    "  ldi r16, {sreg_a}",
+    "  out {sreg}, r16",
+    "  in r17, {sreg}",
+    "  cpi r17, {sreg_a}",
+    "  or_fail",
+    "  ldi r16, {sreg_b}",
+    "  out {sreg}, r16",
+    "  in r17, {sreg}",
+    "  cpi r17, {sreg_b}",
+    "  or_fail",
+    // The stack pointer, which nothing's using yet. Only the bits SRAM
+    // needs are certain to exist: the datasheet says unused ones read 0
+    // without saying which they are (DS40002204A §8.7.2), so SPH's patterns
+    // keep to those. Then put it back where reset left it, at the top of
+    // SRAM.
+    "  ldi r16, {a}",
+    "  out {spl}, r16",
+    "  ldi r16, {sph_b}",
+    "  out {sph}, r16",
+    "  in r17, {spl}",
+    "  cpi r17, {a}",
+    "  or_fail",
+    "  in r17, {sph}",
+    "  cpi r17, {sph_b}",
+    "  or_fail",
+    "  ldi r16, {b}",
+    "  out {spl}, r16",
+    "  ldi r16, {sph_a}",
+    "  out {sph}, r16",
+    "  in r17, {spl}",
+    "  cpi r17, {b}",
+    "  or_fail",
+    "  in r17, {sph}",
+    "  cpi r17, {sph_a}",
+    "  or_fail",
+    "  ldi r16, lo8({stack_top})",
+    "  out {spl}, r16",
+    "  ldi r16, hi8({stack_top})",
+    "  out {sph}, r16",
+    //
+    // # The RAM test (AN2632 §9.2)
+    //
+    // March X over all of SRAM. In the usual notation, where ⇑ is up
+    // through the addresses, ⇓ down and ⇕ either way:
+    //
+    //   ⇕(wD); ⇑(rD, w~D); ⇓(r~D, wD); ⇕(rD)
+    //
+    // Write D everywhere. Then going up, check each byte still holds D and
+    // write its complement. Then going down, check for the complement and
+    // write D back. Then check it all holds D. Every bit is read back
+    // after going each way, so a stuck or sluggish one shows. An address
+    // that reaches another byte shows when the second of the two is read
+    // with the first's write in it. Going down as well as up finds some
+    // coupling, where a write to one byte disturbs another: whichever way
+    // round they are, one pass reads the victim after the culprit's write.
+    //
+    // The test is destructive, which is why it runs before .data and .bss
+    // exist and before anything's on the stack. AN2632 tests SRAM in
+    // sections, saving each one first, so it can run while the application
+    // does. That's not needed at power-on.
+    //
+    // AN2632 runs it with D = 0x00, which can't tell two bits in a byte
+    // apart, since they always hold the same value. Its option for that is
+    // the backgrounds 0x55, 0xAA, 0x33, 0xCC, 0x0F and 0xF0. This runs the
+    // whole march once for each of 0x00, 0x55, 0x33 and 0x0F, and the w~D
+    // steps write the other half, so every pair of bits in a byte is seen
+    // both equal and different. The backgrounds all have bit 7 clear, so
+    // that bit is only ever checked high by the ⇓ pass; the simulator finds
+    // a stuck one slipping through if that check goes.
+    //
+    // It's 24 instructions a byte for each background, about 200,000 in
+    // all, and by the instruction set manual's AVRxt timings about 280,000
+    // cycles. That's around 85 ms at the 3.3 MHz the chip runs at until
+    // `hw::init` (DS40002204A §10.3.3). Not measured on a real chip.
+    //
+    // r20 to r23 hold the backgrounds still to come, r19 how many, r16 D
+    // and r17 its complement. X walks SRAM, r25:r24 is where it stops, and
+    // r0 holds each byte read back.
+    "  ldi r20, 0x00",
+    "  ldi r21, 0x55",
+    "  ldi r22, 0x33",
+    "  ldi r23, 0x0F",
+    "  ldi r19, 4",
+    "5:",
+    "  mov r16, r20",
+    "  mov r17, r20",
+    "  com r17",
+    // ⇕(wD), going up.
+    "  ldi r26, lo8({sram_start})",
+    "  ldi r27, hi8({sram_start})",
+    "  ldi r24, lo8({sram_end})",
+    "  ldi r25, hi8({sram_end})",
+    "1:",
+    "  st X+, r16",
+    "  cp r26, r24",
+    "  cpc r27, r25",
+    "  brne 1b",
+    // ⇑(rD, w~D). `ld r0, X` reads without moving X; the store moves it on.
+    "  ldi r26, lo8({sram_start})",
+    "  ldi r27, hi8({sram_start})",
+    "2:",
+    "  ld r0, X",
+    "  cp r0, r16",
+    "  or_fail",
+    "  st X+, r17",
+    "  cp r26, r24",
+    "  cpc r27, r25",
+    "  brne 2b",
+    // ⇓(r~D, wD), from the top. X is at the end of SRAM, and `ld r0, -X`
+    // steps it back before reading, so it stops on the first byte.
+    "  ldi r24, lo8({sram_start})",
+    "  ldi r25, hi8({sram_start})",
+    "3:",
+    "  ld r0, -X",
+    "  cp r0, r17",
+    "  or_fail",
+    "  st X, r16",
+    "  cp r26, r24",
+    "  cpc r27, r25",
+    "  brne 3b",
+    // ⇕(rD), going up from the first byte again.
+    "  ldi r24, lo8({sram_end})",
+    "  ldi r25, hi8({sram_end})",
+    "4:",
+    "  ld r0, X+",
+    "  cp r0, r16",
+    "  or_fail",
+    "  cp r26, r24",
+    "  cpc r27, r25",
+    "  brne 4b",
+    // Shift the next background down and go again, until there are none.
+    // The loop's too long for `brne` to reach back, hence the `rjmp`.
+    "  mov r20, r21",
+    "  mov r21, r22",
+    "  mov r22, r23",
+    "  dec r19",
+    "  breq 6f",
+    "  rjmp 5b",
+    "6:",
+    // The registers and SRAM passed. xtask's simulator stops here to look
+    // at what the tests did, and finds the .data and .bss setup after it.
+    ".global __ram_tested",
+    "__ram_tested:",
     // The AVR calling convention says r1 always holds zero, and compiled
     // Rust code relies on it, so set that up before calling anything.
     // `clr` is "xor a register with itself".
@@ -166,6 +369,15 @@ global_asm!(
     // than run off the end into whatever comes next in flash.
     "5:",
     "  rjmp 5b",
+    "",
+    // Where a failed register or RAM test ends up: the FET and linear pins
+    // low, interrupts off, the watchdog off (the WDTCFG fuse check insists),
+    // so nothing happens until the cell comes out. The button LED stays
+    // dark too, since only `hw::init` turns its pull-up on, which is how to
+    // tell this from a torch that's merely off.
+    ".global __selftest_failed",
+    "__selftest_failed:",
+    "  rjmp __selftest_failed",
     // The unhandled slots: from 1 up to PORTA_PORT, between it and
     // RTC_PIT, and from there to the end. Slot 0 is reset.
     before_porta = const regs::VECTOR_PORTA_PORT - 1,
@@ -175,4 +387,36 @@ global_asm!(
     after_pit = const regs::VECTORS - regs::VECTOR_RTC_PIT - 1,
     // SREG's I/O address, small enough for `out` to reach.
     sreg = const regs::addr::CPU_SREG,
+    // The pins to hold low, and their direction register.
+    vportb_dir = const regs::addr::VPORTB_DIR,
+    fet = const crate::hw::FET,
+    linear = const crate::hw::LINEAR,
+    // The register test's patterns, and the stack pointer's home.
+    a = const PATTERN_A,
+    b = const PATTERN_B,
+    sreg_a = const PATTERN_A & !regs::CPU_SREG_I,
+    sreg_b = const PATTERN_B & !regs::CPU_SREG_I,
+    sph_a = const PATTERN_A & SPH_BITS,
+    sph_b = const PATTERN_B & SPH_BITS,
+    spl = const regs::addr::CPU_SPL,
+    sph = const regs::addr::CPU_SPH,
+    stack_top = const regs::addr::SRAM_END - 1,
+    // What the RAM test walks.
+    sram_start = const regs::addr::SRAM_START,
+    sram_end = const regs::addr::SRAM_END,
+);
+
+/// The register test writes this and its complement into every register,
+/// so each bit goes both ways.
+const PATTERN_A: u8 = 0x55;
+const PATTERN_B: u8 = !PATTERN_A;
+
+/// The bits of SPH that must exist for SP to reach the top of SRAM, 0x3F
+/// for 0x3FFF. Any above might read 0 (DS40002204A §8.7.2).
+const SPH_BITS: u8 = ((regs::addr::SRAM_END.next_power_of_two() - 1) >> 8) as u8;
+
+// `in` and `out` only reach the first 64 I/O addresses, and `sbi` the first
+// 32.
+const _: () = assert!(
+    regs::addr::CPU_SPL < 0x40 && regs::addr::CPU_SPH < 0x40 && regs::addr::VPORTB_DIR < 0x20
 );

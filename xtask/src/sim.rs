@@ -64,17 +64,26 @@
 //! Touching a register it doesn't model is an error too, so new peripheral
 //! code fails here until the model learns about it.
 //!
-//! With that in place it runs four things:
+//! It can also break the chip for src/rt.rs's register and RAM tests to
+//! find: a stuck bit in a CPU register, forced after every instruction, or
+//! a byte of SRAM with a stuck bit, two shorted bits, or an address that
+//! reaches another byte (`world::RamFault`). The stack checks wait until
+//! those tests are done, since they point SP all over SRAM.
 //!
-//! 1. Reset to `main`, with SRAM full of junk, checking .data and .bss come
-//!    out right.
+//! With that in place it runs five things:
+//!
+//! 1. Reset to `main`, with SRAM full of junk, checking the self-tests pass
+//!    and .data and .bss come out right.
 //! 2. The same startup code with .data and .bss moved and given contents,
 //!    because the firmware has no statics yet, so as linked both loops in
 //!    src/rt.rs run zero times.
-//! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
-//!    with the cell, temperature, broken ADC, fuses or corrupt flash the
-//!    example scripts.
-//! 4. Twenty thousand ticks of random clicks and holds, with a good cell at
+//! 3. Power-on with every stuck register bit and a spread of RAM faults
+//!    (`startup_faults`), checking each one stops in `__selftest_failed`
+//!    with the light dark.
+//! 4. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
+//!    with the cell, temperature, broken ADC, fuses, corrupt flash or
+//!    broken RAM or register the example scripts.
+//! 5. Twenty thousand ticks of random clicks and holds, with a good cell at
 //!    room temperature.
 //!
 //! `probe` separately runs src/bin/link_probe.rs, which has real statics,
@@ -100,7 +109,7 @@ use crate::simulate::{self, Sample};
 use crate::spec::{self, Example};
 use crate::switching::RandomSwitching;
 use crate::updi::map;
-use crate::world::{self, CALIBRATION, Rig, World};
+use crate::world::{self, CALIBRATION, RamFault, RegisterFault, Rig, World};
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
@@ -128,8 +137,9 @@ const SWITCH: u8 = 1 << 5; // PA5, active low
 const FET: u8 = 1 << 0; // PB0, TCA0 WO0
 const LINEAR: u8 = 1 << 1; // PB1, TCA0 WO1
 
-/// Instructions startup may take before reaching `main`.
-const BOOT_BUDGET: u64 = 100_000;
+/// Instructions startup may take before reaching `main`. Nearly all of it
+/// is src/rt.rs's RAM test, about 200,000.
+const BOOT_BUDGET: u64 = 400_000;
 /// CPU cycles in a 64 Hz tick at 10 MHz.
 const TICK_CYCLES: u64 = 10_000_000 / 64;
 /// Instructions one pass of the main loop may take. No AVRxt instruction
@@ -207,6 +217,8 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     };
     let sram = |name| -> Result<u16, String> { Ok((symbol(name)? - DATA_SPACE) as u16) };
     let main = symbol("main")? / 2;
+    let failed = symbol("__selftest_failed")? / 2;
+    let ram_tested = symbol("__ram_tested")?;
     let unhandled = symbol("__unhandled_interrupt")?;
     let image = elf.flash_image();
     // What `cargo xtask hex` and `flash` write: the image padded to all of
@@ -218,27 +230,38 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         load: symbol("__data_load")? as u16,
     };
 
-    let mut sim = Sim::new(signed.clone(), linked.bss.end, unhandled)?;
-    sim.run_to(main, BOOT_BUDGET)
-        .and_then(|()| check_startup(&sim.chip, &linked))
-        .map_err(|e| format!("startup: {e}"))?;
+    // A chip that's just had its cell put in, in `world`, run to the end of
+    // startup.
+    let power_on = |world: &World| -> Result<(Sim, Boot), String> {
+        let mut sim =
+            Sim::new(signed.clone(), linked.bss.end, unhandled)?.testing_until(ram_tested);
+        sim.chip.world = *world;
+        let boot = sim.boot(main, failed)?;
+        Ok((sim, boot))
+    };
 
-    startup_with_statics(&image, symbol("__reset")?, main, &linked, unhandled)
+    let (sim, boot) = power_on(&World::NORMAL).map_err(|e| format!("startup: {e}"))?;
+    if boot == Boot::Failed {
+        return Err("startup: the self-tests in src/rt.rs failed on a good chip".into());
+    }
+    check_startup(&sim.chip, &linked).map_err(|e| format!("startup: {e}"))?;
+
+    startup_with_statics(&image, ram_tested, main, &linked, unhandled)
         .map_err(|e| format!("startup with statics: {e}"))?;
+
+    startup_faults(&power_on).map_err(|e| format!("startup self-tests: {e}"))?;
 
     let mut report = Report {
         stack: 0,
         loop_instructions: 0,
         loop_budget: TICK_BUDGET,
     };
-    let fresh = || -> Result<Sim, String> {
-        let mut sim = Sim::new(signed.clone(), linked.bss.end, unhandled)?;
-        sim.run_to(main, BOOT_BUDGET)?;
-        Ok(sim)
-    };
     for example in spec::examples(spec::UI_MD)? {
-        let sim = fresh().map_err(|e| format!("startup: {e}"))?;
-        ui_example(sim, &example, &mut report).map_err(|e| format!("{}: {e}", example.row))?;
+        let samples = simulate::samples(&example.actions);
+        let world = samples.first().map_or(World::NORMAL, |s| s.world);
+        let (sim, boot) = power_on(&world).map_err(|e| format!("{}: startup: {e}", example.row))?;
+        ui_example(sim, boot, samples, &example, &mut report)
+            .map_err(|e| format!("{}: {e}", example.row))?;
     }
     against_the_library(sim, &mut report)
         .map_err(|e| format!("random switching, against the library: {e}"))?;
@@ -271,7 +294,8 @@ pub fn probe(elf: &Elf) -> Result<(), String> {
     }
 
     let unhandled = symbol("__unhandled_interrupt")?;
-    let mut sim = Sim::new(elf.flash_image(), linked.bss.end, unhandled)?;
+    let mut sim = Sim::new(elf.flash_image(), linked.bss.end, unhandled)?
+        .testing_until(symbol("__ram_tested")?);
     sim.run_to(symbol("main")? / 2, BOOT_BUDGET)
         .and_then(|()| check_startup(&sim.chip, &linked))
         .map_err(|e| format!("startup: {e}"))?;
@@ -322,9 +346,10 @@ fn check_startup(chip: &Chip, layout: &Layout) -> Result<(), String> {
 /// Moves .data and .bss somewhere awkward, gives .data five bytes of
 /// initial values, patches the addresses into the real startup code and
 /// runs it. Then checks it wrote exactly those bytes and nothing either side.
+/// `ram_tested` is where the self-tests end and the setup starts.
 fn startup_with_statics(
     image: &[u8],
-    reset: u32,
+    ram_tested: u32,
     main: u32,
     linked: &Layout,
     unhandled: u32,
@@ -342,9 +367,13 @@ fn startup_with_statics(
         bss: start + 5..start + 12,
         load,
     };
-    patch_startup(&mut image, reset as usize, linked, &moved)?;
+    patch_startup(&mut image, ram_tested as usize, linked, &moved)?;
 
-    let mut sim = Sim::new(image, moved.bss.end, unhandled)?;
+    let mut sim = Sim::new(image, moved.bss.end, unhandled)?.testing_until(ram_tested);
+    sim.run_to(ram_tested / 2, BOOT_BUDGET)?;
+    // The RAM test leaves its last background in every byte. Junk again, so
+    // a stray write by the setup after it stands out.
+    sim.chip.sram.fill(JUNK);
     sim.run_to(main, BOOT_BUDGET)?;
     check_startup(&sim.chip, &moved)?;
     for edge in [moved.data.start - 1, moved.bss.end] {
@@ -356,7 +385,9 @@ fn startup_with_statics(
 }
 
 /// Rewrites the `ldi`s in src/rt.rs's startup that load the .data and .bss
-/// addresses, after checking they're the ones expected, in order.
+/// addresses, after checking they're the ones expected, in order. `reset`
+/// is where to start looking: `__ram_tested`, after the self-tests' own
+/// `ldi`s.
 fn patch_startup(
     image: &mut [u8],
     reset: usize,
@@ -424,8 +455,33 @@ const RANDOM_TICKS: usize = 20_000;
 
 /// Runs one of docs/ui.md's examples on the firmware and the library in
 /// step, then checks where the library ended up against the example.
-fn ui_example(sim: Sim, example: &Example, report: &mut Report) -> Result<(), String> {
-    let level = in_step(sim, simulate::samples(&example.actions), report)?;
+/// `sim` has just powered up in the example's first world and got as far
+/// as `boot` says.
+fn ui_example(
+    mut sim: Sim,
+    boot: Boot,
+    samples: Vec<Sample>,
+    example: &Example,
+    report: &mut Report,
+) -> Result<(), String> {
+    let world = samples.first().map_or(World::NORMAL, |s| s.world);
+    let level = match boot {
+        Boot::Main if world.dead() => {
+            return Err("the self-tests in src/rt.rs missed the broken RAM or register".into());
+        }
+        Boot::Failed if !world.dead() => {
+            return Err("the self-tests in src/rt.rs failed on a good chip".into());
+        }
+        Boot::Main => in_step(sim, samples, report)?,
+        Boot::Failed => {
+            stays_dark(&mut sim)?;
+            let mut rig = Rig::new(&world);
+            for sample in &samples {
+                rig.tick(sample.pressed, &sample.world);
+            }
+            rig.level()
+        }
+    };
     if example.expect.holds(level) {
         Ok(())
     } else {
@@ -434,6 +490,102 @@ fn ui_example(sim: Sim, example: &Example, report: &mut Report) -> Result<(), St
             example.expect
         ))
     }
+}
+
+/// Checks a chip that's stopped in `__selftest_failed` stays there, with
+/// the FET and linear pins driven low and everything else off.
+fn stays_dark(sim: &mut Sim) -> Result<(), String> {
+    let failed = sim.cpu.pc;
+    for _ in 0..1_000 {
+        sim.step()?;
+        if sim.cpu.pc != failed {
+            return Err(format!(
+                "left __selftest_failed for {:#06x}",
+                sim.cpu.pc * 2
+            ));
+        }
+    }
+    if sim.chip.leds() != (0, 0) {
+        return Err(format!(
+            "failed its self-tests with the LEDs at {:?}",
+            sim.chip.leds()
+        ));
+    }
+    if sim.chip.io[reg::VPORTB_DIR] & (FET | LINEAR) != FET | LINEAR {
+        return Err("failed its self-tests with the FET and linear pins floating".into());
+    }
+    if sim.chip.button_led_lit() {
+        return Err("failed its self-tests with the button LED lit".into());
+    }
+    Ok(())
+}
+
+/// Powers up with each kind of fault the self-tests in src/rt.rs are there
+/// for, and checks every one stops in `__selftest_failed` and stays dark:
+///
+/// - every bit of every register, stuck either way;
+/// - stuck bits in the first, middle and last bytes of SRAM;
+/// - addresses that reach another byte, either way round, next door and
+///   far apart, which only going up and then down finds;
+/// - every pair of bits in a byte shorted together, which only shows up
+///   with the backgrounds after 0x00, since 0x00 and 0xFF write both bits
+///   the same.
+fn startup_faults(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<(), String> {
+    let (first, last) = (SRAM.start, SRAM.end - 1);
+    let middle = SRAM.start + (SRAM.end - SRAM.start) / 2;
+    let mut ram = Vec::new();
+    for addr in [first, middle, last] {
+        for bit in [0, 7] {
+            for high in [false, true] {
+                ram.push(RamFault::Stuck { addr, bit, high });
+            }
+        }
+    }
+    for (addr, to) in [
+        (first + 1, first),
+        (first, first + 1),
+        (last, first),
+        (first, last),
+        (middle, middle ^ 0x100),
+    ] {
+        ram.push(RamFault::Alias { addr, to });
+    }
+    for a in 0..8 {
+        for b in a + 1..8 {
+            ram.push(RamFault::Bridge {
+                addr: middle,
+                bits: [a, b],
+            });
+        }
+    }
+    let registers = (0..32).flat_map(|reg| {
+        (0..8).flat_map(move |bit| [false, true].map(|high| RegisterFault { reg, bit, high }))
+    });
+
+    let worlds = ram
+        .into_iter()
+        .map(|fault| World {
+            ram: Some(fault),
+            ..World::NORMAL
+        })
+        .chain(registers.map(|fault| World {
+            register: Some(fault),
+            ..World::NORMAL
+        }));
+    for world in worlds {
+        let what = match (world.ram, world.register) {
+            (Some(ram), _) => ram.to_string(),
+            (_, Some(register)) => register.to_string(),
+            (None, None) => unreachable!("every world here has a fault"),
+        };
+        let fault = |e: String| format!("{what}: {e}");
+        let (mut sim, boot) = power_on(&world).map_err(fault)?;
+        if boot != Boot::Failed {
+            return Err(fault("not found, and the firmware reached main".into()));
+        }
+        stays_dark(&mut sim).map_err(fault)?;
+    }
+    Ok(())
 }
 
 /// Switches the firmware and the library the same random way. The host
@@ -521,6 +673,19 @@ struct Sim {
     unhandled: u32,
     /// A bit per vector whose slot doesn't jump there.
     handled: u32,
+    /// `__ram_tested`, as a word address, until the CPU gets there. The
+    /// register test before it points SP all over SRAM without pushing
+    /// anything, so the stack checks wait until it's done.
+    testing: Option<u32>,
+}
+
+/// Where startup ended up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Boot {
+    /// At `main`, with the self-tests passed and memory set up.
+    Main,
+    /// In `__selftest_failed`, for good.
+    Failed,
 }
 
 /// A bit for each vector whose slot in `image`'s table is a `jmp` to
@@ -554,7 +719,32 @@ impl Sim {
             stack_floor: bss_end - 1,
             executed: 0,
             unhandled,
+            testing: None,
         })
+    }
+
+    /// Holds the stack checks off until the CPU reaches `ram_tested`, a
+    /// byte address, as startup does with the real src/rt.rs.
+    fn testing_until(mut self, ram_tested: u32) -> Self {
+        self.testing = Some(ram_tested / 2);
+        self
+    }
+
+    /// Runs from reset until startup reaches `main` or gives up in
+    /// `failed`, both word addresses.
+    fn boot(&mut self, main: u32, failed: u32) -> Result<Boot, String> {
+        for _ in 0..BOOT_BUDGET {
+            if self.cpu.pc == main {
+                return Ok(Boot::Main);
+            }
+            if self.cpu.pc == failed {
+                return Ok(Boot::Failed);
+            }
+            self.step()?;
+        }
+        Err(format!(
+            "reached neither main nor __selftest_failed within {BOOT_BUDGET} instructions"
+        ))
     }
 
     /// The most stack used so far, in bytes.
@@ -570,9 +760,17 @@ impl Sim {
             self.executed += 1;
             self.chip.elapse()?;
         }
-        self.lowest_sp = self.lowest_sp.min(self.cpu.sp);
-        if self.cpu.sp < self.stack_floor {
-            return Err(format!("{:#06x}: the stack ran into .bss", pc * 2));
+        if let Some(fault) = self.chip.world.register {
+            fault.apply(&mut self.cpu.r);
+        }
+        if self.testing == Some(self.cpu.pc) {
+            self.testing = None;
+        }
+        if self.testing.is_none() {
+            self.lowest_sp = self.lowest_sp.min(self.cpu.sp);
+            if self.cpu.sp < self.stack_floor {
+                return Err(format!("{:#06x}: the stack ran into .bss", pc * 2));
+            }
         }
         // The real chip would `reti` straight back into the main loop with
         // the flag still up, and take the interrupt again, forever. Better
@@ -1280,7 +1478,11 @@ impl Bus for Chip {
     fn read(&mut self, addr: u16) -> Result<u8, String> {
         let a = usize::from(addr);
         if SRAM.contains(&addr) {
-            return Ok(self.sram[usize::from(addr - SRAM.start)]);
+            let Some(fault) = self.world.ram else {
+                return Ok(self.sram[usize::from(addr - SRAM.start)]);
+            };
+            let cell = fault.cell(addr);
+            return Ok(fault.read(cell, self.sram[usize::from(cell - SRAM.start)]));
         }
         if (MAPPED..MAPPED + FLASH_SIZE as u16).contains(&addr) {
             // Erased flash past the end of the image reads as 0xFF.
@@ -1340,7 +1542,8 @@ impl Bus for Chip {
     fn write(&mut self, addr: u16, value: u8) -> Result<(), String> {
         let a = usize::from(addr);
         if SRAM.contains(&addr) {
-            self.sram[usize::from(addr - SRAM.start)] = value;
+            let cell = self.world.ram.map_or(addr, |fault| fault.cell(addr));
+            self.sram[usize::from(cell - SRAM.start)] = value;
             return Ok(());
         }
         match a {

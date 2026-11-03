@@ -18,8 +18,11 @@
 //! for the MCU (25 °C to start), and `adc:0` for a broken ADC whose every
 //! conversion reads that number. So `cell:3.05V 1C wait:6s` is a low cell.
 //! `fuse:OSCCFG=0x01` sets a fuse byte and `flash:corrupt` breaks a byte of
-//! flash, both of which the firmware only checks at power-on, so they have
-//! to come before anything that takes time.
+//! flash. `ram:stuck:0x3800.3=1`, `ram:alias:0x3900=0x3800` and
+//! `ram:bridge:0x3800.0.1` break a byte of SRAM, and `reg:r24.0=1` a CPU
+//! register (`world::RamFault` and `RegisterFault` say how). The firmware
+//! only checks any of those at power-on, so they have to come before
+//! anything that takes time.
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
@@ -31,7 +34,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::world::{FUSE_NAMES, Rig, World, unmodelled_fuse};
+use crate::world::{FUSE_NAMES, RamFault, RegisterFault, Rig, World, unmodelled_fuse};
 use ts21::TICKS_PER_SECOND;
 use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
@@ -66,13 +69,20 @@ pub enum Action {
     Fuse { offset: u8, value: u8 },
     /// A flash byte that doesn't match the CRC. Power-on only.
     CorruptFlash,
+    /// A broken byte of SRAM, from reset. Power-on only.
+    Ram(RamFault),
+    /// A stuck bit in a CPU register, from reset. Power-on only.
+    Register(RegisterFault),
 }
 
 impl Action {
     /// Whether it sets something the firmware only looks at once, at
     /// power-on, so it has to come before anything that takes time.
     fn power_on(self) -> bool {
-        matches!(self, Self::Fuse { .. } | Self::CorruptFlash)
+        matches!(
+            self,
+            Self::Fuse { .. } | Self::CorruptFlash | Self::Ram(_) | Self::Register(_)
+        )
     }
 
     /// Whether it takes time, rather than setting the scene.
@@ -103,6 +113,12 @@ impl FromStr for Action {
         }
         if word == "flash:corrupt" {
             return Ok(Self::CorruptFlash);
+        }
+        if let Some(fault) = word.strip_prefix("ram:") {
+            return fault.parse().map(Self::Ram);
+        }
+        if let Some(fault) = word.strip_prefix("reg:") {
+            return fault.parse().map(Self::Register);
         }
         if let Some(raw) = word.strip_prefix("adc:") {
             let raw = raw
@@ -163,7 +179,7 @@ pub fn parse(words: &[&str]) -> Result<Vec<Action>, String> {
         .collect::<Result<Vec<_>, _>>()?;
     if !started && actions.iter().any(|a| a.power_on()) {
         return Err(
-            "a fuse or flash setting needs something after it that takes time, \
+            "a fuse, flash, RAM or register setting needs something after it that takes time, \
                     or nothing runs to check it"
                 .into(),
         );
@@ -270,6 +286,14 @@ pub fn samples(actions: &[Action]) -> Vec<Sample> {
             }
             Action::CorruptFlash => {
                 world.corrupt_flash = true;
+                continue;
+            }
+            Action::Ram(fault) => {
+                world.ram = Some(fault);
+                continue;
+            }
+            Action::Register(fault) => {
+                world.register = Some(fault);
                 continue;
             }
         };
@@ -705,6 +729,43 @@ mod tests {
         assert_eq!(run.level, 0);
         assert!(run.lines.is_empty(), "{:?}", run.lines);
         assert_eq!(script("fuse:OSCCFG=0x01 wait:3s 1C").level, 50);
+    }
+
+    #[test]
+    fn broken_ram_or_registers_go_before_anything_that_takes_time() {
+        let actions = parse(&["ram:alias:0x3900=0x3800", "reg:r5.1=0", "1C"]).unwrap();
+        let world = samples(&actions)[0].world;
+        assert_eq!(
+            world.ram,
+            Some(RamFault::Alias {
+                addr: 0x3900,
+                to: 0x3800
+            })
+        );
+        assert_eq!(
+            world.register,
+            Some(RegisterFault {
+                reg: 5,
+                bit: 1,
+                high: false
+            })
+        );
+        for late in ["ram:stuck:0x3800.0=1", "reg:r0.0=1"] {
+            let err = parse(&["wait:1s", late]).unwrap_err();
+            assert!(err.contains("power-on"), "{err}");
+        }
+    }
+
+    #[test]
+    fn broken_ram_or_registers_leave_it_dark() {
+        for script_text in [
+            "ram:stuck:0x3800.3=1 wait:3s 1C wait:1s",
+            "reg:r24.0=1 1C 2H wait:1s",
+        ] {
+            let run = script(script_text);
+            assert_eq!(run.level, 0, "{script_text}");
+            assert!(run.lines.is_empty(), "{script_text}: {:?}", run.lines);
+        }
     }
 
     #[test]

@@ -28,6 +28,10 @@ mod rt;
 /// interrupt, so they're empty.
 #[cfg(target_arch = "avr")]
 mod hw {
+    /// The pins rt.rs holds low through its self-tests, as in src/hw.rs.
+    pub const FET: u8 = 0;
+    pub const LINEAR: u8 = 1;
+
     pub extern "avr-interrupt" fn porta_port() {}
     pub extern "avr-interrupt" fn rtc_pit() {}
 }
