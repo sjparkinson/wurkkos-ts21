@@ -114,11 +114,7 @@ fn hex() -> Result<(), String> {
     let firmware = elf.flash_image();
     let image = crc::sign(&firmware)?;
     write(&root().join(HEX), &ihex::encode(&image))?;
-    eprintln!(
-        "wrote {HEX} ({} bytes of firmware, padded to {} with its CRC at the end)",
-        firmware.len(),
-        image.len()
-    );
+    eprintln!("wrote {HEX}, padded to all of flash with its CRC at the end");
 
     let flash = firmware.len() as u32;
     let flash_size = map::FLASH_SIZE as u32;
