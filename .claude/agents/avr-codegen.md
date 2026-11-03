@@ -13,7 +13,7 @@ Then use the `llvm-tools` binaries as docs/toolchain.md ("Looking inside the ELF
 
 ```sh
 LLVM="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
-ELF=target/avr-none/release/ts21.elf
+ELF=target/avr-none/release/wurkkos-ts21-0614.elf
 ```
 
 If they're missing, give the user the `rustup component add llvm-tools --toolchain <pinned nightly>` command from that doc rather than installing it yourself.

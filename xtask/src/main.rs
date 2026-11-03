@@ -45,7 +45,7 @@ commands:
 or /dev/ttyUSB0 on Linux.
 ";
 
-const ELF: &str = "target/avr-none/release/ts21.elf";
+const ELF: &str = "target/avr-none/release/wurkkos-ts21-0614.elf";
 /// src/bin/link_probe.rs, which `cargo fw` builds alongside the firmware.
 const PROBE: &str = "target/avr-none/release/link-probe.elf";
 const HEX: &str = "target/wurkkos-ts21-0614.hex";
