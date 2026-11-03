@@ -24,8 +24,9 @@ use ts21::temp::Calibration;
 use crate::regs::{self, addr as reg};
 
 const SWITCH: u8 = 5; // PA5
-const FET: u8 = 0; // PB0
-const LINEAR: u8 = 1; // PB1
+// src/rt.rs drives these two low before its self-tests.
+pub(crate) const FET: u8 = 0; // PB0
+pub(crate) const LINEAR: u8 = 1; // PB1
 const AUX: u8 = 5; // PB5
 
 /// The PORTB pins we drive. PORTB has PB0 to PB5 on the 20-pin package.

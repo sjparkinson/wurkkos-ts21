@@ -18,6 +18,16 @@ pub mod addr {
     pub const CPU_CCP: usize = 0x0034;
     /// CPU.SREG, also within `out` range.
     pub const CPU_SREG: usize = 0x003F;
+    /// CPU.SPL, the stack pointer's low byte, within `out` range.
+    pub const CPU_SPL: usize = 0x003D;
+    /// CPU.SPH, the stack pointer's high byte.
+    pub const CPU_SPH: usize = 0x003E;
+
+    /// The INTERNAL_SRAM memory segment: where SRAM starts in data space,
+    /// and the first address after it. The startup RAM test in src/rt.rs
+    /// walks all of it.
+    pub const SRAM_START: usize = 0x3800;
+    pub const SRAM_END: usize = 0x4000;
 
     pub const VPORTA_IN: usize = 0x0002;
     pub const VPORTB_DIR: usize = 0x0004;
@@ -117,6 +127,10 @@ pub mod addr {
 /// CPU.CCP: the key that unlocks I/O registers behind configuration change
 /// protection.
 pub const CPU_CCP_IOREG: u8 = 0xD8;
+
+/// CPU.SREG.I, the global interrupt enable. The startup register test
+/// leaves it out of its patterns, so nothing can fire mid-test.
+pub const CPU_SREG_I: u8 = 0x80;
 
 /// CLKCTRL.MCLKCTRLB.PEN, prescaler enable.
 pub const CLKCTRL_PEN: u8 = 0x01;

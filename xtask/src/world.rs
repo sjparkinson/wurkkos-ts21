@@ -1,10 +1,13 @@
 //! What the torch sees, for the simulators: the cell's voltage, the MCU's
-//! temperature, an ADC that's broken, and the fuses and flash it checks at
-//! power-on.
+//! temperature, an ADC that's broken, and the fuses, flash, RAM and CPU
+//! registers it checks at power-on.
 //!
 //! The library-side runs (`simulate.rs`) and the firmware on the simulated
 //! chip (`sim.rs`) both get their raw readings from here, so the two see
 //! exactly the same numbers and can be compared tick by tick.
+
+use std::fmt;
+use std::str::FromStr;
 
 use ts21::selftest::{Faults, Fuses};
 use ts21::sensors::Channel;
@@ -56,6 +59,202 @@ pub fn unmodelled_fuse(offset: usize, value: u8) -> Option<&'static str> {
 /// is why the firmware only checks fields.
 pub const FACTORY_FUSES: [u8; FUSE_BYTES] = [0x00, 0x00, 0x02, 0xFF, 0x00, 0xC4, 0x07, 0x00, 0x00];
 
+/// A fault in SRAM for src/rt.rs's March test to find. The simulated chip
+/// has it from reset, on every load and store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RamFault {
+    /// One bit of one byte always reads `high`, whatever was written.
+    Stuck { addr: u16, bit: u8, high: bool },
+    /// A broken address decoder: `addr` reaches `to`'s byte instead of its
+    /// own, so the two read and write as one.
+    Alias { addr: u16, to: u16 },
+    /// Two bits of one byte shorted together. Both read as the AND of what
+    /// was written to them, so they only show up when written different
+    /// values, which a march with only 0x00 and 0xFF never does.
+    Bridge { addr: u16, bits: [u8; 2] },
+}
+
+impl RamFault {
+    /// The byte an access to `addr` really reaches.
+    pub fn cell(self, addr: u16) -> u16 {
+        match self {
+            Self::Alias { addr: from, to } if addr == from => to,
+            _ => addr,
+        }
+    }
+
+    /// What the byte at `addr` reads as, holding `stored`.
+    pub fn read(self, addr: u16, stored: u8) -> u8 {
+        match self {
+            Self::Stuck {
+                addr: at,
+                bit,
+                high,
+            } if at == addr => {
+                if high {
+                    stored | 1 << bit
+                } else {
+                    stored & !(1 << bit)
+                }
+            }
+            Self::Bridge { addr: at, bits } if at == addr => {
+                let both = 1 << bits[0] | 1 << bits[1];
+                if stored & both == both {
+                    stored
+                } else {
+                    stored & !both
+                }
+            }
+            _ => stored,
+        }
+    }
+}
+
+/// A bit in one of the CPU's registers, r0 to r31, that's stuck. The
+/// simulated chip forces it after every instruction, from reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterFault {
+    pub reg: u8,
+    pub bit: u8,
+    pub high: bool,
+}
+
+impl RegisterFault {
+    pub fn apply(self, r: &mut [u8; 32]) {
+        let r = &mut r[usize::from(self.reg)];
+        if self.high {
+            *r |= 1 << self.bit;
+        } else {
+            *r &= !(1 << self.bit);
+        }
+    }
+}
+
+/// Scripts write the faults as `ram:stuck:0x3800.3=1` (bit 3 of 0x3800
+/// stuck high), `ram:alias:0x3900=0x3800` (0x3900 reaches 0x3800's byte),
+/// `ram:bridge:0x3800.0.1` (bits 0 and 1 of 0x3800 shorted) and `reg:r24.0=1`.
+/// These parse the part after `ram:` or `reg:`, and print the whole word.
+impl FromStr for RamFault {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || {
+            format!(
+                "expected ram:stuck:0x3800.3=1, ram:alias:0x3900=0x3800 or \
+                 ram:bridge:0x3800.0.1, not `ram:{s}`"
+            )
+        };
+        let (kind, rest) = s.split_once(':').ok_or_else(bad)?;
+        let fault = match kind {
+            "stuck" => {
+                let (at, value) = rest.split_once('=').ok_or_else(bad)?;
+                let (addr, bit) = at.split_once('.').ok_or_else(bad)?;
+                Self::Stuck {
+                    addr: sram_address(addr)?,
+                    bit: bit_number(bit)?,
+                    high: level(value)?,
+                }
+            }
+            "alias" => {
+                let (addr, to) = rest.split_once('=').ok_or_else(bad)?;
+                let (addr, to) = (sram_address(addr)?, sram_address(to)?);
+                if addr == to {
+                    return Err(format!("{addr:#06x} reaching its own byte is no fault"));
+                }
+                Self::Alias { addr, to }
+            }
+            "bridge" => {
+                let mut parts = rest.split('.');
+                let (Some(addr), Some(a), Some(b), None) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return Err(bad());
+                };
+                let bits = [bit_number(a)?, bit_number(b)?];
+                if bits[0] == bits[1] {
+                    return Err(format!("bit {} can't short to itself", bits[0]));
+                }
+                Self::Bridge {
+                    addr: sram_address(addr)?,
+                    bits,
+                }
+            }
+            _ => return Err(bad()),
+        };
+        Ok(fault)
+    }
+}
+
+impl fmt::Display for RamFault {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Self::Stuck { addr, bit, high } => {
+                write!(f, "ram:stuck:{addr:#06x}.{bit}={}", u8::from(high))
+            }
+            Self::Alias { addr, to } => write!(f, "ram:alias:{addr:#06x}={to:#06x}"),
+            Self::Bridge { addr, bits: [a, b] } => write!(f, "ram:bridge:{addr:#06x}.{a}.{b}"),
+        }
+    }
+}
+
+impl FromStr for RegisterFault {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("expected a stuck register bit like reg:r24.0=1, not `reg:{s}`");
+        let (at, value) = s.split_once('=').ok_or_else(bad)?;
+        let (reg, bit) = at.split_once('.').ok_or_else(bad)?;
+        let reg: u8 = reg
+            .strip_prefix('r')
+            .and_then(|n| n.parse().ok())
+            .filter(|&n| n < 32)
+            .ok_or_else(|| format!("no register `{reg}`; try r0 to r31"))?;
+        Ok(Self {
+            reg,
+            bit: bit_number(bit)?,
+            high: level(value)?,
+        })
+    }
+}
+
+impl fmt::Display for RegisterFault {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "reg:r{}.{}={}", self.reg, self.bit, u8::from(self.high))
+    }
+}
+
+/// A data-space address in SRAM, like `0x3800`.
+fn sram_address(s: &str) -> Result<u16, String> {
+    let addr = s
+        .strip_prefix("0x")
+        .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| format!("expected an address like 0x3800, not `{s}`"))?;
+    if !(reg::SRAM_START..reg::SRAM_END).contains(&usize::from(addr)) {
+        return Err(format!(
+            "{addr:#06x} isn't in SRAM, which is {:#06x} to {:#06x}",
+            reg::SRAM_START,
+            reg::SRAM_END - 1
+        ));
+    }
+    Ok(addr)
+}
+
+fn bit_number(s: &str) -> Result<u8, String> {
+    s.parse()
+        .ok()
+        .filter(|&b| b < 8)
+        .ok_or_else(|| format!("expected a bit from 0 to 7, not `{s}`"))
+}
+
+/// `0` or `1`.
+fn level(s: &str) -> Result<bool, String> {
+    match s {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(format!("a stuck bit reads 0 or 1, not `{s}`")),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct World {
     /// The cell, in centivolts, as the 0614 calibration would report it.
@@ -69,6 +268,11 @@ pub struct World {
     /// Flash has a byte that doesn't match its CRC, as a half-finished
     /// flash would leave it. Like the fuses, only the first tick's counts.
     pub corrupt_flash: bool,
+    /// A broken byte of SRAM. The chip has it from reset, so only the first
+    /// tick's counts.
+    pub ram: Option<RamFault>,
+    /// A broken CPU register, from reset too.
+    pub register: Option<RegisterFault>,
 }
 
 impl Default for World {
@@ -85,7 +289,16 @@ impl World {
         stuck: None,
         fuses: FACTORY_FUSES,
         corrupt_flash: false,
+        ram: None,
+        register: None,
     };
+
+    /// Whether src/rt.rs's startup tests find a broken register or byte of
+    /// RAM, and stop there with the light off for good. The library never
+    /// runs on a chip like that, so the rig plays dead instead.
+    pub fn dead(&self) -> bool {
+        self.ram.is_some() || self.register.is_some()
+    }
 
     /// The raw reading a conversion on `channel` gives.
     pub fn reading(&self, channel: Channel) -> u16 {
@@ -133,6 +346,8 @@ impl World {
 pub struct Rig {
     pub torch: Torch,
     adc: Adc,
+    /// The startup tests failed, so nothing runs (`World::dead`).
+    dead: bool,
 }
 
 impl Default for Rig {
@@ -148,10 +363,14 @@ impl Rig {
         Self {
             torch: Torch::new(CALIBRATION, world.faults()),
             adc: Adc::new(),
+            dead: world.dead(),
         }
     }
 
     pub fn tick(&mut self, pressed: bool, world: &World) -> Option<ts21::button::Event> {
+        if self.dead {
+            return None;
+        }
         let event = self.torch.tick(pressed, self.adc.result());
         self.adc
             .start_with(self.torch.convert(), |channel| world.reading(channel));
@@ -159,7 +378,7 @@ impl Rig {
     }
 
     pub fn level(&self) -> u8 {
-        self.torch.level()
+        if self.dead { 0 } else { self.torch.level() }
     }
 }
 
@@ -221,6 +440,134 @@ mod tests {
             None,
             "reserved"
         );
+    }
+
+    #[test]
+    fn a_stuck_ram_bit_reads_stuck_only_at_its_byte() {
+        let stuck = RamFault::Stuck {
+            addr: 0x3800,
+            bit: 3,
+            high: true,
+        };
+        assert_eq!(stuck.read(0x3800, 0x00), 0x08);
+        assert_eq!(stuck.read(0x3801, 0x00), 0x00);
+        let low = RamFault::Stuck {
+            addr: 0x3800,
+            bit: 0,
+            high: false,
+        };
+        assert_eq!(low.read(0x3800, 0xFF), 0xFE);
+    }
+
+    #[test]
+    fn an_alias_sends_one_address_to_another_byte() {
+        let alias = RamFault::Alias {
+            addr: 0x3900,
+            to: 0x3800,
+        };
+        assert_eq!(alias.cell(0x3900), 0x3800);
+        assert_eq!(alias.cell(0x3800), 0x3800);
+        assert_eq!(alias.cell(0x3901), 0x3901);
+    }
+
+    #[test]
+    fn a_bridge_only_shows_when_its_bits_differ() {
+        let bridge = RamFault::Bridge {
+            addr: 0x3800,
+            bits: [0, 1],
+        };
+        for same in [0x00, 0xFF, 0x03, 0xFC] {
+            assert_eq!(bridge.read(0x3800, same), same, "{same:#04x}");
+        }
+        assert_eq!(bridge.read(0x3800, 0x55), 0x54);
+        assert_eq!(bridge.read(0x3800, 0xAA), 0xA8);
+        assert_eq!(bridge.read(0x3801, 0x55), 0x55);
+    }
+
+    #[test]
+    fn faults_print_the_way_scripts_write_them() {
+        for word in [
+            "ram:stuck:0x3800.3=1",
+            "ram:stuck:0x3fff.0=0",
+            "ram:alias:0x3900=0x3800",
+            "ram:bridge:0x3800.0.1",
+        ] {
+            let fault: RamFault = word["ram:".len()..].parse().unwrap();
+            assert_eq!(fault.to_string(), word);
+        }
+        for word in ["reg:r0.0=1", "reg:r31.7=0"] {
+            let fault: RegisterFault = word["reg:".len()..].parse().unwrap();
+            assert_eq!(fault.to_string(), word);
+        }
+    }
+
+    #[test]
+    fn refuses_faults_it_cant_place() {
+        for ram in [
+            "stuck:0x3800.3",
+            "stuck:0x3800.8=1",
+            "stuck:0x3800.3=2",
+            "stuck:0x37ff.0=1",
+            "stuck:0x4000.0=1",
+            "stuck:3800.0=1",
+            "alias:0x3800=0x3800",
+            "alias:0x3800",
+            "bridge:0x3800.1.1",
+            "bridge:0x3800.1",
+            "bridge:0x3800.0.1.2",
+            "flip:0x3800.0",
+            "",
+        ] {
+            assert!(ram.parse::<RamFault>().is_err(), "ram:{ram} parsed");
+        }
+        for register in ["r32.0=1", "r24.0", "x24.0=1", "r24.9=1", "r24.0=x"] {
+            assert!(
+                register.parse::<RegisterFault>().is_err(),
+                "reg:{register} parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stuck_register_bit_is_forced() {
+        let mut r = [0; 32];
+        RegisterFault {
+            reg: 24,
+            bit: 7,
+            high: true,
+        }
+        .apply(&mut r);
+        assert_eq!(r[24], 0x80);
+        assert!(r.iter().enumerate().all(|(i, &v)| i == 24 || v == 0));
+    }
+
+    #[test]
+    fn a_broken_ram_or_register_leaves_the_rig_dead() {
+        for world in [
+            World {
+                ram: Some(RamFault::Alias {
+                    addr: 0x3900,
+                    to: 0x3800,
+                }),
+                ..World::NORMAL
+            },
+            World {
+                register: Some(RegisterFault {
+                    reg: 0,
+                    bit: 0,
+                    high: true,
+                }),
+                ..World::NORMAL
+            },
+        ] {
+            assert!(world.dead());
+            let mut rig = Rig::new(&world);
+            for pressed in [true, true, true, true, false, false] {
+                assert_eq!(rig.tick(pressed, &world), None);
+            }
+            assert_eq!(rig.level(), 0);
+        }
+        assert!(!World::NORMAL.dead());
     }
 
     #[test]
