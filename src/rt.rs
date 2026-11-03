@@ -111,14 +111,25 @@ global_asm!(
     //
     // Each register gets 0x55 and then 0xAA, which flips every bit both
     // ways, and is read back after each. That finds a stuck bit, and two
-    // bits in one register that short together. It doesn't look for faults
-    // between registers, and neither does AN2632.
+    // neighbouring bits shorted together, since 0x55 and 0xAA always set
+    // them differently. Bits two apart (0 and 2, say) always match, so a
+    // short between those gets through. It doesn't look for faults between
+    // registers either, and neither does AN2632.
     //
     // A failure jumps to `__selftest_failed`, which does nothing, forever.
     // Rust code can't run safely on a broken register file, so there's no
     // gentler way out (AN2632 §5: "if an error is found no functions should
-    // be activated"). The branches lean on SREG's Z flag before SREG is
-    // tested; there's no way round that.
+    // be activated").
+    //
+    // Every check below branches on SREG's Z flag, and a Z stuck at 1 would
+    // make every compare look equal, SREG's own included. So first, a
+    // compare that has to come out unequal. A Z stuck at 0 fails the first
+    // ordinary check instead.
+    "  ldi r16, {a}",
+    "  cpi r16, {b}",
+    "  brne 9f",
+    "  rjmp __selftest_failed",
+    "9:",
     //
     // `or_fail` follows each compare. A conditional branch only reaches 64
     // words, so it hops over an `rjmp`, which reaches all of flash. Its label
@@ -197,6 +208,10 @@ global_asm!(
     "  out {spl}, r16",
     "  ldi r16, hi8({stack_top})",
     "  out {sph}, r16",
+    // xtask's simulator checks a broken register is caught before here, and
+    // a broken byte of RAM after.
+    ".global __registers_tested",
+    "__registers_tested:",
     //
     // # The RAM test (AN2632 §9.2)
     //
@@ -210,9 +225,11 @@ global_asm!(
     // write D back. Then check it all holds D. Every bit is read back
     // after going each way, so a stuck or sluggish one shows. An address
     // that reaches another byte shows when the second of the two is read
-    // with the first's write in it. Going down as well as up finds some
+    // with the first's write in it. Going down as well as up is meant for
     // coupling, where a write to one byte disturbs another: whichever way
     // round they are, one pass reads the victim after the culprit's write.
+    // That's the theory; xtask's simulator doesn't model coupling, so
+    // nothing here proves it.
     //
     // The test is destructive, which is why it runs before .data and .bss
     // exist and before anything's on the stack. AN2632 tests SRAM in

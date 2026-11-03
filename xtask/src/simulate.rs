@@ -20,7 +20,8 @@
 //! `fuse:OSCCFG=0x01` sets a fuse byte and `flash:corrupt` breaks a byte of
 //! flash. `ram:stuck:0x3800.3=1`, `ram:alias:0x3900=0x3800` and
 //! `ram:bridge:0x3800.0.1` break a byte of SRAM, and `reg:r24.0=1` a CPU
-//! register (`world::RamFault` and `RegisterFault` say how). The firmware
+//! register, `SREG`, `SPL` and `SPH` included (`world::RamFault` and
+//! `RegisterFault` say how). The firmware
 //! only checks any of those at power-on, so they have to come before
 //! anything that takes time.
 //!
@@ -624,6 +625,7 @@ fn lit(level: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::Register;
     use ts21::ui::LEVEL;
 
     fn script(script: &str) -> Run {
@@ -745,7 +747,7 @@ mod tests {
         assert_eq!(
             world.register,
             Some(RegisterFault {
-                reg: 5,
+                reg: Register::R(5),
                 bit: 1,
                 high: false
             })

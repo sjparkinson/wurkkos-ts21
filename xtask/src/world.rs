@@ -14,6 +14,7 @@ use ts21::sensors::Channel;
 use ts21::testing::{Adc, temperature_reading, voltage_reading};
 use ts21::torch::Torch;
 
+use crate::avr::Cpu;
 use crate::sim::regs::addr as reg;
 use crate::updi::map;
 
@@ -110,22 +111,42 @@ impl RamFault {
     }
 }
 
-/// A bit in one of the CPU's registers, r0 to r31, that's stuck. The
-/// simulated chip forces it after every instruction, from reset.
+/// A CPU register the startup register test covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Register {
+    /// r0 to r31.
+    R(u8),
+    Sreg,
+    Spl,
+    Sph,
+}
+
+/// A bit in one of the CPU's registers that's stuck. The simulated chip
+/// forces it before every instruction, from reset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterFault {
-    pub reg: u8,
+    pub reg: Register,
     pub bit: u8,
     pub high: bool,
 }
 
 impl RegisterFault {
-    pub fn apply(self, r: &mut [u8; 32]) {
-        let r = &mut r[usize::from(self.reg)];
-        if self.high {
-            *r |= 1 << self.bit;
-        } else {
-            *r &= !(1 << self.bit);
+    pub fn apply(self, cpu: &mut Cpu) {
+        let force = |v: &mut u8| {
+            if self.high {
+                *v |= 1 << self.bit;
+            } else {
+                *v &= !(1 << self.bit);
+            }
+        };
+        match self.reg {
+            Register::R(n) => force(&mut cpu.r[usize::from(n)]),
+            Register::Sreg => force(&mut cpu.sreg),
+            Register::Spl | Register::Sph => {
+                let mut bytes = cpu.sp.to_le_bytes();
+                force(&mut bytes[usize::from(self.reg == Register::Sph)]);
+                cpu.sp = u16::from_le_bytes(bytes);
+            }
         }
     }
 }
@@ -204,11 +225,17 @@ impl FromStr for RegisterFault {
         let bad = || format!("expected a stuck register bit like reg:r24.0=1, not `reg:{s}`");
         let (at, value) = s.split_once('=').ok_or_else(bad)?;
         let (reg, bit) = at.split_once('.').ok_or_else(bad)?;
-        let reg: u8 = reg
-            .strip_prefix('r')
-            .and_then(|n| n.parse().ok())
-            .filter(|&n| n < 32)
-            .ok_or_else(|| format!("no register `{reg}`; try r0 to r31"))?;
+        let reg = match reg {
+            "SREG" => Register::Sreg,
+            "SPL" => Register::Spl,
+            "SPH" => Register::Sph,
+            _ => reg
+                .strip_prefix('r')
+                .and_then(|n| n.parse().ok())
+                .filter(|&n| n < 32)
+                .map(Register::R)
+                .ok_or_else(|| format!("no register `{reg}`; try r0 to r31, SREG, SPL or SPH"))?,
+        };
         Ok(Self {
             reg,
             bit: bit_number(bit)?,
@@ -217,9 +244,20 @@ impl FromStr for RegisterFault {
     }
 }
 
+impl fmt::Display for Register {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::R(n) => write!(f, "r{n}"),
+            Self::Sreg => f.write_str("SREG"),
+            Self::Spl => f.write_str("SPL"),
+            Self::Sph => f.write_str("SPH"),
+        }
+    }
+}
+
 impl fmt::Display for RegisterFault {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "reg:r{}.{}={}", self.reg, self.bit, u8::from(self.high))
+        write!(f, "reg:{}.{}={}", self.reg, self.bit, u8::from(self.high))
     }
 }
 
@@ -495,7 +533,13 @@ mod tests {
             let fault: RamFault = word["ram:".len()..].parse().unwrap();
             assert_eq!(fault.to_string(), word);
         }
-        for word in ["reg:r0.0=1", "reg:r31.7=0"] {
+        for word in [
+            "reg:r0.0=1",
+            "reg:r31.7=0",
+            "reg:SREG.1=1",
+            "reg:SPL.0=0",
+            "reg:SPH.5=1",
+        ] {
             let fault: RegisterFault = word["reg:".len()..].parse().unwrap();
             assert_eq!(fault.to_string(), word);
         }
@@ -530,15 +574,17 @@ mod tests {
 
     #[test]
     fn a_stuck_register_bit_is_forced() {
-        let mut r = [0; 32];
-        RegisterFault {
-            reg: 24,
-            bit: 7,
-            high: true,
-        }
-        .apply(&mut r);
-        assert_eq!(r[24], 0x80);
-        assert!(r.iter().enumerate().all(|(i, &v)| i == 24 || v == 0));
+        let stuck = |reg, bit, high| RegisterFault { reg, bit, high };
+        let mut cpu = Cpu::new(&(0x3800..0x4000));
+        stuck(Register::R(24), 7, true).apply(&mut cpu);
+        assert_eq!(cpu.r[24], 0x80);
+        assert!(cpu.r.iter().enumerate().all(|(i, &v)| i == 24 || v == 0));
+        stuck(Register::Sreg, 1, true).apply(&mut cpu);
+        assert_eq!(cpu.sreg, 0x02);
+        stuck(Register::Sph, 0, false).apply(&mut cpu);
+        assert_eq!(cpu.sp, 0x3EFF);
+        stuck(Register::Spl, 7, false).apply(&mut cpu);
+        assert_eq!(cpu.sp, 0x3E7F);
     }
 
     #[test]
@@ -553,7 +599,7 @@ mod tests {
             },
             World {
                 register: Some(RegisterFault {
-                    reg: 0,
+                    reg: Register::R(0),
                     bit: 0,
                     high: true,
                 }),
