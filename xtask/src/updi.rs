@@ -16,6 +16,7 @@
 //! first can leave it unrecoverable without a high-voltage programmer.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 /// Data-space layout of the ATtiny1616, as UPDI sees it.
 pub mod map {
@@ -109,6 +110,9 @@ const NVM_WRERROR: u8 = 1 << 2;
 /// The most a single REPEAT can cover.
 const MAX_BLOCK: usize = 256;
 
+/// How long the chip gets to come out of reset into programming mode.
+const PROGMODE_TIMEOUT: Duration = Duration::from_millis(500);
+
 pub struct Programmer<W: Wire> {
     wire: W,
 }
@@ -157,11 +161,22 @@ impl<W: Wire> Programmer<W> {
             return Err("the chip didn't accept the NVM programming key".into());
         }
 
+        // The chip reads as locked, and not yet in programming mode, until
+        // it's through reset. That's timed by the clock, not by a count of
+        // polls, because a poll's round trip depends on the adapter's USB
+        // latency, and a fast adapter could run out of polls inside the
+        // start-up time. FUSE.SYSCFG1 is 0xFF from the factory, which puts
+        // SUT at 64 ms (ATDF). avrdude allows 100 ms to unlock and 500 ms
+        // more to reach programming mode; one 500 ms window covers both here.
         self.reset()?;
-        for _ in 0..100 {
+        let deadline = Instant::now() + PROGMODE_TIMEOUT;
+        loop {
             let status = self.ldcs(ASI_SYS_STATUS)?;
             if status & SYS_STATUS_LOCKSTATUS == 0 && status & SYS_STATUS_NVMPROG != 0 {
                 return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
             }
         }
         Err(
@@ -519,6 +534,17 @@ mod tests {
         p.check_signature().unwrap();
     }
 
+    /// More polls than the old fixed count of 100 allowed, which a fast
+    /// adapter could get through inside a 64 ms start-up time.
+    #[test]
+    fn waits_for_the_chip_to_start_up() {
+        let mut tiny = Tiny::new();
+        tiny.start_up_polls = 500;
+        let mut p = Programmer::connect(tiny).unwrap();
+        p.enter_progmode().unwrap();
+        p.check_signature().unwrap();
+    }
+
     #[test]
     fn refuses_another_chip() {
         let mut tiny = Tiny::new();
@@ -706,6 +732,9 @@ mod tests {
             pub breaks: usize,
             pub updi_disabled: bool,
             pub in_reset: bool,
+            /// How many SYS_STATUS reads after a reset still see the chip
+            /// starting up, reading as locked and not in programming mode.
+            pub start_up_polls: usize,
             /// The EESAVE fuse: EEPROM survives a chip erase.
             pub eesave: bool,
             /// A chip erase that silently does nothing.
@@ -719,6 +748,7 @@ mod tests {
             ctrla: u8,
             key_status: u8,
             progmode: bool,
+            starting: usize,
             ptr: u16,
             repeat: usize,
             page_buffer: Vec<u8>,
@@ -738,6 +768,7 @@ mod tests {
                     breaks: 0,
                     updi_disabled: false,
                     in_reset: false,
+                    start_up_polls: 0,
                     eesave: false,
                     ignores_chip_erase: false,
                     page_writes: 0,
@@ -747,6 +778,7 @@ mod tests {
                     ctrla: 0,
                     key_status: 0,
                     progmode: false,
+                    starting: 0,
                     ptr: 0,
                     repeat: 1,
                     page_buffer: vec![0xFF; map::FLASH_PAGE],
@@ -866,10 +898,14 @@ mod tests {
                 }
             }
 
-            fn ldcs(&self, reg: u8) -> u8 {
+            fn ldcs(&mut self, reg: u8) -> u8 {
                 match reg {
                     CS_STATUSA => 0x30, // UPDI revision 3
                     ASI_KEY_STATUS => self.key_status,
+                    ASI_SYS_STATUS if self.starting > 0 => {
+                        self.starting -= 1;
+                        SYS_STATUS_LOCKSTATUS
+                    }
                     ASI_SYS_STATUS => {
                         let lock = if self.locked {
                             SYS_STATUS_LOCKSTATUS
@@ -890,6 +926,7 @@ mod tests {
                     ASI_RESET_REQ if value == RESET_REQ_APPLY => self.in_reset = true,
                     ASI_RESET_REQ => {
                         self.in_reset = false;
+                        self.starting = self.start_up_polls;
                         self.progmode = self.key_status & KEY_STATUS_NVMPROG != 0 && !self.locked;
                         self.key_status = 0;
                     }
