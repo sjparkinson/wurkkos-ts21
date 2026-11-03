@@ -91,7 +91,7 @@ fn root() -> PathBuf {
 }
 
 /// Builds the firmware for the AVR, then checks the ELF's layout and runs it
-/// on the simulator. The ELF is left in place even if the checks fail.
+/// on the simulator.
 fn build() -> Result<(elf::Elf, sim::Report), String> {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     run(Command::new(cargo).current_dir(root()).args([
