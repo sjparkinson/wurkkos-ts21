@@ -121,19 +121,37 @@ fn hex() -> Result<(), String> {
     let ram = elf.ram_bytes();
     let ram_size = elf::RAM.end - elf::RAM.start;
     println!(
-        "flash {flash:>5} / {flash_size} bytes ({}%)",
+        "flash {:>6} / {} bytes ({}%)",
+        commas(flash.into()),
+        commas(flash_size.into()),
         flash * 100 / flash_size
     );
     println!(
-        "ram   {ram:>5} / {ram_size} bytes ({}%), plus the stack",
+        "ram   {:>6} / {} bytes ({}%), plus the stack",
+        commas(ram.into()),
+        commas(ram_size.into()),
         ram * 100 / ram_size
     );
-    println!("stack {:>5} bytes at most", sim.stack);
+    println!("stack {:>6} bytes at most", commas(sim.stack.into()));
     println!(
-        "loop  {:>5} instructions at most per 64 Hz tick (budget {})",
-        sim.loop_instructions, sim.loop_budget
+        "loop  {:>6} instructions at most per 64 Hz tick (budget {})",
+        commas(sim.loop_instructions),
+        commas(sim.loop_budget)
     );
     Ok(())
+}
+
+/// `39062` as `39,062`.
+fn commas(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 fn connect(port: &str) -> Result<Programmer<Port>, String> {
@@ -263,5 +281,19 @@ fn run(command: &mut Command) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{program} failed ({status})"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commas;
+
+    #[test]
+    fn commas_group_thousands() {
+        assert_eq!(commas(0), "0");
+        assert_eq!(commas(107), "107");
+        assert_eq!(commas(3978), "3,978");
+        assert_eq!(commas(39062), "39,062");
+        assert_eq!(commas(1_234_567), "1,234,567");
     }
 }
