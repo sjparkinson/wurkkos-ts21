@@ -109,7 +109,7 @@ use crate::simulate::{self, Sample};
 use crate::spec::{self, Example};
 use crate::switching::RandomSwitching;
 use crate::updi::map;
-use crate::world::{self, CALIBRATION, RamFault, RegisterFault, Rig, World};
+use crate::world::{self, CALIBRATION, RamFault, Register, RegisterFault, Rig, World};
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
@@ -241,15 +241,19 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     };
 
     let (sim, boot) = power_on(&World::NORMAL).map_err(|e| format!("startup: {e}"))?;
-    if boot == Boot::Failed {
-        return Err("startup: the self-tests in src/rt.rs failed on a good chip".into());
+    if let Boot::Failed { from } = boot {
+        return Err(format!(
+            "startup: the self-tests in src/rt.rs failed on a good chip, at {:#06x}",
+            from * 2
+        ));
     }
     check_startup(&sim.chip, &linked).map_err(|e| format!("startup: {e}"))?;
 
     startup_with_statics(&image, ram_tested, main, &linked, unhandled)
         .map_err(|e| format!("startup with statics: {e}"))?;
 
-    startup_faults(&power_on).map_err(|e| format!("startup self-tests: {e}"))?;
+    startup_faults(&power_on, symbol("__registers_tested")? / 2, ram_tested / 2)
+        .map_err(|e| format!("startup self-tests: {e}"))?;
 
     let mut report = Report {
         stack: 0,
@@ -469,11 +473,14 @@ fn ui_example(
         Boot::Main if world.dead() => {
             return Err("the self-tests in src/rt.rs missed the broken RAM or register".into());
         }
-        Boot::Failed if !world.dead() => {
-            return Err("the self-tests in src/rt.rs failed on a good chip".into());
+        Boot::Failed { from } if !world.dead() => {
+            return Err(format!(
+                "the self-tests in src/rt.rs failed on a good chip, at {:#06x}",
+                from * 2
+            ));
         }
         Boot::Main => in_step(sim, samples, report)?,
-        Boot::Failed => {
+        Boot::Failed { .. } => {
             // A dead rig ignores every tick, so its level is where it starts.
             stays_dark(&mut sim)?;
             Rig::new(&world).level()
@@ -491,9 +498,14 @@ fn ui_example(
 
 /// Checks a chip that's stopped in `__selftest_failed` stays there, with
 /// the FET and linear pins driven low and everything else off.
+/// It presses and releases the switch a few times on the way, since
+/// "nothing, ever" includes clicks.
 fn stays_dark(sim: &mut Sim) -> Result<(), String> {
     let failed = sim.cpu.pc;
-    for _ in 0..1_000 {
+    for step in 0..2_000 {
+        if step % 250 == 0 {
+            sim.chip.set_switch(step % 500 == 0)?;
+        }
         sim.step()?;
         if sim.cpu.pc != failed {
             return Err(format!(
@@ -502,6 +514,12 @@ fn stays_dark(sim: &mut Sim) -> Result<(), String> {
             ));
         }
     }
+    if sim.cpu.flag(I) {
+        return Err("failed its self-tests with interrupts on".into());
+    }
+    // TCA0 is never on by this point, so this can't fail today; the pin
+    // check below is the real one. PORTB.OUT isn't modelled, so any write
+    // to it is an error, and the pins stay driven low.
     if sim.chip.leds() != (0, 0) {
         return Err(format!(
             "failed its self-tests with the LEDs at {:?}",
@@ -520,14 +538,25 @@ fn stays_dark(sim: &mut Sim) -> Result<(), String> {
 /// Powers up with each kind of fault the self-tests in src/rt.rs are there
 /// for, and checks every one stops in `__selftest_failed` and stays dark:
 ///
-/// - every bit of every register, stuck either way;
+/// - every bit of r0 to r31, SREG but its I bit, and SP up to 0x3FFF,
+///   stuck either way;
 /// - stuck bits in the first, middle and last bytes of SRAM;
 /// - addresses that reach another byte, either way round, next door and
-///   far apart, which only going up and then down finds;
+///   far apart;
 /// - every pair of bits in a byte shorted together, which only shows up
 ///   with the backgrounds after 0x00, since 0x00 and 0xFF write both bits
 ///   the same.
-fn startup_faults(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<(), String> {
+///
+/// It also checks the right test found each one: a register fault from
+/// before `registers_tested`, a RAM fault from between there and
+/// `ram_tested`, both word addresses. Otherwise a
+/// register the register test skipped could pass because the RAM test
+/// happens to trip over it.
+fn startup_faults(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    registers_tested: u32,
+    ram_tested: u32,
+) -> Result<(), String> {
     let (first, last) = (SRAM.start, SRAM.end - 1);
     let middle = SRAM.start + (SRAM.end - SRAM.start) / 2;
     let mut ram = Vec::new();
@@ -555,8 +584,15 @@ fn startup_faults(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> 
             });
         }
     }
-    let registers = (0..32).flat_map(|reg| {
-        (0..8).flat_map(move |bit| [false, true].map(|high| RegisterFault { reg, bit, high }))
+    // SREG.I isn't tested (nothing's enabled to fire, so a stuck one can't
+    // do harm before `hw::init`), and SPH's top two bits might not exist.
+    let tested = (0..32).map(|n| (Register::R(n), 8)).chain([
+        (Register::Sreg, 7),
+        (Register::Spl, 8),
+        (Register::Sph, 6),
+    ]);
+    let registers = tested.flat_map(|(reg, bits)| {
+        (0..bits).flat_map(move |bit| [false, true].map(|high| RegisterFault { reg, bit, high }))
     });
 
     let worlds = ram
@@ -570,15 +606,21 @@ fn startup_faults(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> 
             ..World::NORMAL
         }));
     for world in worlds {
-        let what = match (world.ram, world.register) {
-            (Some(ram), _) => ram.to_string(),
-            (_, Some(register)) => register.to_string(),
+        let (what, found_in) = match (world.ram, world.register) {
+            (Some(ram), _) => (ram.to_string(), registers_tested..ram_tested),
+            (_, Some(register)) => (register.to_string(), 0..registers_tested),
             (None, None) => unreachable!("every world here has a fault"),
         };
         let fault = |e: String| format!("{what}: {e}");
         let (mut sim, boot) = power_on(&world).map_err(fault)?;
-        if boot != Boot::Failed {
+        let Boot::Failed { from } = boot else {
             return Err(fault("not found, and the firmware reached main".into()));
+        };
+        if !found_in.contains(&from) {
+            return Err(fault(format!(
+                "found by the wrong test, at {:#06x}",
+                from * 2
+            )));
         }
         stays_dark(&mut sim).map_err(fault)?;
     }
@@ -681,8 +723,9 @@ struct Sim {
 enum Boot {
     /// At `main`, with the self-tests passed and memory set up.
     Main,
-    /// In `__selftest_failed`, for good.
-    Failed,
+    /// In `__selftest_failed`, for good, jumped to from `from`, a word
+    /// address: which check failed.
+    Failed { from: u32 },
 }
 
 /// A bit for each vector whose slot in `image`'s table is a `jmp` to
@@ -730,13 +773,21 @@ impl Sim {
     /// Runs from reset until startup reaches `main` or gives up in
     /// `failed`, both word addresses.
     fn boot(&mut self, main: u32, failed: u32) -> Result<Boot, String> {
+        let mut from = self.cpu.pc;
         for _ in 0..BOOT_BUDGET {
             if self.cpu.pc == main {
+                if self.testing.is_some() {
+                    return Err(
+                        "reached main without passing __ram_tested, so the stack was never checked"
+                            .into(),
+                    );
+                }
                 return Ok(Boot::Main);
             }
             if self.cpu.pc == failed {
-                return Ok(Boot::Failed);
+                return Ok(Boot::Failed { from });
             }
+            from = self.cpu.pc;
             self.step()?;
         }
         Err(format!(
@@ -750,6 +801,11 @@ impl Sim {
     }
 
     fn step(&mut self) -> Result<(), String> {
+        // Before the instruction, so a stuck bit is stuck from reset and
+        // every instruction reads it stuck.
+        if let Some(fault) = self.chip.world.register {
+            fault.apply(&mut self.cpu);
+        }
         let pc = self.cpu.pc;
         let awake = !self.cpu.asleep;
         self.cpu.step(&mut self.chip)?;
@@ -757,11 +813,14 @@ impl Sim {
             self.executed += 1;
             self.chip.elapse()?;
         }
-        if let Some(fault) = self.chip.world.register {
-            fault.apply(&mut self.cpu.r);
-        }
         if self.testing == Some(self.cpu.pc) {
             self.testing = None;
+            if self.cpu.sp != SRAM.end - 1 {
+                return Err(format!(
+                    "the self-tests left SP at {:#06x}, not the top of SRAM",
+                    self.cpu.sp
+                ));
+            }
         }
         if self.testing.is_none() {
             self.lowest_sp = self.lowest_sp.min(self.cpu.sp);
@@ -2159,6 +2218,138 @@ mod tests {
 
     fn sim(main: &[u16]) -> Sim {
         Sim::new(image(main), SRAM.start + 1, u32::from(UNHANDLED) * 2).unwrap()
+    }
+
+    /// `image`'s `main` as a word address, and the byte address of its
+    /// `n`th word.
+    const MAIN: u32 = UNHANDLED as u32 + 1;
+    fn at(n: u32) -> u32 {
+        (MAIN + n) * 2
+    }
+
+    // ldi r16, 0x38; out SPH, r16: SP to 0x38FF, as the register test does.
+    const SP_LOW: [u16; 2] = [0xE308, 0xBF0E];
+    // ldi r16, 0x3F; out SPH, r16: SP back to 0x3FFF.
+    const SP_BACK: [u16; 2] = [0xE30F, 0xBF0E];
+    const NOP: u16 = 0x0000;
+    const SPIN: u16 = 0xCFFF; // rjmp .
+
+    /// .bss up to 0x3A00, so SP at 0x38FF is in it.
+    fn sim_with_bss(main: &[u16]) -> Sim {
+        Sim::new(image(main), 0x3A00, u32::from(UNHANDLED) * 2).unwrap()
+    }
+
+    #[test]
+    fn checks_the_stack_from_reset_without_self_tests() {
+        let mut s = sim_with_bss(&[SP_LOW[0], SP_LOW[1], NOP, SPIN]);
+        let err = (0..4).try_for_each(|_| s.step()).unwrap_err();
+        assert!(err.contains("ran into .bss"), "{err}");
+    }
+
+    #[test]
+    fn holds_the_stack_checks_until_the_self_tests_are_done() {
+        let program = [SP_LOW[0], SP_LOW[1], SP_BACK[0], SP_BACK[1], NOP, SPIN];
+        let mut s = sim_with_bss(&program).testing_until(at(4));
+        for _ in 0..10 {
+            s.step().unwrap();
+        }
+        assert_eq!(s.testing, None);
+        assert_eq!(s.stack(), 0, "the self-tests' SP doesn't count as stack");
+    }
+
+    #[test]
+    fn refuses_self_tests_that_leave_sp_elsewhere() {
+        let mut s = sim_with_bss(&[SP_LOW[0], SP_LOW[1], NOP, SPIN]).testing_until(at(2));
+        let err = (0..4).try_for_each(|_| s.step()).unwrap_err();
+        assert!(err.contains("left SP at 0x38ff"), "{err}");
+    }
+
+    #[test]
+    fn boot_refuses_main_before_the_self_tests_finish() {
+        let mut s = sim(&[SPIN]).testing_until(0x1000);
+        let err = s.boot(MAIN, MAIN + 100).unwrap_err();
+        assert!(err.contains("without passing __ram_tested"), "{err}");
+    }
+
+    #[test]
+    fn boot_says_which_check_failed() {
+        // nop; nop; rjmp .+0 to the next word, which is `failed`.
+        let mut s = sim(&[NOP, NOP, 0xC000, SPIN]);
+        assert_eq!(
+            s.boot(MAIN + 100, MAIN + 3),
+            Ok(Boot::Failed { from: MAIN + 2 })
+        );
+        let mut s = sim(&[SPIN]);
+        assert_eq!(s.boot(MAIN, MAIN + 100), Ok(Boot::Main));
+    }
+
+    #[test]
+    fn a_stuck_register_is_stuck_from_the_first_instruction() {
+        // mov r17, r16, with r16 stuck high at bit 0 and never written.
+        let mut s = sim(&[0x2F10, SPIN]);
+        s.chip.world.register = Some(RegisterFault {
+            reg: Register::R(16),
+            bit: 0,
+            high: true,
+        });
+        s.step().unwrap(); // jmp
+        s.step().unwrap();
+        assert_eq!(s.cpu.r[17], 0x01);
+    }
+
+    #[test]
+    fn ram_faults_reach_loads_and_stores() {
+        let mut c = chip();
+        c.world.ram = Some(RamFault::Alias {
+            addr: 0x3900,
+            to: 0x3800,
+        });
+        c.write(0x3900, 0x12).unwrap();
+        assert_eq!(c.read(0x3800), Ok(0x12));
+        c.write(0x3800, 0x34).unwrap();
+        assert_eq!(c.read(0x3900), Ok(0x34));
+        assert_eq!(c.sram(&(0x3900..0x3901)), [JUNK], "0x3900's own byte");
+
+        c.world.ram = Some(RamFault::Stuck {
+            addr: 0x3800,
+            bit: 7,
+            high: false,
+        });
+        c.write(0x3800, 0xFF).unwrap();
+        assert_eq!(c.read(0x3800), Ok(0x7F));
+
+        c.world.ram = Some(RamFault::Bridge {
+            addr: 0x3800,
+            bits: [0, 1],
+        });
+        c.write(0x3800, 0x55).unwrap();
+        assert_eq!(c.read(0x3800), Ok(0x54));
+    }
+
+    #[test]
+    fn staying_dark_means_pins_low_interrupts_off_and_no_way_out() {
+        // The pins driven low, then spin, as `__selftest_failed` does.
+        let dark = |s: &mut Sim| {
+            s.chip.io[reg::VPORTB_DIR] = FET | LINEAR;
+            s.step().unwrap(); // jmp
+        };
+        let mut s = sim(&[SPIN]);
+        dark(&mut s);
+        assert_eq!(stays_dark(&mut s), Ok(()));
+
+        let mut s = sim(&[SPIN]);
+        s.step().unwrap();
+        assert!(stays_dark(&mut s).unwrap_err().contains("floating"));
+
+        let mut s = sim(&[SPIN]);
+        dark(&mut s);
+        s.cpu.sreg |= 1 << I;
+        assert!(stays_dark(&mut s).unwrap_err().contains("interrupts on"));
+
+        // nop, then back to the start: it leaves the spin.
+        let mut s = sim(&[NOP, 0xCFFE]);
+        dark(&mut s);
+        assert!(stays_dark(&mut s).unwrap_err().contains("left"));
     }
 
     #[test]

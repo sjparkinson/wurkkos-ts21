@@ -81,6 +81,10 @@ pub struct Cpu {
     pub handling: Option<u8>,
     /// Set by `sei`: the next instruction runs before any interrupt.
     hold: bool,
+    /// The SP bits that exist. The datasheet says unused ones read 0
+    /// without saying which (DS40002204A §8.7.2), so this keeps only the
+    /// ones SRAM needs, the fewest it could be.
+    sp_bits: u16,
 }
 
 impl Cpu {
@@ -94,6 +98,7 @@ impl Cpu {
             asleep: false,
             handling: None,
             hold: false,
+            sp_bits: sram.end.next_power_of_two() - 1,
         }
     }
 
@@ -543,8 +548,8 @@ impl Cpu {
 
     fn store(&mut self, bus: &mut impl Bus, addr: u16, value: u8) -> Result<(), String> {
         match addr {
-            SPL => self.sp = self.sp & 0xFF00 | u16::from(value),
-            SPH => self.sp = self.sp & 0x00FF | u16::from(value) << 8,
+            SPL => self.sp = (self.sp & 0xFF00 | u16::from(value)) & self.sp_bits,
+            SPH => self.sp = (self.sp & 0x00FF | u16::from(value) << 8) & self.sp_bits,
             SREG => self.sreg = value,
             _ => bus.write(addr, value)?,
         }
@@ -904,6 +909,13 @@ mod tests {
         });
         assert_eq!((cpu.r[17], cpu.r[18]), (0x80, 0));
         assert_eq!(bus.data[0x05], 0x04);
+    }
+
+    #[test]
+    fn sp_only_has_the_bits_sram_needs() {
+        // ldi r16, 0xFF; out SPH, r16; out SPL, r16
+        let (cpu, _) = run(&[ldi(16, 0xFF), 0xBF0E, 0xBF0D], |_, _| {});
+        assert_eq!(cpu.sp, 0x3FFF);
     }
 
     #[test]
