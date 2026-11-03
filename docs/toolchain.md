@@ -88,7 +88,7 @@ Then, after `cargo fw`:
 
 ## Host builds
 
-`cargo test`, `cargo clippy` and `cargo fmt` run on your machine as normal. The library (`src/lib.rs` and below) is `no_std` and has no hardware access, so it builds for both. `src/main.rs` compiles to a stub on anything but AVR, and `src/hw.rs` and `src/rt.rs` only exist on AVR. That's why there's a separate `cargo fw-clippy`.
+`cargo test`, `cargo clippy` and `cargo fmt` run on your machine as normal. The library (`src/lib.rs` and below) is `no_std` and has no hardware access, so it builds for both. `src/main.rs` compiles to a stub on anything but AVR, and `src/hw.rs` and `src/rt.rs` only exist on AVR. That's why there's a separate `cargo clippy-fw`.
 
 ## First build
 
