@@ -52,7 +52,7 @@ That builds the firmware and then
 
 1. puts the chip in programming mode and checks its signature (1E 94 21)
 2. chip-erases it, which wipes flash and, unless the EESAVE fuse is set (Microchip ships it unset), EEPROM
-3. writes the image a 64-byte page at a time, skipping blank pages (the erase already left them blank)
+3. writes the image a 64-byte page at a time, skipping blank pages (the erase already left them blank). The image is padded to all 16 KB with a CRC in the last two bytes, which the firmware checks at power-on, so the last page is always written
 4. reads it all back and compares
 5. resets the chip and turns UPDI off, so the new firmware starts
 
@@ -73,6 +73,10 @@ cargo xtask flash /dev/cu.usbserial-XXXX path/to/anduril.sofirn-sp36-t1616.hex
 ```
 
 That's the build Wurkkos ships for model 0614, and people report recent ones running fine on the TS21.
+
+## If it won't go above the linear channel
+
+The power-on self-tests (docs/ui.md) quietly cap the light at the top of the linear channel if flash doesn't match its CRC or the fuses aren't what the firmware expects. If that happens after a flash that verified, suspect the CRC convention in `xtask/src/crc.rs` first, since it's never been checked against a real chip. Then the fuses: `cargo xtask backup` saves them to `backup/fuses.hex`, to compare with the checks in `src/selftest.rs`. Nothing here writes fuses, so that's a decision for you, not the tool. After an interrupted flash, run `cargo xtask flash` again.
 
 ## If it doesn't talk
 

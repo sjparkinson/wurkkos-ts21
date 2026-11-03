@@ -413,6 +413,9 @@ mod tests {
             (regs::addr::SLPCTRL_CTRLA, "SLPCTRL", None, "CTRLA", 1),
             (regs::addr::RTC_PITINTCTRL, "RTC", None, "PITINTCTRL", 1),
             (regs::addr::PORTA_INTFLAGS, "PORTA", None, "INTFLAGS", 1),
+            (regs::addr::CRCSCAN_CTRLA, "CRCSCAN", None, "CTRLA", 1),
+            (regs::addr::CRCSCAN_CTRLB, "CRCSCAN", None, "CTRLB", 1),
+            (regs::addr::CRCSCAN_STATUS, "CRCSCAN", None, "STATUS", 1),
             (regs::addr::FUSE_WDTCFG, "FUSE", None, "WDTCFG", 1),
             (regs::addr::FUSE_OSCCFG, "FUSE", None, "OSCCFG", 1),
             (regs::addr::FUSE_SYSCFG0, "FUSE", None, "SYSCFG0", 1),
@@ -463,6 +466,9 @@ mod tests {
         let adc_intflags = atdf.register("ADC0", None, "INTFLAGS");
         let wdt_ctrla = atdf.register("WDT", None, "CTRLA");
         let wdt_status = atdf.register("WDT", None, "STATUS");
+        let crc_ctrla = atdf.register("CRCSCAN", None, "CTRLA");
+        let crc_ctrlb = atdf.register("CRCSCAN", None, "CTRLB");
+        let crc_status = atdf.register("CRCSCAN", None, "STATUS");
         let osccfg = atdf.register("FUSE", None, "OSCCFG");
         let syscfg0 = atdf.register("FUSE", None, "SYSCFG0");
 
@@ -648,6 +654,27 @@ mod tests {
                     .value("SMODE", "IDLE"),
                 "SLPCTRL.CTRLA.SMODE=IDLE",
             ),
+            (
+                regs::CRCSCAN_ENABLE,
+                crc_ctrla.mask("ENABLE"),
+                "CRCSCAN.CTRLA.ENABLE",
+            ),
+            (
+                regs::CRCSCAN_SRC_FLASH,
+                crc_ctrlb.value("SRC", "FLASH"),
+                "CRCSCAN.CTRLB.SRC=FLASH",
+            ),
+            (
+                regs::CRCSCAN_MODE_PRIORITY,
+                crc_ctrlb.value("MODE", "PRIORITY"),
+                "CRCSCAN.CTRLB.MODE=PRIORITY",
+            ),
+            (
+                regs::CRCSCAN_BUSY,
+                crc_status.mask("BUSY"),
+                "CRCSCAN.STATUS.BUSY",
+            ),
+            (regs::CRCSCAN_OK, crc_status.mask("OK"), "CRCSCAN.STATUS.OK"),
             (
                 regs::FUSE_FREQSEL,
                 osccfg.mask("FREQSEL"),

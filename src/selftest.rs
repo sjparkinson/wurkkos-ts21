@@ -5,6 +5,11 @@
 //! the errata and the ATDF disagree about the factory bytes, so a whole-byte
 //! compare would fail on a chip that's fine. It never writes them.
 //!
+//! It also has the chip's CRCSCAN check the whole of flash against the
+//! CRC-16 that `cargo xtask hex` stores in its last two bytes (AN2632 §9.1),
+//! which catches a flash that a `cargo xtask flash` left half-written. The
+//! hardware does the sums, so all that's here is what a failure means.
+//!
 //! A failure doesn't leave a dead torch, because the first flash has to be
 //! easy to diagnose. It quietly refuses the FET instead: `limits::Limits`
 //! caps the light at the top of the linear channel until the cell comes out.
@@ -48,14 +53,20 @@ impl Fuses {
 pub struct Faults {
     /// The fuses aren't what the firmware expects.
     pub fuses: bool,
+    /// Flash doesn't match the CRC `cargo xtask hex` put at its end, by
+    /// CRCSCAN's sums.
+    pub flash: bool,
 }
 
 impl Faults {
-    pub const NONE: Self = Self { fuses: false };
+    pub const NONE: Self = Self {
+        fuses: false,
+        flash: false,
+    };
 
     /// Whether anything failed, which refuses the FET.
     pub const fn any(self) -> bool {
-        self.fuses
+        self.fuses || self.flash
     }
 }
 
@@ -133,6 +144,14 @@ mod tests {
     #[test]
     fn only_a_fault_refuses_the_fet() {
         assert!(!Faults::NONE.any());
-        assert!(Faults { fuses: true }.any());
+        let fuses = Faults {
+            fuses: true,
+            ..Faults::NONE
+        };
+        let flash = Faults {
+            flash: true,
+            ..Faults::NONE
+        };
+        assert!(fuses.any() && flash.any());
     }
 }

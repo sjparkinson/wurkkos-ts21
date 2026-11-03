@@ -1,5 +1,6 @@
 //! What the torch sees, for the simulators: the cell's voltage, the MCU's
-//! temperature, an ADC that's broken, and the fuses it reads at power-on.
+//! temperature, an ADC that's broken, and the fuses and flash it checks at
+//! power-on.
 //!
 //! The library-side runs (`simulate.rs`) and the firmware on the simulated
 //! chip (`sim.rs`) both get their raw readings from here, so the two see
@@ -43,6 +44,9 @@ pub struct World {
     /// The fuse bytes. The firmware reads them once, at power-on, so only
     /// the first tick's count.
     pub fuses: [u8; FUSE_BYTES],
+    /// Flash has a byte that doesn't match its CRC, as a half-finished
+    /// flash would leave it. Like the fuses, only the first tick's counts.
+    pub corrupt_flash: bool,
 }
 
 impl Default for World {
@@ -58,6 +62,7 @@ impl World {
         kelvin: 298,
         stuck: None,
         fuses: FACTORY_FUSES,
+        corrupt_flash: false,
     };
 
     /// The raw reading a conversion on `channel` gives.
@@ -87,7 +92,10 @@ impl World {
             append: at(reg::FUSE_APPEND),
             bootend: at(reg::FUSE_BOOTEND),
         };
-        Faults { fuses: !fuses.ok() }
+        Faults {
+            fuses: !fuses.ok(),
+            flash: self.corrupt_flash,
+        }
     }
 }
 
@@ -174,7 +182,13 @@ mod tests {
     fn a_wrong_fuse_is_a_fault() {
         let mut world = World::NORMAL;
         world.fuses[2] = 0x01; // OSCCFG: 16 MHz
-        assert_eq!(world.faults(), Faults { fuses: true });
+        assert_eq!(
+            world.faults(),
+            Faults {
+                fuses: true,
+                flash: false
+            }
+        );
         assert_eq!(World::NORMAL.fuse(usize::from(map::FUSES) + 9), None);
     }
 }

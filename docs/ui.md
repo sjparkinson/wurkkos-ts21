@@ -30,7 +30,7 @@ It always comes on at level 50 of 150, which is on the linear channel. The FET n
 
 These aren't clicks, they're what the light does on its own. The Action column says what's going on, and the examples set the scene with words `cargo xtask simulate` understands: `cell:3.05V` for the cell (it starts at 3.8 V), `temp:70C` for the MCU (it starts at 25 °C) and `adc:0` for an ADC that reads 0 every time.
 
-The light runs at the lowest of the UI's level, the thermal ceiling and the battery ceiling, and both ceilings fade a level at a time rather than jump. Readings that can't be real (a voltage outside 2.00 to 4.60 V, a temperature outside -40 to 150 °C) are never taken as safe: a second of them drops that ceiling to level 75, the top of the linear channel, and never turns the light off.
+The light runs at the lowest of the UI's level, the thermal ceiling, the battery ceiling and the self-test cap below, and both ceilings fade a level at a time rather than jump. Readings that can't be real (a voltage outside 2.00 to 4.60 V, a temperature outside -40 to 150 °C) are never taken as safe: a second of them drops that ceiling to level 75, the top of the linear channel, and never turns the light off.
 
 | Action | Does | Example | Status |
 |---|---|---|---|
@@ -47,14 +47,16 @@ The thresholds and the 0614 voltage calibration are a starting point, not measur
 
 ## Self-tests at power-on
 
-Before it turns anything on, the firmware reads its fuses back (`src/selftest.rs` has which fields and why). It never writes them. A failure doesn't leave a dead torch: the light quietly refuses the FET until the cell comes out, and does everything else as usual.
+Before it turns anything on, the firmware checks flash against the CRC that `cargo xtask hex` stores in its last two bytes, and reads its fuses back (`src/selftest.rs` has which fields and why). It never writes them. A failure doesn't leave a dead torch: the light quietly refuses the FET until the cell comes out, and does everything else as usual, low-voltage protection included.
 
-The examples set a fuse byte with `fuse:OSCCFG=0x01`, using the datasheet's names. The firmware only reads them at power-on, so they go before anything that takes time.
+The examples break a byte of flash with `flash:corrupt`, and set a fuse byte with `fuse:OSCCFG=0x01`, using the datasheet's names. The firmware only checks them at power-on, so they go before anything that takes time.
 
 | Action | Does | Example | Status |
 |---|---|---|---|
+| Flash doesn't match its CRC, off | Nothing. Most likely a flash that didn't finish, or an image that didn't come from `cargo xtask hex` or `flash` | `flash:corrupt wait:3s` → off | Done |
+| Flash doesn't match its CRC, on | Never above level 75, the top of the linear channel. At level 50 that's nothing yet; it shows once the full UI's back | `flash:corrupt 1C wait:2s` → level 50 | Done |
 | Fuses not what the firmware expects, off | Nothing | `fuse:OSCCFG=0x01 wait:3s` → off | Done |
-| Fuses not what the firmware expects, on | Never above level 75, the top of the linear channel. At level 50 that's nothing yet; it shows once the full UI's back | `fuse:OSCCFG=0x01 1C wait:2s` → level 50 | Done |
+| Fuses not what the firmware expects, on | Never above level 75, as for flash | `fuse:OSCCFG=0x01 1C wait:2s` → level 50 | Done |
 
 ## Always on, in the background
 

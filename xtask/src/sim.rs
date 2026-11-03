@@ -47,6 +47,13 @@
 //! - `sleep` needs SLPCTRL.SEN (the chip treats it as a nop otherwise),
 //!   idle mode, the only one modelled, and an enabled interrupt that could
 //!   wake it. `avr.rs` adds that SREG.I is set and no handler's running.
+//! - CRCSCAN runs CRC-16-CCITT over all of flash and sets STATUS.OK if it
+//!   comes to 0, which is what a correct checksum in the last two bytes
+//!   does (`crc.rs`). The firmware runs on the image `cargo xtask hex`
+//!   writes, so this checks xtask's sum too. STATUS reads as it was for the
+//!   three instructions after ENABLE, since the scan only starts three
+//!   cycles later, then BUSY for a couple of reads. Only the whole-flash
+//!   scan with STATUS polled is modelled; NMIEN is an error.
 //!
 //! Interrupts only ever arrive while the CPU's asleep, since that's where
 //! the PIT's period ends and between ticks is where the switch changes. So
@@ -64,7 +71,8 @@
 //!    because the firmware has no statics yet, so as linked both loops in
 //!    src/rt.rs run zero times.
 //! 3. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
-//!    with the cell, temperature or broken ADC the example scripts.
+//!    with the cell, temperature, broken ADC, fuses or corrupt flash the
+//!    example scripts.
 //! 4. Twenty thousand ticks of random clicks and holds, with a good cell at
 //!    room temperature.
 //!
@@ -85,6 +93,7 @@ use ts21::ramp;
 use ts21::sensors::Channel;
 
 use crate::avr::{Bus, Cpu, I, VECTOR_WORDS, is_two_words};
+use crate::crc;
 use crate::elf::{DATA_SPACE, Elf, RAM};
 use crate::simulate::{self, Sample};
 use crate::spec::{self, Example};
@@ -199,13 +208,16 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     let main = symbol("main")? / 2;
     let unhandled = symbol("__unhandled_interrupt")?;
     let image = elf.flash_image();
+    // What `cargo xtask hex` and `flash` write: the image padded to all of
+    // flash, with its CRC at the end for the firmware's CRCSCAN check.
+    let signed = crc::sign(&image)?;
     let linked = Layout {
         data: sram("__data_start")?..sram("__data_end")?,
         bss: sram("__bss_start")?..sram("__bss_end")?,
         load: symbol("__data_load")? as u16,
     };
 
-    let mut sim = Sim::new(image.clone(), linked.bss.end, unhandled)?;
+    let mut sim = Sim::new(signed.clone(), linked.bss.end, unhandled)?;
     sim.run_to(main, BOOT_BUDGET)
         .and_then(|()| check_startup(&sim.chip, &linked))
         .map_err(|e| format!("startup: {e}"))?;
@@ -219,7 +231,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         loop_budget: TICK_BUDGET,
     };
     let fresh = || -> Result<Sim, String> {
-        let mut sim = Sim::new(image.clone(), linked.bss.end, unhandled)?;
+        let mut sim = Sim::new(signed.clone(), linked.bss.end, unhandled)?;
         sim.run_to(main, BOOT_BUDGET)?;
         Ok(sim)
     };
@@ -450,6 +462,15 @@ fn in_step(
     let mut samples = samples.into_iter().peekable();
     let power_on = samples.peek().map_or(World::NORMAL, |s| s.world);
     sim.chip.world = power_on;
+    if power_on.corrupt_flash {
+        // A byte of the padding, as a flash cut short would leave it.
+        let byte = sim
+            .chip
+            .flash
+            .get_mut(crc::CHECKSUM_AT - 1)
+            .ok_or("can't corrupt flash: the image isn't padded to all of flash")?;
+        *byte ^= 0x01;
+    }
     sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
     if !sim.chip.watchdog_windowed() {
         return Err("hw::init never enabled the watchdog in window mode".into());
@@ -634,6 +655,7 @@ struct Chip {
     world: World,
     adc: Adc,
     wdt: Wdt,
+    crc: CrcScan,
 }
 
 /// The watchdog, as the firmware can see it. Its settings are in
@@ -665,6 +687,28 @@ fn wdt_clocks(setting: u8) -> u32 {
         n => 8 << (n - 1),
     }
 }
+
+/// CRCSCAN's state beyond its plain registers.
+struct CrcScan {
+    /// The instruction that last wrote ENABLE, and what STATUS read just
+    /// before it.
+    started: Option<(u64, u8)>,
+    /// Reads of STATUS still to show BUSY.
+    busy_reads: u8,
+    /// STATUS once the scan's done. OK from reset (DS §27.5.3), before any
+    /// scan, which is why the firmware has to wait for its own.
+    status: u8,
+}
+
+/// The scan starts three cycles after ENABLE, and the CPU keeps running
+/// until then (DS §27.3.1). No instruction is quicker than a cycle, so at
+/// most this many instructions see STATUS from before the scan.
+const CRC_START_INSTRUCTIONS: u64 = 3;
+
+/// Reads of STATUS that show BUSY once the scan's started. In priority mode
+/// the scan stalls the CPU until it's done, so a real chip may never show
+/// it; this makes sure the firmware waits if it does.
+const CRC_BUSY_READS: u8 = 2;
 
 /// ADC0's state beyond its plain registers.
 #[derive(Default)]
@@ -714,6 +758,11 @@ impl Chip {
             world: World::NORMAL,
             adc: Adc::default(),
             wdt: Wdt::default(),
+            crc: CrcScan {
+                started: None,
+                busy_reads: 0,
+                status: regs::CRCSCAN_OK,
+            },
         }
     }
 
@@ -873,6 +922,48 @@ impl Chip {
                  have reset"
             ));
         }
+        Ok(())
+    }
+
+    /// CRCSCAN.STATUS as a read sees it now.
+    fn crc_status(&mut self) -> u8 {
+        match self.crc.started {
+            Some((at, before)) if self.now <= at + CRC_START_INSTRUCTIONS => before,
+            Some(_) if self.crc.busy_reads > 0 => {
+                self.crc.busy_reads -= 1;
+                regs::CRCSCAN_BUSY
+            }
+            _ => self.crc.status,
+        }
+    }
+
+    fn crc_busy(&self) -> bool {
+        self.crc.started.is_some_and(|(at, _)| {
+            self.now <= at + CRC_START_INSTRUCTIONS || self.crc.busy_reads > 0
+        })
+    }
+
+    /// Starts a whole-flash scan: CRC-16-CCITT over every byte of flash,
+    /// erased bytes reading 0xFF, passing if it comes to 0.
+    fn start_crc(&mut self) -> Result<(), String> {
+        if self.crc_busy() {
+            return Err("starts a CRC scan while one's still running".into());
+        }
+        let ctrlb = self.io[reg::CRCSCAN_CTRLB];
+        if ctrlb != regs::CRCSCAN_SRC_FLASH | regs::CRCSCAN_MODE_PRIORITY {
+            return Err(format!(
+                "starts a CRC scan with CRCSCAN.CTRLB {ctrlb:#04x}; only the whole-flash \
+                 priority scan works with BOOTEND and APPEND at 0"
+            ));
+        }
+        let before = self.crc_status();
+        let flash = self.flash.iter().copied().chain(iter::repeat(0xFF));
+        let sum = crc::crc16(flash.take(FLASH_SIZE));
+        self.crc = CrcScan {
+            started: Some((self.now, before)),
+            busy_reads: CRC_BUSY_READS,
+            status: if sum == 0 { regs::CRCSCAN_OK } else { 0 },
+        };
         Ok(())
     }
 
@@ -1096,6 +1187,9 @@ fn name(addr: usize) -> String {
         (reg::SLPCTRL_CTRLA, "SLPCTRL.CTRLA"),
         (reg::RTC_PITINTCTRL, "RTC.PITINTCTRL"),
         (reg::PORTA_INTFLAGS, "PORTA.INTFLAGS"),
+        (reg::CRCSCAN_CTRLA, "CRCSCAN.CTRLA"),
+        (reg::CRCSCAN_CTRLB, "CRCSCAN.CTRLB"),
+        (reg::CRCSCAN_STATUS, "CRCSCAN.STATUS"),
     ];
     known
         .iter()
@@ -1199,6 +1293,7 @@ impl Bus for Chip {
             }),
             reg::SIGROW_TEMPSENSE0 => Ok(CALIBRATION.gain),
             reg::SIGROW_TEMPSENSE1 => Ok(CALIBRATION.offset as u8),
+            reg::CRCSCAN_STATUS => Ok(self.crc_status()),
             _ if self.world.fuse(a).is_some() => Ok(self.world.fuse(a).unwrap_or(0xFF)),
             _ if plain(a) => Ok(self.io[a]),
             _ => Err(format!(
@@ -1319,6 +1414,24 @@ impl Bus for Chip {
             }
             _ if ADC_SETUP.contains(&a) && self.converting() => {
                 return Err(format!("writes {} mid-conversion", name(a)));
+            }
+            reg::CRCSCAN_CTRLA => {
+                if value != regs::CRCSCAN_ENABLE {
+                    return Err(format!(
+                        "writes {value:#04x} to CRCSCAN.CTRLA; the simulator only models \
+                         ENABLE, with STATUS polled (NMIEN can't be undone without a reset)"
+                    ));
+                }
+                self.start_crc()?;
+                self.io[a] = value;
+            }
+            reg::CRCSCAN_CTRLB => {
+                if self.crc_busy() {
+                    return Err(
+                        "writes CRCSCAN.CTRLB mid-scan, and the chip ignores that write".into(),
+                    );
+                }
+                self.io[a] = value;
             }
             _ if fuse_or_lock(a) => {
                 return Err(format!(
@@ -2038,6 +2151,88 @@ mod tests {
         let lockbit = map::FUSES + 10;
         assert!(c.write(lockbit, 0).unwrap_err().contains("never writes"));
         assert!(c.read(lockbit).unwrap_err().contains("doesn't model"));
+    }
+
+    /// Starts a scan the way `hw::flash_ok` does, with three instructions'
+    /// wait, and polls it to the end. Returns STATUS.
+    fn scan(c: &mut Chip) -> Result<u8, String> {
+        c.write(reg::CRCSCAN_CTRLB as u16, regs::CRCSCAN_SRC_FLASH)?;
+        c.write(reg::CRCSCAN_CTRLA as u16, regs::CRCSCAN_ENABLE)?;
+        c.now += CRC_START_INSTRUCTIONS + 1;
+        loop {
+            let status = c.read(reg::CRCSCAN_STATUS as u16)?;
+            if status & regs::CRCSCAN_BUSY == 0 {
+                return Ok(status);
+            }
+            c.now += 1;
+        }
+    }
+
+    #[test]
+    fn a_signed_image_passes_the_crc_scan() {
+        let mut c = Chip::new(crc::sign(&[0x0C, 0x94, 0x3E, 0x00]).unwrap());
+        assert_eq!(scan(&mut c), Ok(regs::CRCSCAN_OK));
+    }
+
+    #[test]
+    fn a_corrupted_flash_byte_fails_the_crc_scan() {
+        let signed = crc::sign(&[0x0C, 0x94, 0x3E, 0x00]).unwrap();
+        for at in [1, 3000, crc::CHECKSUM_AT - 1, FLASH_SIZE - 1] {
+            let mut flash = signed.clone();
+            flash[at] ^= 0x01;
+            let mut c = Chip::new(flash);
+            assert_eq!(scan(&mut c), Ok(0), "{at}");
+        }
+        // Unsigned, the end of flash is erased and the sum's wrong.
+        assert_eq!(scan(&mut chip()), Ok(0));
+    }
+
+    #[test]
+    fn the_crc_scan_reads_stale_until_it_starts_then_busy() {
+        let mut flash = crc::sign(&[]).unwrap();
+        flash[0] = 0;
+        let mut c = Chip::new(flash);
+        let status = reg::CRCSCAN_STATUS as u16;
+        assert_eq!(c.read(status), Ok(regs::CRCSCAN_OK), "OK from reset");
+        c.now = 100;
+        c.write(reg::CRCSCAN_CTRLA as u16, regs::CRCSCAN_ENABLE)
+            .unwrap();
+        // A firmware that reads straight away sees the reset value, and
+        // would take a failed scan for a pass.
+        for now in 101..=103 {
+            c.now = now;
+            assert_eq!(c.read(status), Ok(regs::CRCSCAN_OK), "{now}");
+        }
+        c.now = 104;
+        assert_eq!(c.read(status), Ok(regs::CRCSCAN_BUSY));
+        assert_eq!(c.read(status), Ok(regs::CRCSCAN_BUSY));
+        assert_eq!(c.read(status), Ok(0), "failed");
+    }
+
+    #[test]
+    fn the_crc_scan_refuses_what_it_doesnt_model() {
+        let mut c = chip();
+        let ctrla = reg::CRCSCAN_CTRLA as u16;
+        assert!(c.write(ctrla, 0x02).unwrap_err().contains("NMIEN"));
+        assert!(c.write(ctrla, 0x80).is_err(), "RESET");
+        c.write(reg::CRCSCAN_CTRLB as u16, 0x01).unwrap();
+        assert!(
+            c.write(ctrla, regs::CRCSCAN_ENABLE)
+                .unwrap_err()
+                .contains("whole-flash")
+        );
+        c.write(reg::CRCSCAN_CTRLB as u16, 0).unwrap();
+        c.write(ctrla, regs::CRCSCAN_ENABLE).unwrap();
+        assert!(
+            c.write(ctrla, regs::CRCSCAN_ENABLE)
+                .unwrap_err()
+                .contains("still running")
+        );
+        assert!(
+            c.write(reg::CRCSCAN_CTRLB as u16, 0)
+                .unwrap_err()
+                .contains("mid-scan")
+        );
     }
 
     #[test]

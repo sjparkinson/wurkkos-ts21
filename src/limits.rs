@@ -509,7 +509,23 @@ mod tests {
         assert!(run.levels.iter().rev().take(128).all(|&l| l == 0));
     }
 
-    const FUSES: Faults = Faults { fuses: true };
+    const FUSES: Faults = Faults {
+        fuses: true,
+        ..Faults::NONE
+    };
+    const FLASH: Faults = Faults {
+        flash: true,
+        ..Faults::NONE
+    };
+
+    #[test]
+    fn bad_flash_refuses_the_fet_and_shows_nothing_from_off() {
+        let mut run = Run::with(FLASH);
+        assert_eq!(run.secs(3), 0);
+        assert!(run.levels.iter().all(|&l| l == 0));
+        run.ui = LEVELS;
+        assert_eq!(run.secs(60), LINEAR_MAX);
+    }
 
     #[test]
     fn a_failed_self_test_refuses_the_fet_for_good() {

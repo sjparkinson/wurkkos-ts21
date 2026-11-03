@@ -32,6 +32,7 @@ extern "C" fn main() -> ! {
     // The self-tests come before anything's turned on. A failure doesn't
     // stop the torch, it quietly refuses the FET (src/selftest.rs).
     let faults = Faults {
+        flash: !hw::flash_ok(),
         fuses: !hw::fuses().ok(),
     };
 
