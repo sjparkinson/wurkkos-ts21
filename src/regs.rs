@@ -1,8 +1,9 @@
 //! ATtiny1616 register addresses and bitfield values, typed in by hand from
 //! Microchip's ATtiny1616 ATDF in `vendor/`.
 //!
-//! Only plain constants live here, so the file compiles anywhere. The
-//! firmware uses it from `src/hw.rs` and `src/rt.rs`, and xtask's tests pull
+//! Only plain constants live here, so the file compiles anywhere. It's a
+//! module of the library, where `selftest` checks the fuse fields with it,
+//! and the firmware uses it from `src/hw.rs` and `src/rt.rs`. xtask's tests pull
 //! it in by path and check every constant against the ATDF
 //! (`xtask/src/atdf.rs`). Add a check there for anything you add here; an
 //! unchecked constant shows up as dead code in the xtask build.
@@ -91,6 +92,19 @@ pub mod addr {
     pub const RTC_PITINTCTRL: usize = 0x0152;
     /// PORTA.INTFLAGS: a pin-change flag per pin, cleared by writing 1.
     pub const PORTA_INTFLAGS: usize = 0x0409;
+
+    /// FUSE.WDTCFG. The fuses are readable in data space; the firmware never
+    /// writes them.
+    pub const FUSE_WDTCFG: usize = 0x1280;
+    /// FUSE.OSCCFG: FREQSEL and OSCLOCK.
+    pub const FUSE_OSCCFG: usize = 0x1282;
+    /// FUSE.SYSCFG0: RSTPINCFG, among others.
+    pub const FUSE_SYSCFG0: usize = 0x1285;
+    /// FUSE.APPEND: the end of the application code section, in 256-byte
+    /// blocks.
+    pub const FUSE_APPEND: usize = 0x1287;
+    /// FUSE.BOOTEND: the end of the boot section, in 256-byte blocks.
+    pub const FUSE_BOOTEND: usize = 0x1288;
 }
 
 /// CPU.CCP: the key that unlocks I/O registers behind configuration change
@@ -182,6 +196,17 @@ pub const ADC_MUXPOS_TEMPSENSE: u8 = 0x1E;
 pub const ADC_STCONV: u8 = 0x01;
 /// ADC0.INTFLAGS.RESRDY.
 pub const ADC_RESRDY: u8 = 0x01;
+
+/// FUSE.OSCCFG.FREQSEL, the mask.
+pub const FUSE_FREQSEL: u8 = 0x03;
+/// FUSE.OSCCFG.FREQSEL = 20MHZ.
+pub const FUSE_FREQSEL_20MHZ: u8 = 0x02;
+/// FUSE.OSCCFG.OSCLOCK.
+pub const FUSE_OSCLOCK: u8 = 0x80;
+/// FUSE.SYSCFG0.RSTPINCFG, the mask.
+pub const FUSE_RSTPINCFG: u8 = 0x0C;
+/// FUSE.SYSCFG0.RSTPINCFG = UPDI.
+pub const FUSE_RSTPINCFG_UPDI: u8 = 0x1 << 2;
 
 /// Entries in the vector table: reset plus 30 interrupts.
 pub const VECTORS: usize = 31;

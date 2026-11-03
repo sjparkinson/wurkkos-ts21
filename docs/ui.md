@@ -1,6 +1,6 @@
 # The UI
 
-What every click and hold does. This is the spec. `src/ui.rs` implements the clicks and `src/limits.rs` the low battery and heat, and their tests check it, so change this file in the same commit as the code.
+What every click and hold does. This is the spec. `src/ui.rs` implements the clicks and `src/limits.rs` the low battery, the heat and what a failed self-test does, and their tests check it, so change this file in the same commit as the code.
 
 The notation is Anduril's. **1C** is one click, **1H** press and hold, and so on. Clicks count once the switch has been left alone for about 280 ms.
 
@@ -44,6 +44,17 @@ The light runs at the lowest of the UI's level, the thermal ceiling and the batt
 | Garbage readings at power-on (diagnostic) | One dim blink (level 20 for a quarter of a second) from off, about 0.15 s after the cell goes in. It means the ADC setup's wrong; it's there for the first flash | `adc:0 wait:300ms` → level 20 | Done |
 
 The thresholds and the 0614 voltage calibration are a starting point, not measured on this firmware yet; see [hardware.md](hardware.md#the-driver).
+
+## Self-tests at power-on
+
+Before it turns anything on, the firmware reads its fuses back (`src/selftest.rs` has which fields and why). It never writes them. A failure doesn't leave a dead torch: the light quietly refuses the FET until the cell comes out, and does everything else as usual.
+
+The examples set a fuse byte with `fuse:OSCCFG=0x01`, using the datasheet's names. The firmware only reads them at power-on, so they go before anything that takes time.
+
+| Action | Does | Example | Status |
+|---|---|---|---|
+| Fuses not what the firmware expects, off | Nothing | `fuse:OSCCFG=0x01 wait:3s` → off | Done |
+| Fuses not what the firmware expects, on | Never above level 75, the top of the linear channel. At level 50 that's nothing yet; it shows once the full UI's back | `fuse:OSCCFG=0x01 1C wait:2s` → level 50 | Done |
 
 ## Always on, in the background
 

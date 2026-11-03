@@ -17,6 +17,8 @@
 //! for the cell (as the 0614 calibration reports it, 3.8 V to start), `temp:60C`
 //! for the MCU (25 °C to start), and `adc:0` for a broken ADC whose every
 //! conversion reads that number. So `cell:3.05V 1C wait:6s` is a low cell.
+//! `fuse:OSCCFG=0x01` sets a fuse byte, which the firmware only reads at
+//! power-on, so it has to come before anything that takes time.
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
@@ -28,7 +30,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::world::{Rig, World};
+use crate::world::{FUSE_NAMES, Rig, World};
 use ts21::TICKS_PER_SECOND;
 use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
@@ -59,6 +61,21 @@ pub enum Action {
     Temp(u16),
     /// Every ADC conversion reads this from now on.
     Adc(u16),
+    /// A fuse byte, by its offset from FUSE.WDTCFG. Power-on only.
+    Fuse { offset: u8, value: u8 },
+}
+
+impl Action {
+    /// Whether it sets something the firmware only looks at once, at
+    /// power-on, so it has to come before anything that takes time.
+    fn power_on(self) -> bool {
+        matches!(self, Self::Fuse { .. })
+    }
+
+    /// Whether it takes time, rather than setting the scene.
+    fn takes_time(self) -> bool {
+        matches!(self, Self::Clicks(_) | Self::Hold { .. } | Self::Wait(_))
+    }
 }
 
 impl FromStr for Action {
@@ -77,6 +94,9 @@ impl FromStr for Action {
                 .parse()
                 .map_err(|_| bad())?;
             return Ok(Self::Temp(ts21::thermal::celsius(degrees)));
+        }
+        if let Some(setting) = word.strip_prefix("fuse:") {
+            return fuse(setting);
         }
         if let Some(raw) = word.strip_prefix("adc:") {
             let raw = raw
@@ -120,10 +140,40 @@ impl FromStr for Action {
 
 /// Parses a script, word by word.
 pub fn parse(words: &[&str]) -> Result<Vec<Action>, String> {
+    let mut started = false;
     words
         .iter()
-        .map(|word| word.parse().map_err(|e| format!("`{word}`: {e}")))
+        .map(|word| {
+            let action: Action = word.parse().map_err(|e| format!("`{word}`: {e}"))?;
+            if action.power_on() && started {
+                return Err(format!(
+                    "`{word}`: the firmware only reads that at power-on, so it goes \
+                     before anything that takes time"
+                ));
+            }
+            started |= action.takes_time();
+            Ok(action)
+        })
         .collect()
+}
+
+/// A fuse byte from `OSCCFG=0x01`.
+fn fuse(setting: &str) -> Result<Action, String> {
+    let bad = || format!("expected a fuse like fuse:OSCCFG=0x01, not `{setting}`");
+    let (name, value) = setting.split_once('=').ok_or_else(bad)?;
+    let offset = FUSE_NAMES
+        .iter()
+        .position(|&n| !n.is_empty() && n == name)
+        .ok_or_else(|| {
+            let names: Vec<&str> = FUSE_NAMES.into_iter().filter(|n| !n.is_empty()).collect();
+            format!("no fuse called `{name}`; try {}", names.join(", "))
+        })?;
+    let value = value.strip_prefix("0x").ok_or_else(bad)?;
+    let value = u8::from_str_radix(value, 16).map_err(|_| bad())?;
+    Ok(Action::Fuse {
+        offset: offset as u8,
+        value,
+    })
 }
 
 /// Ticks from `500ms`, `2s` or `1.5s`, rounded to the nearest tick.
@@ -197,6 +247,10 @@ pub fn samples(actions: &[Action]) -> Vec<Sample> {
                 world.stuck = Some(raw);
                 continue;
             }
+            Action::Fuse { offset, value } => {
+                world.fuses[usize::from(offset)] = value;
+                continue;
+            }
         };
         out.extend(pressed.into_iter().map(|pressed| Sample { pressed, world }));
     }
@@ -223,10 +277,10 @@ pub struct Run {
 
 /// Runs a script on a fresh torch.
 pub fn run(actions: &[Action]) -> Run {
-    let mut rig = Rig::default();
+    let samples = samples(actions);
+    let mut rig = Rig::new(&samples.first().map_or(World::NORMAL, |s| s.world));
     let mut log = Log::default();
     let mut lines = Vec::new();
-    let samples = samples(actions);
     for (now, sample) in (0..).zip(&samples) {
         let event = rig.tick(sample.pressed, &sample.world);
         lines.extend(log.note(now, event, rig.level()));
@@ -572,9 +626,43 @@ mod tests {
             "wait:1.-5s",
             "wait:9999s",
             "256C",
+            "fuse:OSCCFG",
+            "fuse:OSCCFG=1",
+            "fuse:OSCCFG=0x100",
+            "fuse:FOO=0x01",
+            "fuse:=0x01",
+            "fuse:LOCKBIT=0x00",
         ] {
             assert!(word.parse::<Action>().is_err(), "{word:?} parsed");
         }
+    }
+
+    #[test]
+    fn sets_fuses_by_name() {
+        assert_eq!(
+            "fuse:OSCCFG=0x01".parse::<Action>(),
+            Ok(Action::Fuse {
+                offset: 2,
+                value: 0x01
+            })
+        );
+        let samples = samples(&parse(&["fuse:BOOTEND=0x02", "wait:1s"]).unwrap());
+        assert_eq!(samples[0].world.fuses[8], 0x02);
+    }
+
+    #[test]
+    fn fuses_only_go_before_anything_that_takes_time() {
+        assert!(parse(&["cell:3.1V", "fuse:WDTCFG=0x0B", "1C"]).is_ok());
+        let err = parse(&["wait:1s", "fuse:WDTCFG=0x0B"]).unwrap_err();
+        assert!(err.contains("power-on"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_fuse_shows_nothing_and_keeps_the_ui() {
+        let run = script("fuse:OSCCFG=0x01 wait:3s");
+        assert_eq!(run.level, 0);
+        assert!(run.lines.is_empty(), "{:?}", run.lines);
+        assert_eq!(script("fuse:OSCCFG=0x01 wait:3s 1C").level, 50);
     }
 
     #[test]

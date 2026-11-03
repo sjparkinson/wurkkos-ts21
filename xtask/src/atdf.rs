@@ -413,6 +413,11 @@ mod tests {
             (regs::addr::SLPCTRL_CTRLA, "SLPCTRL", None, "CTRLA", 1),
             (regs::addr::RTC_PITINTCTRL, "RTC", None, "PITINTCTRL", 1),
             (regs::addr::PORTA_INTFLAGS, "PORTA", None, "INTFLAGS", 1),
+            (regs::addr::FUSE_WDTCFG, "FUSE", None, "WDTCFG", 1),
+            (regs::addr::FUSE_OSCCFG, "FUSE", None, "OSCCFG", 1),
+            (regs::addr::FUSE_SYSCFG0, "FUSE", None, "SYSCFG0", 1),
+            (regs::addr::FUSE_APPEND, "FUSE", None, "APPEND", 1),
+            (regs::addr::FUSE_BOOTEND, "FUSE", None, "BOOTEND", 1),
         ] {
             let (address, theirs) = at(instance, mode, name);
             assert!(
@@ -458,6 +463,8 @@ mod tests {
         let adc_intflags = atdf.register("ADC0", None, "INTFLAGS");
         let wdt_ctrla = atdf.register("WDT", None, "CTRLA");
         let wdt_status = atdf.register("WDT", None, "STATUS");
+        let osccfg = atdf.register("FUSE", None, "OSCCFG");
+        let syscfg0 = atdf.register("FUSE", None, "SYSCFG0");
 
         // SAMPLEN is a count, not a named value: it only has to fit.
         let samplen = atdf.register("ADC0", None, "SAMPCTRL").mask("SAMPLEN");
@@ -640,6 +647,31 @@ mod tests {
                 atdf.register("SLPCTRL", None, "CTRLA")
                     .value("SMODE", "IDLE"),
                 "SLPCTRL.CTRLA.SMODE=IDLE",
+            ),
+            (
+                regs::FUSE_FREQSEL,
+                osccfg.mask("FREQSEL"),
+                "FUSE.OSCCFG.FREQSEL",
+            ),
+            (
+                regs::FUSE_FREQSEL_20MHZ,
+                osccfg.value("FREQSEL", "20MHZ"),
+                "FUSE.OSCCFG.FREQSEL=20MHZ",
+            ),
+            (
+                regs::FUSE_OSCLOCK,
+                osccfg.mask("OSCLOCK"),
+                "FUSE.OSCCFG.OSCLOCK",
+            ),
+            (
+                regs::FUSE_RSTPINCFG,
+                syscfg0.mask("RSTPINCFG"),
+                "FUSE.SYSCFG0.RSTPINCFG",
+            ),
+            (
+                regs::FUSE_RSTPINCFG_UPDI,
+                syscfg0.value("RSTPINCFG", "UPDI"),
+                "FUSE.SYSCFG0.RSTPINCFG=UPDI",
             ),
         ] {
             assert!(

@@ -5,6 +5,7 @@
 
 use crate::button::{Clicks, Event};
 use crate::limits::Limits;
+use crate::selftest::Faults;
 use crate::sensors::Convert;
 use crate::temp::Calibration;
 use crate::ui::Ui;
@@ -17,12 +18,13 @@ pub struct Torch {
 }
 
 impl Torch {
-    /// `calibration` is the temperature sensor's, from the signature row.
-    pub const fn new(calibration: Calibration) -> Self {
+    /// `calibration` is the temperature sensor's, from the signature row,
+    /// and `faults` what the power-on self-tests found.
+    pub const fn new(calibration: Calibration, faults: Faults) -> Self {
         Self {
             clicks: Clicks::new(),
             ui: Ui::new(),
-            limits: Limits::new(calibration),
+            limits: Limits::new(calibration, faults),
         }
     }
 
@@ -99,8 +101,12 @@ mod tests {
 
     impl Rig {
         fn new() -> Self {
+            Self::with(Faults::NONE)
+        }
+
+        fn with(faults: Faults) -> Self {
             Self {
-                torch: Torch::new(CALIBRATION),
+                torch: Torch::new(CALIBRATION, faults),
                 adc: Adc::new(),
             }
         }
@@ -238,6 +244,19 @@ mod tests {
         rig.click();
         rig.run(false, 60 * 64);
         assert_eq!(rig.level(), LEVEL);
+        rig.click();
+        assert_eq!(rig.level(), 0);
+    }
+
+    #[test]
+    fn bad_fuses_leave_the_ui_working_on_the_linear_channel() {
+        let mut rig = Rig::with(Faults { fuses: true });
+        rig.run(false, 3 * 64);
+        assert_eq!(rig.level(), 0);
+        // Level 50's on the linear channel, so on and off work as usual.
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        assert_eq!(output(rig.level()).fet, 0);
         rig.click();
         assert_eq!(rig.level(), 0);
     }

@@ -32,6 +32,8 @@
 //!   that stopped throwing it away would blink at power-on and part company
 //!   with the library.
 //! - SIGROW.TEMPSENSE0 and 1 hold `world::CALIBRATION`.
+//! - The fuses read as the world's (`world::FACTORY_FUSES` unless a script
+//!   says otherwise), and writing any of them is an error.
 //! - The PIT's flag goes up once a period of simulated time, which counts
 //!   an instruction at a time while the CPU's awake and skips to the end of
 //!   the period while it sleeps. Reading the flag doesn't move time on, so
@@ -88,14 +90,15 @@ use crate::simulate::{self, Sample};
 use crate::spec::{self, Example};
 use crate::switching::RandomSwitching;
 use crate::updi::map;
-use crate::world::{CALIBRATION, Rig, World};
+use crate::world::{self, CALIBRATION, Rig, World};
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
 // constant is a warning, which is how an unchecked one gets caught.
+// world.rs reads the fuse addresses from here too.
 #[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../../src/regs.rs"]
-mod regs;
+pub(crate) mod regs;
 
 use regs::addr as reg;
 
@@ -442,12 +445,17 @@ fn in_step(
     samples: impl IntoIterator<Item = Sample>,
     report: &mut Report,
 ) -> Result<u8, String> {
+    // The firmware reads the fuses before its first tick, so the world it
+    // powers up in is the first sample's.
+    let mut samples = samples.into_iter().peekable();
+    let power_on = samples.peek().map_or(World::NORMAL, |s| s.world);
+    sim.chip.world = power_on;
     sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
     if !sim.chip.watchdog_windowed() {
         return Err("hw::init never enabled the watchdog in window mode".into());
     }
-    let mut rig = Rig::default();
-    for (tick, sample) in samples.into_iter().enumerate() {
+    let mut rig = Rig::new(&power_on);
+    for (tick, sample) in samples.enumerate() {
         sim.chip.world = sample.world;
         let took = sim
             .tick(sample.pressed)
@@ -1039,7 +1047,20 @@ fn vector_name(vector: u8) -> String {
     }
 }
 
+/// The fuses and the lock byte after them.
+fn fuse_or_lock(addr: usize) -> bool {
+    let start = usize::from(map::FUSES);
+    (start..start + map::FUSES_SIZE).contains(&addr)
+}
+
 fn name(addr: usize) -> String {
+    if let Some(fuse) = addr
+        .checked_sub(usize::from(map::FUSES))
+        .and_then(|offset| world::FUSE_NAMES.get(offset))
+        .filter(|name| !name.is_empty())
+    {
+        return format!("FUSE.{fuse}");
+    }
     let known = [
         (reg::CPU_CCP, "CPU.CCP"),
         (reg::VPORTA_IN, "VPORTA.IN"),
@@ -1178,6 +1199,7 @@ impl Bus for Chip {
             }),
             reg::SIGROW_TEMPSENSE0 => Ok(CALIBRATION.gain),
             reg::SIGROW_TEMPSENSE1 => Ok(CALIBRATION.offset as u8),
+            _ if self.world.fuse(a).is_some() => Ok(self.world.fuse(a).unwrap_or(0xFF)),
             _ if plain(a) => Ok(self.io[a]),
             _ => Err(format!(
                 "reads {}, which the simulator doesn't model",
@@ -1297,6 +1319,12 @@ impl Bus for Chip {
             }
             _ if ADC_SETUP.contains(&a) && self.converting() => {
                 return Err(format!("writes {} mid-conversion", name(a)));
+            }
+            _ if fuse_or_lock(a) => {
+                return Err(format!(
+                    "writes {value:#04x} to {}: the firmware never writes the fuses",
+                    name(a)
+                ));
             }
             _ if plain(a) => self.io[a] = value,
             _ => {
@@ -1992,6 +2020,24 @@ mod tests {
         let offset = c.read(reg::SIGROW_TEMPSENSE1 as u16).unwrap() as i8;
         assert_eq!(ts21::temp::Calibration { offset, gain }, CALIBRATION);
         assert!(c.write(reg::SIGROW_TEMPSENSE0 as u16, 0).is_err());
+    }
+
+    #[test]
+    fn the_fuses_are_the_worlds_and_read_only() {
+        let mut c = chip();
+        let osccfg = reg::FUSE_OSCCFG as u16;
+        assert_eq!(c.read(osccfg), Ok(0x02), "20 MHz from the factory");
+        c.world.fuses[2] = 0x81;
+        assert_eq!(c.read(osccfg), Ok(0x81));
+        for addr in [reg::FUSE_WDTCFG, reg::FUSE_SYSCFG0, reg::FUSE_BOOTEND] {
+            let err = c.write(addr as u16, 0).unwrap_err();
+            assert!(err.contains("never writes the fuses"), "{err}");
+            assert!(err.contains("FUSE."), "{err}");
+        }
+        // The lock byte too, which reads as unmodelled.
+        let lockbit = map::FUSES + 10;
+        assert!(c.write(lockbit, 0).unwrap_err().contains("never writes"));
+        assert!(c.read(lockbit).unwrap_err().contains("doesn't model"));
     }
 
     #[test]
