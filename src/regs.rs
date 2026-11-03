@@ -1,6 +1,5 @@
 //! ATtiny1616 register addresses and bitfield values, typed in by hand from
-//! the ATtiny1617 ATDF in `vendor/` (the 1616 is the same die in a 20-pin
-//! package).
+//! Microchip's ATtiny1616 ATDF in `vendor/`.
 //!
 //! Only plain constants live here, so the file compiles anywhere. The
 //! firmware uses it from `src/hw.rs` and `src/rt.rs`, and xtask's tests pull

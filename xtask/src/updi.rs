@@ -8,8 +8,8 @@
 //! The protocol is in the tinyAVR 1-series datasheet (DS40002204, the UPDI
 //! chapter). The sequences here (link set-up, NVM key, reset, page writes)
 //! follow Microchip's pymcuprog, the reference serial UPDI implementation.
-//! Register addresses and NVM commands were checked against the ATtiny1617
-//! ATDF, which shares its memory map with the 1616.
+//! Register addresses and NVM commands are checked against the ATtiny1616
+//! ATDF in `vendor/`.
 //!
 //! What this deliberately can't do: write fuses, write the user row, or
 //! unlock a locked chip. None of those are needed to flash a TS21, and the
@@ -31,8 +31,7 @@ pub mod map {
 
     /// Device signature, the first three bytes of SIGROW.
     pub const SIGNATURE: u16 = 0x1100;
-    /// ATtiny1614 is 1E 94 22 and ATtiny1617 is 1E 94 20 (both from their
-    /// ATDFs); the 1616 sits between them.
+    /// From the ATDF's SIGNATURE0 to SIGNATURE2.
     pub const ATTINY1616: [u8; 3] = [0x1E, 0x94, 0x21];
 
     /// The fuses (0x1280..0x128A) and the lock byte (0x128A). Read only:
@@ -437,11 +436,9 @@ mod tests {
             signatures.size,
             "signature size"
         );
-        // The ATDF is the 1617's, so only the first two bytes (Atmel, 16 KB
-        // flash) are shared. The third comes from the 1614 and 1617 ATDFs,
-        // see `map::ATTINY1616`.
         assert_eq!(u32::from(map::ATTINY1616[0]), atdf.property("SIGNATURE0"));
         assert_eq!(u32::from(map::ATTINY1616[1]), atdf.property("SIGNATURE1"));
+        assert_eq!(u32::from(map::ATTINY1616[2]), atdf.property("SIGNATURE2"));
 
         // FUSES_SIZE covers the fuses and the lock byte straight after them.
         let fuses = atdf.segment("FUSES");
