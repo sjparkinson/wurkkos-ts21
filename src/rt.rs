@@ -289,14 +289,13 @@ global_asm!(
     "  cpc r27, r25",
     "  brne 4b",
     // Shift the next background down and go again, until there are none.
-    // The loop's too long for `brne` to reach back, hence the `rjmp`.
+    // The loop is 45 words, inside `brne`'s 64; the assembler refuses it
+    // if it ever grows past that.
     "  mov r20, r21",
     "  mov r21, r22",
     "  mov r22, r23",
     "  dec r19",
-    "  breq 6f",
-    "  rjmp 5b",
-    "6:",
+    "  brne 5b",
     // The registers and SRAM passed. xtask's simulator stops here to look
     // at what the tests did, and finds the .data and .bss setup after it.
     ".global __ram_tested",
@@ -307,10 +306,11 @@ global_asm!(
     //
     // `out` then writes r1 (zero) to SREG, the CPU status register, which
     // holds the flags (carry, zero and so on) and the global interrupt
-    // enable bit. It's already zero after reset, but say so anyway.
+    // enable bit. The register test above left its last pattern in it, so
+    // this clears that.
     //
-    // SP, the stack pointer, already points at the top of SRAM. The
-    // hardware sets that on reset, so there's nothing to do for it.
+    // SP, the stack pointer, already points at the top of SRAM: the
+    // register test put it back where reset left it.
     "  clr r1",
     "  out {sreg}, r1",
     // Copy .data into SRAM.
@@ -371,8 +371,10 @@ global_asm!(
     "  rjmp 5b",
     "",
     // Where a failed register or RAM test ends up: the FET and linear pins
-    // low, interrupts off, the watchdog off (the WDTCFG fuse check insists),
-    // so nothing happens until the cell comes out. The button LED stays
+    // low, interrupts off, and the watchdog off, since nothing has started
+    // it and the factory WDTCFG fuse doesn't (a fuse that did would reset
+    // the chip into the tests again, which stays just as dark), so nothing
+    // happens until the cell comes out. The button LED stays
     // dark too, since only `hw::init` turns its pull-up on, which is how to
     // tell this from a torch that's merely off.
     ".global __selftest_failed",
