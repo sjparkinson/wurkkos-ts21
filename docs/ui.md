@@ -41,7 +41,7 @@ The light runs at the lowest of the UI's level, the thermal ceiling, the battery
 | Cell back at 3.30 V for 4 s | The battery ceiling climbs 15 levels, and again every 4 s | `cell:3.05V 1C wait:6s cell:3.4V wait:10s` → level 50 | Done |
 | MCU over 45 °C, on | Fades down towards level 75, never below it, and back up as it cools. At level 50 that's nothing yet, since 50 is under the floor; it shows once the full UI's back | `temp:70C 1C wait:60s` → level 50 | Done |
 | Garbage readings, on | Ceiling at level 75, so nothing changes at level 50 | `adc:0 1C wait:10s` → level 50 | Done |
-| Garbage readings at power-on (diagnostic) | One dim blink (level 20 for a quarter of a second) from off, about 0.15 s after the cell goes in. It means the ADC setup's wrong; it's there for the first flash | `adc:0 wait:300ms` → level 20 | Done |
+| Garbage readings, off | Nothing. The light never lights on its own | `adc:0 wait:3s` → off | Done |
 
 The thresholds and the 0614 voltage calibration are a starting point, not measured on this firmware yet; see [hardware.md](hardware.md#the-driver).
 
