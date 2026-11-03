@@ -1,7 +1,8 @@
 //! The firmware: sample the switch, step the UI, set the PWM, 64 times a second.
 //!
 //! On the host this builds to a stub, so `cargo test` and `cargo clippy`
-//! work across the workspace. `cargo fw` builds the real thing.
+//! work across the workspace. `cargo fw` builds the real thing, and
+//! `cargo xtask hex` builds it and writes the hex.
 
 #![cfg_attr(target_arch = "avr", no_std, no_main)]
 #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
@@ -58,6 +59,11 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 #[cfg(not(target_arch = "avr"))]
 fn main() {
-    eprintln!("this is firmware for the ATtiny1616; build it with `cargo fw`");
+    eprintln!(
+        "this is firmware for the ATtiny1616, so it doesn't run here.\n\
+         `cargo xtask hex` builds target/wurkkos-ts21-0614.hex, \
+         `cargo xtask simulate` tries the UI in your terminal, \
+         and `cargo xtask` lists the rest."
+    );
     std::process::exit(1);
 }

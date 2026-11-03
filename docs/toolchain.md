@@ -10,7 +10,7 @@ How Rust gets onto an ATtiny1616 here, and why it's put together this way.
 - Registers written out by hand in `src/hw.rs`, with zero crate dependencies. (Rebuilding `core` pulls a few crates of its own, see [First build](#first-build).)
 - The UPDI programmer lives in `xtask`, so rustup is the only thing to install.
 
-`cargo fw` builds `target/avr-none/release/ts21.elf`. `cargo xtask hex` turns it into Intel HEX.
+`cargo fw` builds `target/avr-none/release/ts21.elf`. `cargo xtask hex` runs `cargo fw` and turns the ELF into Intel HEX. Cargo has no post-build step, so the hex can't come out of `cargo build` itself, and making `avr-none` the default target would break `cargo test` for the library.
 
 ## Linking with rust-lld
 
