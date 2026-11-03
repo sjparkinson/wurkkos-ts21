@@ -371,6 +371,8 @@ mod tests {
             (regs::addr::TCA0_CMP1BUF, "TCA0", single, "CMP1BUF", 2),
             (regs::addr::VREF_CTRLA, "VREF", None, "CTRLA", 1),
             (regs::addr::VREF_CTRLB, "VREF", None, "CTRLB", 1),
+            (regs::addr::WDT_CTRLA, "WDT", None, "CTRLA", 1),
+            (regs::addr::WDT_STATUS, "WDT", None, "STATUS", 1),
             (regs::addr::ADC0_CALIB, "ADC0", None, "CALIB", 1),
             (regs::addr::ADC0_CTRLA, "ADC0", None, "CTRLA", 1),
             (regs::addr::ADC0_CTRLB, "ADC0", None, "CTRLB", 1),
@@ -438,6 +440,8 @@ mod tests {
         let adc_muxpos = atdf.register("ADC0", None, "MUXPOS");
         let adc_command = atdf.register("ADC0", None, "COMMAND");
         let adc_intflags = atdf.register("ADC0", None, "INTFLAGS");
+        let wdt_ctrla = atdf.register("WDT", None, "CTRLA");
+        let wdt_status = atdf.register("WDT", None, "STATUS");
 
         // SAMPLEN is a count, not a named value: it only has to fit.
         let samplen = atdf.register("ADC0", None, "SAMPCTRL").mask("SAMPLEN");
@@ -463,6 +467,21 @@ mod tests {
                 regs::CLKCTRL_PDIV_2X,
                 mclkctrlb.value("PDIV", "2X"),
                 "CLKCTRL.MCLKCTRLB.PDIV=2X",
+            ),
+            (
+                regs::WDT_PERIOD_32CLK,
+                wdt_ctrla.value("PERIOD", "32CLK"),
+                "WDT.CTRLA.PERIOD=32CLK",
+            ),
+            (
+                regs::WDT_WINDOW_32CLK,
+                wdt_ctrla.value("WINDOW", "32CLK"),
+                "WDT.CTRLA.WINDOW=32CLK",
+            ),
+            (
+                regs::WDT_SYNCBUSY,
+                wdt_status.mask("SYNCBUSY"),
+                "WDT.STATUS.SYNCBUSY",
             ),
             (
                 regs::PORT_PULLUPEN,
@@ -707,6 +726,42 @@ mod tests {
             .map(num)
             .collect();
         (memory, numbers)
+    }
+
+    #[test]
+    fn simulator_watchdog_constants_match_the_atdf() {
+        let atdf = Atdf::load();
+        let status = atdf.register("WDT", None, "STATUS");
+        assert_eq!(
+            u32::from(crate::sim::WDT_LOCK),
+            status.mask("LOCK"),
+            "WDT.STATUS.LOCK"
+        );
+        let ctrla = atdf.register("WDT", None, "CTRLA");
+        assert_eq!(
+            u32::from(crate::sim::WDT_PERIOD),
+            ctrla.mask("PERIOD"),
+            "WDT.CTRLA.PERIOD"
+        );
+        assert_eq!(
+            u32::from(crate::sim::WDT_PERIOD_MAX),
+            ctrla.value("PERIOD", "8KCLK"),
+            "WDT.CTRLA.PERIOD=8KCLK"
+        );
+        assert_eq!(
+            u32::from(crate::sim::WDT_WINDOW),
+            ctrla.mask("WINDOW"),
+            "WDT.CTRLA.WINDOW"
+        );
+        // WINDOW takes the same values as PERIOD, which the simulator relies
+        // on to time both with one function.
+        for value in ["8CLK", "32CLK", "8KCLK"] {
+            assert_eq!(
+                ctrla.value("WINDOW", value),
+                ctrla.value("PERIOD", value) << 4,
+                "WDT.CTRLA.WINDOW={value}"
+            );
+        }
     }
 
     #[test]

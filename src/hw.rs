@@ -31,6 +31,18 @@ const AUX: u8 = 5; // PB5
 const PORTB_OUTPUTS: u8 = 1 << FET | 1 << LINEAR | 1 << AUX;
 const PORTB_PINS: u8 = 6;
 
+/// WDT clocks in a WDT.CTRLA WINDOW or PERIOD setting `n`, 1 to 11.
+const fn wdt_clocks(n: u8) -> u16 {
+    8 << (n - 1)
+}
+
+// The window `hw::init` sets is the one `ts21::watchdog` counts on.
+const _: () = {
+    use ts21::watchdog::{CLOSED_CLOCKS, OPEN_CLOCKS};
+    assert!(wdt_clocks(regs::WDT_WINDOW_32CLK >> 4) == CLOSED_CLOCKS);
+    assert!(wdt_clocks(regs::WDT_PERIOD_32CLK) == OPEN_CLOCKS);
+};
+
 // Every peripheral (the ports, the timers, the clock controller) exposes
 // its settings as bytes at fixed addresses, in the same address space as
 // SRAM. Storing a byte at `VPORTB_DIR` doesn't put it in memory, it flips
@@ -127,6 +139,21 @@ pub fn init() {
         regs::CLKCTRL_PDIV_2X | regs::CLKCTRL_PEN,
     );
 
+    // The watchdog, in window mode, before anything that could wait on a
+    // peripheral. `ts21::watchdog` has the window and when `main` feeds it.
+    // Until the first feed there's no closed window, only the 32-clock
+    // timeout, and the first pass of the loop feeds it. Wait for the write
+    // to sync before going on, so that feed can't land while it's still
+    // syncing. It keeps counting in every sleep mode, so the off tick
+    // (roadmap stage 2) has to feed it too. Never set WDT.STATUS.LOCK and
+    // never touch the WDTCFG fuse.
+    while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
+    protected_write(
+        reg::WDT_CTRLA,
+        regs::WDT_WINDOW_32CLK | regs::WDT_PERIOD_32CLK,
+    );
+    while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
+
     // Pull every pin we don't drive up, so nothing floats and leaks current.
     for pin in 0..8 {
         let ctrl = match pin {
@@ -193,6 +220,17 @@ pub fn init() {
 pub fn wait_for_tick() {
     while read(reg::RTC_PITINTFLAGS) & regs::RTC_PI == 0 {}
     write(reg::RTC_PITINTFLAGS, regs::RTC_PI);
+}
+
+/// Tells the watchdog the loop is still running. `main` calls this at the
+/// end of a pass, after the output's been written, when
+/// `ts21::watchdog::Feeder` says so. Too early or too late and the chip
+/// resets.
+pub fn feed_watchdog() {
+    // SAFETY: `wdr` only resets the watchdog's counter. It touches no memory
+    // and no flags. No `nomem`, so the compiler can't move it above the
+    // output's volatile stores.
+    unsafe { asm!("wdr", options(nostack, preserves_flags)) }
 }
 
 /// The temperature sensor's factory calibration from the signature row.

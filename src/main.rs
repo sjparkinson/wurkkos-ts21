@@ -21,12 +21,14 @@ extern "C" fn main() -> ! {
     use ts21::{
         ramp,
         torch::{Changes, Torch},
+        watchdog::Feeder,
     };
 
     hw::init();
 
     let mut torch = Torch::new(hw::temperature_calibration());
     let mut changes = Changes::new();
+    let mut feeder = Feeder::new();
 
     loop {
         hw::wait_for_tick();
@@ -37,9 +39,16 @@ extern "C" fn main() -> ! {
         if let Some(output) = changes.update(ramp::output(torch.level())) {
             hw::set_output(output);
         }
+        // The only place the watchdog's fed.
+        if feeder.tick() {
+            hw::feed_watchdog();
+        }
     }
 }
 
+// Turns the light off and spins. The watchdog isn't fed here, so it resets
+// the chip (to off, as it boots) 64 WDT clocks after the last feed, about
+// 63 ms nominal, 48 to 95 ms over the oscillator's full spread.
 #[cfg(target_arch = "avr")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {

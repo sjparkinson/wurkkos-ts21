@@ -30,6 +30,11 @@ pub trait Bus {
     fn fetch(&self, pc: u32) -> Option<u16>;
     fn read(&mut self, addr: u16) -> Result<u8, String>;
     fn write(&mut self, addr: u16, value: u8) -> Result<(), String>;
+    /// The `wdr` instruction: the program fed the watchdog. An error means
+    /// the real chip would have reset.
+    fn wdr(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub struct Cpu {
@@ -271,7 +276,7 @@ impl Cpu {
                     // reti. With no interrupts to return from, the firmware
                     // only gets here by jumping somewhere it shouldn't.
                     0x9518 => return Err("reti outside an interrupt".into()),
-                    0x95A8 => {} // wdr: there's no watchdog to reset
+                    0x95A8 => bus.wdr()?,
                     0x95C8 => self.r[0] = self.program_byte(bus, self.pair(30))?, // lpm
                     // sleep needs interrupts to wake from, which aren't modelled yet.
                     0x9588 => return Err("sleep, which the simulator doesn't model".into()),
@@ -540,9 +545,15 @@ mod tests {
     struct TestBus {
         flash: Vec<u16>,
         data: Vec<u8>,
+        /// How many `wdr`s the program ran.
+        wdrs: u32,
     }
 
     impl Bus for TestBus {
+        fn wdr(&mut self) -> Result<(), String> {
+            self.wdrs += 1;
+            Ok(())
+        }
         fn fetch(&self, pc: u32) -> Option<u16> {
             self.flash.get(pc as usize).copied()
         }
@@ -560,6 +571,7 @@ mod tests {
         let mut bus = TestBus {
             flash: program.to_vec(),
             data: vec![0; 0x10000],
+            wdrs: 0,
         };
         let mut cpu = Cpu::new(&RAM);
         setup(&mut cpu, &mut bus);
@@ -574,6 +586,13 @@ mod tests {
 
     fn ldi(d: u16, k: u16) -> u16 {
         0xE000 | (k & 0xF0) << 4 | (d - 16) << 4 | k & 0x0F
+    }
+
+    #[test]
+    fn wdr_tells_the_bus() {
+        let (cpu, bus) = run(&[0x95A8], |_, _| {});
+        assert_eq!(bus.wdrs, 1);
+        assert_eq!(cpu.pc, 1);
     }
 
     #[test]
@@ -761,6 +780,7 @@ mod tests {
         let mut bus = TestBus {
             flash: vec![0x0001, 0xFFFF],
             data: vec![0; 0x10000],
+            wdrs: 0,
         };
         let mut cpu = Cpu::new(&RAM);
         assert!(

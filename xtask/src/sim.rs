@@ -13,6 +13,15 @@
 //!   byte with a stale low one.
 //! - RTC.PITCTRLA isn't written while PITSTATUS.CTRLBUSY is set. The real
 //!   chip drops that write.
+//! - The watchdog: WDT.CTRLA takes the CCP key and isn't written while
+//!   WDT.STATUS.SYNCBUSY is set, reserved settings and LOCK are refused,
+//!   and so is a `wdr` before the CTRLA write has synced. A `wdr` that lands
+//!   in the closed window fails, and so does running out the open window
+//!   without one, as the real chip would reset either way. Window mode
+//!   starts at the first `wdr`, as on the chip (§19.3.3.2). A feed exactly
+//!   on a window edge fails too: `wdr` takes two to three WDT clocks to
+//!   sync, so on the chip it's a coin toss. `hw::init` has to turn it on,
+//!   and nothing may change it after that, off included.
 //! - ADC0 only converts when it's set up for one of the two measurements the
 //!   firmware makes (the 1.5 V reference against VDD, four accumulated, or
 //!   the temperature sensor against 1.1 V with the datasheet's delays and
@@ -100,6 +109,27 @@ const TICK_BUDGET: u64 = TICK_CYCLES / 4;
 /// PITCTRLA. The real chip is busy for a couple of 32 kHz clocks while it
 /// syncs; any non-zero number makes the firmware wait.
 const PIT_SYNC_READS: u8 = 2;
+
+/// Reads of WDT.STATUS that report SYNCBUSY after a write to CTRLA, like
+/// `PIT_SYNC_READS`.
+const WDT_SYNC_READS: u8 = 2;
+/// WDT.STATUS.LOCK. Only the simulator needs it (to refuse it), so it isn't
+/// in regs.rs, where an unused constant fails `cargo fw-clippy`. atdf.rs
+/// checks it.
+pub(crate) const WDT_LOCK: u8 = 0x80;
+/// WDT.CTRLA.PERIOD's mask, and its largest value, 8KCLK. atdf.rs checks both.
+pub(crate) const WDT_PERIOD: u8 = 0x0F;
+pub(crate) const WDT_PERIOD_MAX: u8 = 11;
+/// WDT.CTRLA.WINDOW's mask. It takes the same values as PERIOD, shifted up
+/// four, which atdf.rs checks too.
+pub(crate) const WDT_WINDOW: u8 = 0xF0;
+/// WDT clocks in a tick: the PIT divides the same oscillator by 512, and
+/// the WDT by 32. Only at CYC512, so a tick refuses any other PIT period
+/// while the WDT's on.
+const WDT_CLOCKS_PER_TICK: u32 = 16;
+// The WDT model counts whole ticks, which only works while a pass can't
+// overrun one and drop a tick unseen.
+const _: () = assert!(TICK_BUDGET < TICK_CYCLES / 2);
 
 /// TCA0's 16-bit registers the firmware writes, by the low byte's address.
 const WIDE: [usize; 4] = [
@@ -371,6 +401,9 @@ fn in_step(
     report: &mut Report,
 ) -> Result<u8, String> {
     sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
+    if !sim.chip.watchdog_windowed() {
+        return Err("hw::init never enabled the watchdog in window mode".into());
+    }
     let mut rig = Rig::default();
     for (tick, sample) in samples.into_iter().enumerate() {
         sim.chip.world = sample.world;
@@ -487,6 +520,36 @@ struct Chip {
     /// What the ADC measures.
     world: World,
     adc: Adc,
+    wdt: Wdt,
+}
+
+/// The watchdog, as the firmware can see it. Its settings are in
+/// `io[WDT_CTRLA]`.
+///
+/// It's timed in ticks, not instructions: the simulator's PIT tick arrives
+/// the moment the firmware polls for it, so instruction counts don't track
+/// wall time, but a tick is always 16 WDT clocks of it, since the PIT and
+/// the WDT share an oscillator. Counting whole ticks from a feed is exact
+/// when the feeds follow ticks, as the firmware's do. Before the first feed
+/// it leaves out the time `hw::init` takes before the PIT starts, which
+/// is microseconds today, against 16 clocks of slack.
+#[derive(Default)]
+struct Wdt {
+    /// Ticks since the last `wdr`, or since CTRLA was written.
+    ticks: u32,
+    /// Whether a `wdr` has started window mode's closed windows. Until the
+    /// first one the WDT times out after PERIOD alone (§19.3.3.2).
+    windowed: bool,
+    /// Reads of WDT.STATUS that still report SYNCBUSY after a CTRLA write.
+    busy: u8,
+}
+
+/// WDT clocks in a WDT.CTRLA PERIOD or WINDOW setting, 0 for off.
+fn wdt_clocks(setting: u8) -> u32 {
+    match setting {
+        0 => 0,
+        n => 8 << (n - 1),
+    }
 }
 
 /// ADC0's state beyond its plain registers.
@@ -534,7 +597,49 @@ impl Chip {
             temp: None,
             world: World::NORMAL,
             adc: Adc::default(),
+            wdt: Wdt::default(),
         }
+    }
+
+    /// The open window in WDT clocks, which is the whole timeout in normal
+    /// mode, or 0 with the WDT off.
+    fn wdt_open(&self) -> u32 {
+        wdt_clocks(self.io[reg::WDT_CTRLA] & WDT_PERIOD)
+    }
+
+    /// The closed window in WDT clocks, 0 in normal mode or before the first
+    /// `wdr` starts window mode.
+    fn wdt_closed(&self) -> u32 {
+        if self.wdt.windowed {
+            wdt_clocks((self.io[reg::WDT_CTRLA] & WDT_WINDOW) >> 4)
+        } else {
+            0
+        }
+    }
+
+    /// Whether `hw::init` turned the watchdog on.
+    fn watchdog_running(&self) -> bool {
+        self.wdt_open() > 0
+    }
+
+    /// Whether it's set up for window mode, whether or not a `wdr` has
+    /// started it yet.
+    fn watchdog_windowed(&self) -> bool {
+        self.watchdog_running() && self.io[reg::WDT_CTRLA] & WDT_WINDOW != 0
+    }
+
+    /// Spends the CCP key on a write to protected register `a`, or refuses
+    /// the write if there's no key to spend.
+    fn take_protected_write(&mut self, a: usize) -> Result<(), String> {
+        if !self.unlocked_until.is_some_and(|until| self.now <= until) {
+            return Err(format!(
+                "writes {} without the CCP key in the four instructions before, \
+                 and the chip ignores that write",
+                name(a)
+            ));
+        }
+        self.unlocked_until = None;
+        Ok(())
     }
 
     fn converting(&self) -> bool {
@@ -665,6 +770,7 @@ fn plain(addr: usize) -> bool {
             addr,
             reg::VPORTB_DIR
                 | reg::CLKCTRL_MCLKCTRLB
+                | reg::WDT_CTRLA
                 | reg::RTC_PITCTRLA
                 | reg::TCA0_CTRLA
                 | reg::TCA0_CTRLB
@@ -700,6 +806,8 @@ fn name(addr: usize) -> String {
         (reg::VPORTA_IN, "VPORTA.IN"),
         (reg::VPORTB_DIR, "VPORTB.DIR"),
         (reg::CLKCTRL_MCLKCTRLB, "CLKCTRL.MCLKCTRLB"),
+        (reg::WDT_CTRLA, "WDT.CTRLA"),
+        (reg::WDT_STATUS, "WDT.STATUS"),
         (reg::RTC_PITCTRLA, "RTC.PITCTRLA"),
         (reg::RTC_PITSTATUS, "RTC.PITSTATUS"),
         (reg::RTC_PITINTFLAGS, "RTC.PITINTFLAGS"),
@@ -752,6 +860,11 @@ impl Bus for Chip {
                 self.pit_busy = self.pit_busy.saturating_sub(1);
                 Ok(if busy { regs::RTC_CTRLBUSY } else { 0 })
             }
+            reg::WDT_STATUS => {
+                let busy = self.wdt.busy > 0;
+                self.wdt.busy = self.wdt.busy.saturating_sub(1);
+                Ok(if busy { regs::WDT_SYNCBUSY } else { 0 })
+            }
             reg::RTC_PITINTFLAGS => {
                 // The firmware busy-waits on this, so the next tick arrives
                 // the moment it looks.
@@ -764,6 +877,26 @@ impl Bus for Chip {
                     }
                     self.pit_flag = true;
                     self.ticks += 1;
+                    if self.watchdog_running() {
+                        let pit = self.io[reg::RTC_PITCTRLA] & !regs::RTC_PITEN;
+                        if pit != regs::RTC_PERIOD_CYC512 {
+                            return Err(format!(
+                                "ticks with RTC.PITCTRLA.PERIOD at {pit:#04x} and the watchdog \
+                                 on; the WDT model only knows a tick as 16 WDT clocks, at CYC512"
+                            ));
+                        }
+                        self.wdt.ticks += 1;
+                        let ticks = self.wdt.ticks;
+                        let clocks = ticks * WDT_CLOCKS_PER_TICK;
+                        let timeout = self.wdt_closed() + self.wdt_open();
+                        if clocks >= timeout {
+                            return Err(format!(
+                                "the watchdog went {ticks} ticks ({clocks} WDT clocks) without \
+                                 wdr, against a {timeout}-clock timeout, so the chip would \
+                                 have reset"
+                            ));
+                        }
+                    }
                     // A tick is 15.6 ms of real time, however few
                     // instructions the wait took here, and a conversion is
                     // well under one.
@@ -819,15 +952,46 @@ impl Bus for Chip {
                 self.unlocked_until = Some(self.now + 4);
             }
             reg::CLKCTRL_MCLKCTRLB => {
-                if !self.unlocked_until.is_some_and(|until| self.now <= until) {
+                self.take_protected_write(a)?;
+                self.io[a] = value;
+            }
+            reg::WDT_CTRLA => {
+                self.take_protected_write(a)?;
+                if self.wdt.busy > 0 {
+                    return Err("writes WDT.CTRLA while WDT.STATUS.SYNCBUSY is set, \
+                                which the datasheet doesn't allow (section 19.3.6)"
+                        .into());
+                }
+                if self.watchdog_running() {
+                    // Whether a change restarts the windows isn't in the
+                    // datasheet, and the firmware sets it up once.
+                    return Err(if value & WDT_PERIOD == 0 {
+                        "turns the watchdog off".into()
+                    } else {
+                        format!(
+                            "writes {value:#04x} to WDT.CTRLA with the watchdog already on, \
+                             which the simulator doesn't model"
+                        )
+                    });
+                }
+                if value & WDT_PERIOD > WDT_PERIOD_MAX || (value & WDT_WINDOW) >> 4 > WDT_PERIOD_MAX
+                {
                     return Err(format!(
-                        "writes {} without the CCP key in the four instructions before, \
-                         and the chip ignores that write",
-                        name(a)
+                        "writes {value:#04x} to WDT.CTRLA: a reserved WDT period or window"
                     ));
                 }
-                self.unlocked_until = None;
                 self.io[a] = value;
+                self.wdt = Wdt {
+                    busy: WDT_SYNC_READS,
+                    ..Wdt::default()
+                };
+            }
+            reg::WDT_STATUS => {
+                return Err(if value & WDT_LOCK != 0 {
+                    "sets WDT.STATUS.LOCK, which only debug mode can clear".into()
+                } else {
+                    "writes WDT.STATUS, whose only writable bit is LOCK".into()
+                });
             }
             reg::RTC_PITCTRLA => {
                 if self.pit_busy > 0 {
@@ -891,6 +1055,28 @@ impl Bus for Chip {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn wdr(&mut self) -> Result<(), String> {
+        if !self.watchdog_running() {
+            return Ok(());
+        }
+        if self.wdt.busy > 0 {
+            return Err("wdr before the WDT.CTRLA write has synced".into());
+        }
+        let ticks = self.wdt.ticks;
+        let clocks = ticks * WDT_CLOCKS_PER_TICK;
+        let closed = self.wdt_closed();
+        if closed > 0 && clocks <= closed {
+            return Err(format!(
+                "wdr {ticks} ticks ({clocks} WDT clocks) after the last, in or on the edge \
+                 of the {closed}-clock closed window, so the chip would have reset (or, \
+                 within 2 to 3 clocks of the last, ignored it, section 19.3.6)"
+            ));
+        }
+        self.wdt.ticks = 0;
+        self.wdt.windowed = self.watchdog_windowed();
         Ok(())
     }
 }
@@ -965,6 +1151,203 @@ mod tests {
         c.write(flags, regs::RTC_PI).unwrap();
         c.read(flags).unwrap();
         assert_eq!(c.ticks, 2);
+    }
+
+    /// Writes WDT.CTRLA with the CCP key just before, as `hw::init` does.
+    fn wdt_write(c: &mut Chip, value: u8) -> Result<(), String> {
+        c.write(reg::CPU_CCP as u16, regs::CPU_CCP_IOREG)?;
+        c.write(reg::WDT_CTRLA as u16, value)
+    }
+
+    /// `hw::init`'s setting: 32 clocks closed, then 32 open.
+    const WDT_ON: u8 = regs::WDT_WINDOW_32CLK | regs::WDT_PERIOD_32CLK;
+
+    /// A chip with the PIT running and the watchdog written with `value`
+    /// and synced, as `hw::init` leaves it.
+    fn watchdog(value: u8) -> Chip {
+        let mut c = chip();
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        wdt_write(&mut c, value).unwrap();
+        while c.read(reg::WDT_STATUS as u16).unwrap() != 0 {}
+        c
+    }
+
+    #[test]
+    fn the_watchdog_needs_the_64_hz_tick() {
+        let mut c = watchdog(WDT_ON);
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
+        let err = next_tick(&mut c).unwrap_err();
+        assert!(err.contains("CYC512"), "{err}");
+    }
+
+    #[test]
+    fn in_step_wants_window_mode() {
+        assert!(watchdog(WDT_ON).watchdog_windowed());
+        assert!(!watchdog(regs::WDT_PERIOD_32CLK).watchdog_windowed());
+        assert!(!chip().watchdog_windowed());
+        let mut c = chip();
+        wdt_write(&mut c, regs::WDT_WINDOW_32CLK).unwrap();
+        assert!(!c.watchdog_windowed(), "a window with PERIOD off is off");
+    }
+
+    #[test]
+    fn wdt_ctrla_needs_the_ccp_key() {
+        let mut c = chip();
+        let err = c.write(reg::WDT_CTRLA as u16, WDT_ON).unwrap_err();
+        assert!(err.contains("CCP"), "{err}");
+        assert!(!c.watchdog_running());
+        assert_eq!(wdt_write(&mut c, WDT_ON), Ok(()));
+        assert_eq!(c.io[reg::WDT_CTRLA], WDT_ON);
+        assert!(c.watchdog_running());
+    }
+
+    #[test]
+    fn wdt_ctrla_waits_for_syncbusy() {
+        let mut c = chip();
+        let status = reg::WDT_STATUS as u16;
+        assert_eq!(c.read(status), Ok(0), "idle after reset");
+        wdt_write(&mut c, WDT_ON).unwrap();
+        assert_eq!(c.read(status), Ok(regs::WDT_SYNCBUSY));
+        let err = wdt_write(&mut c, WDT_ON).unwrap_err();
+        assert!(err.contains("SYNCBUSY"), "{err}");
+        assert_eq!(c.read(status), Ok(regs::WDT_SYNCBUSY));
+        assert_eq!(c.read(status), Ok(0));
+    }
+
+    #[test]
+    fn refuses_to_lock_the_watchdog() {
+        let mut c = chip();
+        let status = reg::WDT_STATUS as u16;
+        assert!(c.write(status, WDT_LOCK).unwrap_err().contains("LOCK"));
+        assert!(c.write(status, 0).is_err());
+    }
+
+    #[test]
+    fn refuses_a_reserved_watchdog_period_or_window() {
+        for value in [0x0C, 0xC3, 0xFF] {
+            let err = wdt_write(&mut chip(), value).unwrap_err();
+            assert!(err.contains("reserved"), "{value:#04x}: {err}");
+        }
+        assert_eq!(wdt_write(&mut chip(), 0xBB), Ok(()), "8KCLK both");
+    }
+
+    /// Polls the PIT flag for the next tick and clears it, as
+    /// `hw::wait_for_tick` does.
+    fn next_tick(c: &mut Chip) -> Result<(), String> {
+        let flags = reg::RTC_PITINTFLAGS as u16;
+        c.read(flags)?;
+        c.write(flags, regs::RTC_PI)
+    }
+
+    #[test]
+    fn refuses_to_change_the_watchdog_once_its_on() {
+        let mut c = watchdog(WDT_ON);
+        let err = wdt_write(&mut c, 0).unwrap_err();
+        assert!(err.contains("off"), "{err}");
+        let mut c = watchdog(WDT_ON);
+        let err = wdt_write(&mut c, regs::WDT_PERIOD_32CLK).unwrap_err();
+        assert!(err.contains("already on"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_wdr_before_ctrla_syncs() {
+        let mut c = chip();
+        wdt_write(&mut c, WDT_ON).unwrap();
+        let err = c.wdr().unwrap_err();
+        assert!(err.contains("synced"), "{err}");
+    }
+
+    #[test]
+    fn before_the_first_wdr_only_the_open_window_counts() {
+        // No closed window yet (§19.3.3.2), so a wdr at once is fine...
+        assert_eq!(watchdog(WDT_ON).wdr(), Ok(()));
+        // ...and 32 clocks, two ticks, without one resets the chip.
+        let mut c = watchdog(WDT_ON);
+        assert_eq!(next_tick(&mut c), Ok(()));
+        let err = next_tick(&mut c).unwrap_err();
+        assert!(err.contains("2 ticks (32 WDT clocks)"), "{err}");
+    }
+
+    #[test]
+    fn a_wdr_in_the_closed_window_resets_the_chip() {
+        // One tick is 16 clocks, inside the closed window; two is 32, on its
+        // edge, where the wdr's sync decides it.
+        for ticks in [0, 1, 2] {
+            let mut c = watchdog(WDT_ON);
+            c.wdr().unwrap();
+            for _ in 0..ticks {
+                next_tick(&mut c).unwrap();
+            }
+            let err = c.wdr().unwrap_err();
+            assert!(err.contains("closed window"), "{ticks} ticks: {err}");
+        }
+    }
+
+    #[test]
+    fn running_out_the_open_window_resets_the_chip() {
+        let mut c = watchdog(WDT_ON);
+        c.wdr().unwrap();
+        for tick in 1..4 {
+            assert_eq!(next_tick(&mut c), Ok(()), "tick {tick}");
+        }
+        let err = next_tick(&mut c).unwrap_err();
+        assert!(err.contains("4 ticks (64 WDT clocks)"), "{err}");
+    }
+
+    #[test]
+    fn feeding_as_the_library_says_keeps_the_watchdog_quiet() {
+        let mut c = watchdog(WDT_ON);
+        let mut feeder = ts21::watchdog::Feeder::new();
+        for tick in 0..100 {
+            assert_eq!(next_tick(&mut c), Ok(()), "tick {tick}");
+            if feeder.tick() {
+                assert_eq!(c.wdr(), Ok(()), "tick {tick}");
+            }
+        }
+    }
+
+    #[test]
+    fn feeding_every_tick_lands_in_the_closed_window() {
+        let mut c = watchdog(WDT_ON);
+        next_tick(&mut c).unwrap();
+        c.wdr().unwrap();
+        next_tick(&mut c).unwrap();
+        assert!(c.wdr().unwrap_err().contains("closed window"));
+    }
+
+    #[test]
+    fn in_normal_mode_an_early_wdr_is_fine() {
+        let mut c = watchdog(regs::WDT_PERIOD_32CLK);
+        for tick in 0..20 {
+            assert_eq!(next_tick(&mut c), Ok(()), "tick {tick}");
+            assert_eq!(c.wdr(), Ok(()), "tick {tick}");
+            assert_eq!(c.wdr(), Ok(()), "tick {tick}, twice");
+        }
+    }
+
+    #[test]
+    fn the_watchdog_period_runs_from_8_to_8k_cycles() {
+        // 8CLK and 16CLK are a tick or less, so even a fed chip resets.
+        for period in [0x01, 0x02] {
+            let mut c = watchdog(period);
+            assert!(next_tick(&mut c).is_err(), "PERIOD {period}");
+        }
+        // 8KCLK is 512 ticks.
+        let mut c = watchdog(WDT_PERIOD_MAX);
+        for tick in 1..512 {
+            assert_eq!(next_tick(&mut c), Ok(()), "tick {tick}");
+        }
+        assert!(next_tick(&mut c).is_err());
+    }
+
+    #[test]
+    fn a_watchdog_thats_off_never_fires() {
+        let mut c = chip();
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
+        for tick in 0..20 {
+            assert_eq!(next_tick(&mut c), Ok(()), "tick {tick}");
+            assert_eq!(c.wdr(), Ok(()), "tick {tick}");
+        }
     }
 
     /// Sets the ADC up the way `hw::init` and `hw::adc_start` do.
