@@ -35,9 +35,18 @@ use core::arch::global_asm;
 
 use crate::regs;
 
+// The table below lists the handled vectors in this order, with runs of
+// unhandled slots between them.
+const _: () = assert!(
+    0 < regs::VECTOR_PORTA_PORT
+        && regs::VECTOR_PORTA_PORT < regs::VECTOR_RTC_PIT
+        && regs::VECTOR_RTC_PIT < regs::VECTORS
+);
+
 // `global_asm!` drops raw assembly into the object file, outside any Rust
-// function. The `{irqs}` and `{sreg}` placeholders are filled from the
-// `const` arguments at the bottom, so the numbers still come from regs.rs.
+// function. The `{...}` placeholders are filled from the arguments at the
+// bottom, so the numbers still come from regs.rs and the handlers' names
+// from hw.rs.
 global_asm!(
     // The vector table. On reset, and whenever an interrupt fires, the CPU
     // jumps to a fixed flash address without looking anything up. Reset
@@ -59,15 +68,26 @@ global_asm!(
     // Slot 0 is reset.
     "  jmp __reset",
     // Slots 1 to 30 are the interrupts. `.rept` and `.endr` make the
-    // assembler repeat the line between them. Nothing enables interrupts yet, so these can't fire, but if one did
-    // it would land on a harmless `reti` rather than random code.
-    "  .rept {irqs}",
+    // assembler repeat the line between them. Two have handlers in hw.rs,
+    // PORTA_PORT (the switch) and RTC_PIT (the tick). The rest go to
+    // `__unhandled_interrupt`. Nothing enables them, so they can't fire.
+    "  .rept {before_porta}",
+    "  jmp __unhandled_interrupt",
+    "  .endr",
+    "  jmp {porta_port}",
+    "  .rept {before_pit}",
+    "  jmp __unhandled_interrupt",
+    "  .endr",
+    "  jmp {rtc_pit}",
+    "  .rept {after_pit}",
     "  jmp __unhandled_interrupt",
     "  .endr",
     "",
     // `reti` returns from an interrupt handler. It pops the return address
     // the CPU pushed on the way in, and tells the interrupt controller the
-    // handler has finished.
+    // handler has finished. If an interrupt with no handler ever did fire,
+    // this would return with its flag still up, and it would fire again,
+    // forever. The simulator treats that as an error.
     ".section .text.__unhandled_interrupt, \"ax\", @progbits",
     "__unhandled_interrupt:",
     "  reti",
@@ -146,8 +166,13 @@ global_asm!(
     // than run off the end into whatever comes next in flash.
     "5:",
     "  rjmp 5b",
-    // Slot 0 is written out by hand above, so repeat the rest.
-    irqs = const regs::VECTORS - 1,
+    // The unhandled slots: from 1 up to PORTA_PORT, between it and
+    // RTC_PIT, and from there to the end. Slot 0 is reset.
+    before_porta = const regs::VECTOR_PORTA_PORT - 1,
+    porta_port = sym crate::hw::porta_port,
+    before_pit = const regs::VECTOR_RTC_PIT - regs::VECTOR_PORTA_PORT - 1,
+    rtc_pit = sym crate::hw::rtc_pit,
+    after_pit = const regs::VECTORS - regs::VECTOR_RTC_PIT - 1,
     // SREG's I/O address, small enough for `out` to reach.
     sreg = const regs::addr::CPU_SREG,
 );

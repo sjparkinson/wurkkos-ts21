@@ -6,6 +6,7 @@
 
 #![cfg_attr(target_arch = "avr", no_std, no_main)]
 #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
+#![cfg_attr(target_arch = "avr", feature(abi_avr_interrupt))]
 
 #[cfg(target_arch = "avr")]
 mod hw;

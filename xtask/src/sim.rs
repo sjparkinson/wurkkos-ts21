@@ -33,12 +33,23 @@
 //!   with the library.
 //! - SIGROW.TEMPSENSE0 and 1 hold `world::CALIBRATION`.
 //! - The PIT's flag goes up once a period of simulated time, which counts
-//!   an instruction at a time while the CPU's awake. Waiting for it,
-//!   whether by polling the flag or asleep, skips straight to the end of
-//!   the period.
-//! - Taking an interrupt whose vector goes to `__unhandled_interrupt` is an
-//!   error: the real chip would return with the flag still up and take it
-//!   again, forever.
+//!   an instruction at a time while the CPU's awake and skips to the end of
+//!   the period while it sleeps. Reading the flag doesn't move time on, so
+//!   firmware that busy-waited on it would run out of instructions.
+//! - Interrupts come from the PIT (with RTC.PITINTCTRL.PI) and from PORTA's
+//!   pin-change flags, which a switch edge sets when PA5's ISC asks for that
+//!   edge. Enabling any interrupt, the PIT's or a port pin's, with SREG.I
+//!   set and its vector going to `__unhandled_interrupt` is an error, and
+//!   so is taking one: the real chip would return with the flag still up
+//!   and take it again, forever.
+//! - `sleep` needs SLPCTRL.SEN (the chip treats it as a nop otherwise),
+//!   idle mode, the only one modelled, and an enabled interrupt that could
+//!   wake it. `avr.rs` adds that SREG.I is set and no handler's running.
+//!
+//! Interrupts only ever arrive while the CPU's asleep, since that's where
+//! the PIT's period ends and between ticks is where the switch changes. So
+//! nothing here tests a handler landing mid-instruction-sequence, such as
+//! halfway through a 16-bit TCA0 write.
 //!
 //! Touching a register it doesn't model is an error too, so new peripheral
 //! code fails here until the model learns about it.
@@ -71,7 +82,7 @@ use std::ops::Range;
 use ts21::ramp;
 use ts21::sensors::Channel;
 
-use crate::avr::{Bus, Cpu, is_two_words};
+use crate::avr::{Bus, Cpu, I, VECTOR_WORDS, is_two_words};
 use crate::elf::{DATA_SPACE, Elf, RAM};
 use crate::simulate::{self, Sample};
 use crate::spec::{self, Example};
@@ -142,6 +153,22 @@ const WDT_CLOCKS_PER_TICK: u32 = 16;
 // The WDT model counts whole ticks, which only works while a pass can't
 // overrun one and drop a tick unseen.
 const _: () = assert!(TICK_BUDGET < TICK_CYCLES / 2);
+
+/// PORTx.PINnCTRL.ISC, the mask and its values (DS40002204A §16.5.11),
+/// beyond the BOTHEDGES the firmware uses. atdf.rs checks them.
+pub const ISC: u8 = 0x07;
+pub const ISC_INTDISABLE: u8 = 0x0;
+pub const ISC_BOTHEDGES: u8 = regs::PORT_ISC_BOTHEDGES;
+pub const ISC_RISING: u8 = 0x2;
+pub const ISC_FALLING: u8 = 0x3;
+pub const ISC_INPUT_DISABLE: u8 = 0x4;
+pub const ISC_LEVEL: u8 = 0x5;
+/// PORTx.PINnCTRL.INVEN, which the simulator refuses on PA5.
+pub const PORT_INVEN: u8 = 0x80;
+/// PORTB's and PORTC's pin-change vectors, which the firmware has no
+/// handlers for. atdf.rs checks them.
+pub const VECTOR_PORTB_PORT: usize = 4;
+pub const VECTOR_PORTC_PORT: usize = 5;
 
 /// TCA0's 16-bit registers the firmware writes, by the low byte's address.
 const WIDE: [usize; 4] = [
@@ -452,6 +479,24 @@ struct Sim {
     executed: u64,
     /// `__unhandled_interrupt`, as a word address.
     unhandled: u32,
+    /// A bit per vector whose slot doesn't jump there.
+    handled: u32,
+}
+
+/// A bit for each vector whose slot in `image`'s table is a `jmp` to
+/// somewhere other than `unhandled` (a word address). layout.rs checks
+/// every slot is a `jmp`.
+fn handled(image: &[u8], unhandled: u32) -> u32 {
+    (1..regs::VECTORS).fold(0, |mask, v| {
+        let at = v * VECTOR_WORDS as usize * 2;
+        let jmp = word(image, at).is_some_and(|w| w & 0xFE0E == 0x940C);
+        let target = word(image, at + 2).map(u32::from);
+        if jmp && target != Some(unhandled) {
+            mask | 1 << v
+        } else {
+            mask
+        }
+    })
 }
 
 impl Sim {
@@ -460,13 +505,15 @@ impl Sim {
             return Err(format!("{} bytes won't fit in flash", image.len()));
         }
         let cpu = Cpu::new(&SRAM);
+        let unhandled = unhandled / 2;
         Ok(Self {
             lowest_sp: cpu.sp,
             cpu,
+            handled: handled(&image, unhandled),
             chip: Chip::new(image),
             stack_floor: bss_end - 1,
             executed: 0,
-            unhandled: unhandled / 2,
+            unhandled,
         })
     }
 
@@ -488,12 +535,29 @@ impl Sim {
             return Err(format!("{:#06x}: the stack ran into .bss", pc * 2));
         }
         // The real chip would `reti` straight back into the main loop with
-        // the flag still up, and take the interrupt again, forever.
+        // the flag still up, and take the interrupt again, forever. Better
+        // to catch it as soon as one's enabled, before it ever fires.
+        if self.cpu.flag(I) {
+            let orphans = self.chip.enabled() & !self.handled;
+            if orphans != 0 {
+                return Err(format!(
+                    "{:#06x}: enables {} with SREG.I set, but its vector goes to \
+                     __unhandled_interrupt",
+                    pc * 2,
+                    vector_name(orphans.trailing_zeros() as u8)
+                ));
+            }
+        }
+        // A backstop only: the chip only raises enabled interrupts, and the
+        // check above catches an enabled one with no handler as soon as
+        // SREG.I is set, so nothing reaches here today. It's kept in case an
+        // interrupt source is ever modelled without going through `enabled`.
         if self.cpu.pc == self.unhandled
             && let Some(vector) = self.cpu.handling
         {
             return Err(format!(
-                "takes interrupt {vector}, whose vector goes to __unhandled_interrupt"
+                "takes {}, whose vector goes to __unhandled_interrupt",
+                vector_name(vector)
             ));
         }
         Ok(())
@@ -516,7 +580,7 @@ impl Sim {
     /// One pass of the main loop with the switch as given: runs until the
     /// firmware picks up the next tick. Returns how many instructions it took.
     fn tick(&mut self, pressed: bool) -> Result<u64, String> {
-        self.chip.pressed = pressed;
+        self.chip.set_switch(pressed)?;
         let (start, ticks) = (self.executed, self.chip.ticks);
         while self.chip.ticks == ticks {
             if self.executed - start > TICK_BUDGET {
@@ -548,6 +612,8 @@ struct Chip {
     pit_busy: u8,
     /// RTC.PITINTFLAGS.PI.
     pit_flag: bool,
+    /// PORTA.INTFLAGS.
+    porta_flags: u8,
     /// When the PIT's current period ends.
     next_pit: u64,
     /// PIT periods so far with the PIT on.
@@ -632,6 +698,7 @@ impl Chip {
             pressed: false,
             pit_busy: PIT_SYNC_READS,
             pit_flag: false,
+            porta_flags: 0,
             next_pit: PIT_PERIOD,
             ticks: 0,
             wide: [0; 4],
@@ -698,6 +765,59 @@ impl Chip {
     /// One instruction's worth of time.
     fn elapse(&mut self) -> Result<(), String> {
         self.advance_to(self.now + 1)
+    }
+
+    /// INVEN on PA5 would flip both VPORTA.IN and which edge is which
+    /// (DS40002204A §16.3.2.2), and the model does neither, so it refuses it.
+    fn switch_not_inverted(&self) -> Result<(), String> {
+        if self.io[reg::PORTA_PIN0CTRL + 5] & PORT_INVEN != 0 {
+            return Err("sets INVEN on PA5, which the simulator doesn't model".into());
+        }
+        Ok(())
+    }
+
+    /// Presses or releases the switch on PA5. A change sets PA5's flag in
+    /// PORTA.INTFLAGS if its ISC asks for that edge (DS40002204A §16.5.10).
+    fn set_switch(&mut self, pressed: bool) -> Result<(), String> {
+        if pressed == self.pressed {
+            return Ok(());
+        }
+        self.pressed = pressed;
+        self.switch_not_inverted()?;
+        let sense = match self.io[reg::PORTA_PIN0CTRL + 5] & ISC {
+            ISC_INTDISABLE | ISC_INPUT_DISABLE => false,
+            ISC_BOTHEDGES => true,
+            ISC_RISING => !pressed,
+            ISC_FALLING => pressed,
+            isc => {
+                return Err(format!(
+                    "PA5's ISC is {isc:#x}, which the simulator doesn't model"
+                ));
+            }
+        };
+        if sense {
+            self.porta_flags |= SWITCH;
+        }
+        Ok(())
+    }
+
+    /// A bit per vector whose interrupt is enabled. A port's is enabled
+    /// when any of its pins' ISC is.
+    fn enabled(&self) -> u32 {
+        let port = |base: usize, vector: usize| {
+            let on = (base..base + 8).any(|a| {
+                matches!(
+                    self.io[a] & ISC,
+                    ISC_BOTHEDGES | ISC_RISING | ISC_FALLING | ISC_LEVEL
+                )
+            });
+            u32::from(on) << vector
+        };
+        let pit = self.io[reg::RTC_PITINTCTRL] & regs::RTC_PI != 0;
+        port(reg::PORTA_PIN0CTRL, regs::VECTOR_PORTA_PORT)
+            | port(reg::PORTB_PIN0CTRL, VECTOR_PORTB_PORT)
+            | port(reg::PORTC_PIN0CTRL, VECTOR_PORTC_PORT)
+            | u32::from(pit) << regs::VECTOR_RTC_PIT
     }
 
     /// Jumps to the end of the PIT's period, as if the CPU had waited for
@@ -889,6 +1009,9 @@ fn plain(addr: usize) -> bool {
                 | reg::ADC0_CTRLD
                 | reg::ADC0_SAMPCTRL
                 | reg::ADC0_MUXPOS
+                | reg::GPIO_GPIOR0
+                | reg::SLPCTRL_CTRLA
+                | reg::RTC_PITINTCTRL
         )
 }
 
@@ -905,6 +1028,16 @@ const ADC_SETUP: [usize; 9] = [
     reg::ADC0_SAMPCTRL,
     reg::ADC0_MUXPOS,
 ];
+
+fn vector_name(vector: u8) -> String {
+    match usize::from(vector) {
+        regs::VECTOR_PORTA_PORT => "PORTA_PORT (vector 3)".into(),
+        VECTOR_PORTB_PORT => "PORTB_PORT (vector 4)".into(),
+        VECTOR_PORTC_PORT => "PORTC_PORT (vector 5)".into(),
+        regs::VECTOR_RTC_PIT => "RTC_PIT (vector 7)".into(),
+        v => format!("vector {v}"),
+    }
+}
 
 fn name(addr: usize) -> String {
     let known = [
@@ -938,6 +1071,10 @@ fn name(addr: usize) -> String {
         (reg::ADC0_RES + 1, "ADC0.RESH"),
         (reg::SIGROW_TEMPSENSE0, "SIGROW.TEMPSENSE0"),
         (reg::SIGROW_TEMPSENSE1, "SIGROW.TEMPSENSE1"),
+        (reg::GPIO_GPIOR0, "GPIO.GPIOR0"),
+        (reg::SLPCTRL_CTRLA, "SLPCTRL.CTRLA"),
+        (reg::RTC_PITINTCTRL, "RTC.PITINTCTRL"),
+        (reg::PORTA_INTFLAGS, "PORTA.INTFLAGS"),
     ];
     known
         .iter()
@@ -950,13 +1087,41 @@ impl Bus for Chip {
         word(&self.flash, pc as usize * 2)
     }
 
-    /// No peripheral's interrupt is modelled yet.
+    /// PORTA's pin change and the PIT, lowest vector first, the default
+    /// static priority (DS40002204A §13.3.2.4). A port's flags only go up
+    /// for pins whose ISC enables them, so any flag is a request.
     fn interrupt(&self) -> Option<u8> {
-        None
+        let pending = u32::from(self.porta_flags != 0) << regs::VECTOR_PORTA_PORT
+            | u32::from(self.pit_flag) << regs::VECTOR_RTC_PIT;
+        let requests = pending & self.enabled();
+        (requests != 0).then(|| requests.trailing_zeros() as u8)
     }
 
+    /// Only idle is modelled, where every interrupt wakes the chip.
     fn sleep(&mut self) -> Result<(), String> {
-        Err("sleeps, but the simulator models neither SLPCTRL nor any interrupt to wake it".into())
+        let ctrla = self.io[reg::SLPCTRL_CTRLA];
+        if ctrla & regs::SLPCTRL_SEN == 0 {
+            return Err(
+                "sleeps with SLPCTRL.SEN clear, which the chip treats as a nop, \
+                 so the firmware would spin instead"
+                    .into(),
+            );
+        }
+        if ctrla != regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN {
+            return Err(format!(
+                "sleeps with SLPCTRL.CTRLA {ctrla:#04x}, but the simulator only models idle"
+            ));
+        }
+        // The PIT's interrupt can only wake the chip if the PIT's running.
+        let pit_off = self.io[reg::RTC_PITCTRLA] & regs::RTC_PITEN == 0;
+        let mut wakes = self.enabled();
+        if pit_off {
+            wakes &= !(1 << regs::VECTOR_RTC_PIT);
+        }
+        if wakes == 0 {
+            return Err("sleeps with no interrupt enabled that could wake it".into());
+        }
+        Ok(())
     }
 
     fn idle(&mut self) -> Result<(), String> {
@@ -973,7 +1138,10 @@ impl Bus for Chip {
             return Ok(*self.flash.get(usize::from(addr - MAPPED)).unwrap_or(&0xFF));
         }
         match a {
-            reg::VPORTA_IN => Ok(if self.pressed { !SWITCH } else { 0xFF }),
+            reg::VPORTA_IN => {
+                self.switch_not_inverted()?;
+                Ok(if self.pressed { !SWITCH } else { 0xFF })
+            }
             reg::RTC_PITSTATUS => {
                 let busy = self.pit_busy > 0;
                 self.pit_busy = self.pit_busy.saturating_sub(1);
@@ -984,15 +1152,10 @@ impl Bus for Chip {
                 self.wdt.busy = self.wdt.busy.saturating_sub(1);
                 Ok(if busy { regs::WDT_SYNCBUSY } else { 0 })
             }
-            reg::RTC_PITINTFLAGS => {
-                // The firmware busy-waits on this, so rather than run the
-                // loop a hundred thousand times, skip to the end of the
-                // period the moment it looks.
-                if !self.pit_flag {
-                    self.wait_for_pit()?;
-                }
-                Ok(regs::RTC_PI)
-            }
+            // Reading the flag doesn't move time on: a firmware that went
+            // back to busy-waiting on it would run out of instructions.
+            reg::RTC_PITINTFLAGS => Ok(if self.pit_flag { regs::RTC_PI } else { 0 }),
+            reg::PORTA_INTFLAGS => Ok(self.porta_flags),
             reg::ADC0_INTFLAGS => {
                 let ready = self.adc.ready_at.is_some_and(|at| self.now >= at);
                 Ok(if ready { regs::ADC_RESRDY } else { 0 })
@@ -1096,6 +1259,7 @@ impl Bus for Chip {
                     self.pit_flag = false;
                 }
             }
+            reg::PORTA_INTFLAGS => self.porta_flags &= !value,
             _ if WIDE.contains(&a) => {
                 if let Some((pending, _)) = self.temp {
                     return Err(format!(
@@ -1227,17 +1391,17 @@ mod tests {
     }
 
     #[test]
-    fn ticks_when_the_firmware_polls_the_pit_flag() {
+    fn reading_the_pit_flag_doesnt_move_time_on() {
         let mut c = chip();
         let flags = reg::RTC_PITINTFLAGS as u16;
-        assert!(c.read(flags).unwrap_err().contains("PIT off"));
         c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
+        assert_eq!(c.read(flags), Ok(0));
+        assert_eq!((c.now, c.ticks), (0, 0), "no skipping ahead to the tick");
+        c.idle().unwrap();
         assert_eq!(c.read(flags), Ok(regs::RTC_PI));
         assert_eq!(c.read(flags), Ok(regs::RTC_PI), "stays up until cleared");
-        assert_eq!(c.ticks, 1);
         c.write(flags, regs::RTC_PI).unwrap();
-        c.read(flags).unwrap();
-        assert_eq!(c.ticks, 2);
+        assert_eq!(c.read(flags), Ok(0));
     }
 
     /// Writes WDT.CTRLA with the CCP key just before, as `hw::init` does.
@@ -1318,12 +1482,11 @@ mod tests {
         assert_eq!(wdt_write(&mut chip(), 0xBB), Ok(()), "8KCLK both");
     }
 
-    /// Polls the PIT flag for the next tick and clears it, as
-    /// `hw::wait_for_tick` does.
+    /// Sleeps to the next tick and clears the PIT's flag, as
+    /// `hw::wait_for_tick` and `hw::rtc_pit` do between them.
     fn next_tick(c: &mut Chip) -> Result<(), String> {
-        let flags = reg::RTC_PITINTFLAGS as u16;
-        c.read(flags)?;
-        c.write(flags, regs::RTC_PI)
+        c.idle()?;
+        c.write(reg::RTC_PITINTFLAGS as u16, regs::RTC_PI)
     }
 
     #[test]
@@ -1495,11 +1658,163 @@ mod tests {
     }
 
     #[test]
-    fn has_no_interrupts_or_sleep_to_offer_yet() {
+    fn the_pit_interrupts_only_once_enabled() {
         let mut c = chip();
         c.pit_flag = true;
+        assert_eq!(c.interrupt(), None, "PITINTCTRL.PI clear");
+        c.write(reg::RTC_PITINTCTRL as u16, regs::RTC_PI).unwrap();
+        assert_eq!(c.interrupt(), Some(regs::VECTOR_RTC_PIT as u8));
+        c.write(reg::RTC_PITINTFLAGS as u16, regs::RTC_PI).unwrap();
+        assert_eq!(c.interrupt(), None, "cleared by writing 1");
+    }
+
+    #[test]
+    fn the_switch_flags_porta_on_the_edges_its_isc_asks_for() {
+        let pin5 = reg::PORTA_PIN0CTRL + 5;
+        let mut c = chip();
+        c.set_switch(true).unwrap();
+        assert_eq!(c.porta_flags, 0, "INTDISABLE");
         assert_eq!(c.interrupt(), None);
-        assert!(c.sleep().unwrap_err().contains("SLPCTRL"));
+
+        for (isc, press, release) in [
+            (ISC_BOTHEDGES, true, true),
+            (ISC_FALLING, true, false),
+            (ISC_RISING, false, true),
+        ] {
+            let mut c = chip();
+            c.io[pin5] = regs::PORT_PULLUPEN | isc;
+            c.set_switch(true).unwrap();
+            assert_eq!(c.porta_flags != 0, press, "ISC {isc} on press");
+            c.porta_flags = 0;
+            c.set_switch(true).unwrap();
+            assert_eq!(c.porta_flags, 0, "no edge, no flag");
+            c.set_switch(false).unwrap();
+            assert_eq!(c.porta_flags != 0, release, "ISC {isc} on release");
+        }
+
+        // Both pending: PORTA's vector is the lower, so it goes first.
+        let mut c = chip();
+        c.io[pin5] = regs::PORT_ISC_BOTHEDGES;
+        c.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
+        c.pit_flag = true;
+        c.set_switch(true).unwrap();
+        assert_eq!(c.interrupt(), Some(regs::VECTOR_PORTA_PORT as u8));
+        c.write(reg::PORTA_INTFLAGS as u16, SWITCH).unwrap();
+        assert_eq!(c.read(reg::PORTA_INTFLAGS as u16), Ok(0));
+        assert_eq!(c.interrupt(), Some(regs::VECTOR_RTC_PIT as u8));
+
+        c.io[pin5] = ISC_LEVEL;
+        assert!(c.set_switch(false).unwrap_err().contains("ISC"));
+    }
+
+    #[test]
+    fn enables_follow_each_ports_isc_and_the_pit() {
+        let mut c = chip();
+        assert_eq!(c.enabled(), 0);
+        c.io[reg::PORTB_PIN0CTRL + 2] = ISC_INPUT_DISABLE;
+        assert_eq!(c.enabled(), 0, "INPUT_DISABLE doesn't interrupt");
+        c.io[reg::PORTC_PIN0CTRL + 3] = ISC_LEVEL;
+        c.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
+        assert_eq!(
+            c.enabled(),
+            1 << VECTOR_PORTC_PORT | 1 << regs::VECTOR_RTC_PIT
+        );
+    }
+
+    #[test]
+    fn sleeps_only_in_idle_with_something_to_wake_it() {
+        let mut c = chip();
+        assert!(c.sleep().unwrap_err().contains("SEN clear"));
+        let ctrla = reg::SLPCTRL_CTRLA as u16;
+        c.write(ctrla, regs::SLPCTRL_SEN | 2 << 1).unwrap();
+        assert!(c.sleep().unwrap_err().contains("only models idle"), "PDOWN");
+        c.write(ctrla, regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_IDLE)
+            .unwrap();
+        assert!(c.sleep().unwrap_err().contains("no interrupt enabled"));
+        c.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
+        assert!(c.sleep().is_err(), "the PIT's interrupt, but the PIT's off");
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
+        assert_eq!(c.sleep(), Ok(()));
+        // The switch alone would do too.
+        c.io[reg::RTC_PITINTCTRL] = 0;
+        c.io[reg::PORTA_PIN0CTRL + 5] = regs::PORT_ISC_BOTHEDGES;
+        assert_eq!(c.sleep(), Ok(()));
+    }
+
+    #[test]
+    fn finds_the_vectors_with_handlers() {
+        // Slots of `jmp 0x0040` (word 0x20) except 3 and 7, which go elsewhere.
+        let mut image = Vec::new();
+        for v in 0..regs::VECTORS {
+            let target: u16 = match v {
+                3 => 0x30,
+                7 => 0x31,
+                _ => 0x20,
+            };
+            image.extend(0x940Cu16.to_le_bytes());
+            image.extend(target.to_le_bytes());
+        }
+        assert_eq!(handled(&image, 0x20), 1 << 3 | 1 << 7);
+    }
+
+    /// The word address of the `reti` `image` puts straight after the table.
+    const UNHANDLED: u16 = (regs::VECTORS * 2) as u16;
+
+    /// A vector table whose every interrupt slot goes to a `reti` at
+    /// `UNHANDLED`, then `main` straight after it, which reset jumps to.
+    fn image(main: &[u16]) -> Vec<u8> {
+        let mut words = Vec::new();
+        for v in 0..regs::VECTORS {
+            words.extend([0x940C, if v == 0 { UNHANDLED + 1 } else { UNHANDLED }]);
+        }
+        words.push(0x9518); // reti
+        words.extend(main);
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    fn sim(main: &[u16]) -> Sim {
+        Sim::new(image(main), SRAM.start + 1, u32::from(UNHANDLED) * 2).unwrap()
+    }
+
+    #[test]
+    fn refuses_an_interrupt_enabled_with_no_handler_once_sreg_i_is_set() {
+        // sei; rjmp .
+        let mut s = sim(&[0x9478, 0xCFFF]);
+        s.chip.io[reg::PORTB_PIN0CTRL + 2] = ISC_BOTHEDGES;
+        s.step().unwrap(); // jmp
+        let err = s.step().unwrap_err();
+        assert!(
+            err.contains("enables PORTB_PORT (vector 4) with SREG.I set"),
+            "{err}"
+        );
+    }
+
+    /// Polling the PIT flag doesn't move time on, and the loop budget
+    /// counts instructions run, so a busy-wait fails long before a tick.
+    #[test]
+    fn a_busy_wait_on_the_pit_flag_runs_out_of_instructions() {
+        // Words from main: 0: lds r16, RTC.PITINTFLAGS; 2: sbrs r16, 0;
+        // 3: rjmp 0; 4: rjmp 0.
+        let flags = reg::RTC_PITINTFLAGS as u16;
+        let mut s = sim(&[0x9100, flags, 0xFF00, 0xCFFC, 0xCFFB]);
+        s.chip.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        let err = s.tick(false).unwrap_err();
+        assert!(err.contains("ran past"), "{err}");
+        assert!(s.chip.now < PIT_PERIOD, "and never reached the tick");
+    }
+
+    #[test]
+    fn an_input_disabled_or_inverted_switch_is_refused_or_ignored() {
+        let pin5 = reg::PORTA_PIN0CTRL + 5;
+        let mut c = chip();
+        c.io[pin5] = ISC_INPUT_DISABLE;
+        c.set_switch(true).unwrap();
+        assert_eq!(c.porta_flags, 0, "INPUT_DISABLE raises no flag");
+
+        let mut c = chip();
+        c.io[pin5] = regs::PORT_PULLUPEN | PORT_INVEN;
+        assert!(c.set_switch(true).unwrap_err().contains("INVEN"));
+        assert!(c.read(reg::VPORTA_IN as u16).unwrap_err().contains("INVEN"));
     }
 
     /// Sets the ADC up the way `hw::init` and `hw::adc_start` do.

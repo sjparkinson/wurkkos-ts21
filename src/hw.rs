@@ -205,21 +205,77 @@ pub fn init() {
     write(reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US);
     write(reg::ADC0_CTRLA, regs::ADC_ENABLE);
 
+    // `sleep` puts the CPU in idle, which stops only the CPU and flash, so
+    // TCA0 keeps the PWM going and the ADC keeps converting. Standby would
+    // stop TCA0, which has no RUNSTDBY (section 11.3.2.1).
+    write(
+        reg::SLPCTRL_CTRLA,
+        regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN,
+    );
+
     // The RTC's periodic interrupt timer, off the internal 32.768 kHz
-    // oscillator (RTC.CLKSEL's reset value) divided by 512: 64 Hz.
+    // oscillator (RTC.CLKSEL's reset value) divided by 512: 64 Hz, with its
+    // interrupt on, in the datasheet's order (section 23.5.1). RTC.CTRLA
+    // stays at its reset value: any write to it stretches the PIT's period
+    // and clearing RTCEN stops the PIT (errata DS80000886C 2.6.1 and 2.6.2).
+    write(reg::RTC_PITINTCTRL, regs::RTC_PI);
     while read(reg::RTC_PITSTATUS) & regs::RTC_CTRLBUSY != 0 {}
     write(reg::RTC_PITCTRLA, regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN);
 }
 
-/// Spins until the next 64 Hz tick.
+/// The bit in GPIOR0 that [`rtc_pit`] sets each tick. AN2515C section 4.5
+/// suggests GPIORs for flags shared with a handler, because they sit in the
+/// bit-addressable I/O space, so a one-bit change can be a single `sbi` or
+/// `cbi` rather than a read-modify-write that needs interrupts off. Here
+/// the handler and the loop each write the whole byte, and the loop does it
+/// with interrupts off anyway, so that's moot. It also keeps the flag out
+/// of RAM.
+const TICK: u8 = 1 << 0;
+
+/// Sleeps until the next 64 Hz tick.
 ///
-/// The flag goes up whether or not the interrupt is enabled, so for now
-/// this busy-waits with the CPU awake. Sleeping between ticks (and properly
-/// when off) is on the roadmap, and until then the torch drains its cell
-/// in a few days.
+/// The PIT interrupt sets [`TICK`]; this checks and clears it with
+/// interrupts off, so a tick can't land between the check and the clear.
+/// If it isn't set yet, `sei` and `sleep` go back to back (AN2515C section
+/// 4.5): the instruction after `sei` always runs before a pending
+/// interrupt, so a tick that arrived after the check wakes the `sleep` at
+/// once rather than being slept through. Anything else that wakes it, such
+/// as the switch's pin-change interrupt, goes round the loop and back to
+/// sleep.
 pub fn wait_for_tick() {
-    while read(reg::RTC_PITINTFLAGS) & regs::RTC_PI == 0 {}
+    loop {
+        // SAFETY: `cli` only clears SREG.I. With no `nomem`, it's also a
+        // compiler barrier, so the GPIOR0 read can't move above it.
+        unsafe { asm!("cli", options(nostack)) };
+        if read(reg::GPIO_GPIOR0) & TICK != 0 {
+            write(reg::GPIO_GPIOR0, 0);
+            // SAFETY: `sei` only sets SREG.I.
+            unsafe { asm!("sei", options(nostack)) };
+            return;
+        }
+        // SAFETY: sets SREG.I and sleeps until an interrupt, whose handler
+        // returns here. Both handlers save what they touch.
+        unsafe { asm!("sei", "sleep", options(nostack)) };
+    }
+}
+
+/// RTC_PIT, vector 7: the 64 Hz tick. It clears the PIT's flag and sets
+/// [`TICK`], and that's all, since everything it touches the main loop
+/// only reads or clears with interrupts off. Above all it mustn't touch
+/// TCA0's 16-bit registers, whose shared TEMP byte the main loop might be
+/// halfway through using (section 8.5.6, Accessing 16-bit Registers).
+pub extern "avr-interrupt" fn rtc_pit() {
     write(reg::RTC_PITINTFLAGS, regs::RTC_PI);
+    write(reg::GPIO_GPIOR0, TICK);
+}
+
+/// PORTA_PORT, vector 3: the switch changed. `hw::init` sets PA5 to
+/// interrupt on both edges, which is for waking from power-down when
+/// that's done (roadmap stage 2). For now waking is all it's for: the main
+/// loop samples the switch every tick anyway. It clears every PORTA flag,
+/// since one left up would fire again the moment this returned.
+pub extern "avr-interrupt" fn porta_port() {
+    write(reg::PORTA_INTFLAGS, regs::PORT_INT_ALL);
 }
 
 /// Tells the watchdog the loop is still running. `main` calls this at the

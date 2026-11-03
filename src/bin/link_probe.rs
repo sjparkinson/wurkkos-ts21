@@ -13,6 +13,7 @@
 
 #![cfg_attr(target_arch = "avr", no_std, no_main)]
 #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
+#![cfg_attr(target_arch = "avr", feature(abi_avr_interrupt))]
 
 // rt.rs needs a few of regs.rs's constants, not all of them.
 #[cfg(target_arch = "avr")]
@@ -22,6 +23,14 @@ mod regs;
 #[cfg(target_arch = "avr")]
 #[path = "../rt.rs"]
 mod rt;
+
+/// rt.rs's vector table jumps to these by name. The probe never enables an
+/// interrupt, so they're empty.
+#[cfg(target_arch = "avr")]
+mod hw {
+    pub extern "avr-interrupt" fn porta_port() {}
+    pub extern "avr-interrupt" fn rtc_pit() {}
+}
 
 #[cfg(target_arch = "avr")]
 mod probe {
