@@ -27,6 +27,28 @@ pub const FUSE_NAMES: [&str; FUSE_BYTES] = [
     "WDTCFG", "BODCFG", "OSCCFG", "", "TCD0CFG", "SYSCFG0", "SYSCFG1", "APPEND", "BOOTEND",
 ];
 
+/// Why a fuse value can't go in a script, if it can't. The simulated chip
+/// only lets the firmware read the fuses; it doesn't do what they'd do to a
+/// real one. Most wrong values change something the firmware then reports
+/// (a clock, a section), but these stop it running at all, so a script
+/// with them would show behaviour no real light has:
+///
+/// - `WDTCFG.PERIOD` (mask 0x0F) starts the watchdog at reset, and nothing
+///   feeds it before `hw::init`, so the chip resets in a loop (DS §19.3.3.3).
+/// - `SYSCFG0.CRCSRC` (mask 0xC0) other than NOCRC (0x3) scans flash before
+///   the CPU starts and hangs on a mismatch (DS §27.3.1).
+pub fn unmodelled_fuse(offset: usize, value: u8) -> Option<&'static str> {
+    match FUSE_NAMES.get(offset).copied() {
+        Some("WDTCFG") if value & 0x0F != 0 => {
+            Some("a WDTCFG.PERIOD starts the watchdog at reset, which the simulator doesn't model")
+        }
+        Some("SYSCFG0") if value & 0xC0 != 0xC0 => Some(
+            "a SYSCFG0.CRCSRC scans flash before reset ends, which the simulator doesn't model",
+        ),
+        _ => None,
+    }
+}
+
 /// The fuses the firmware expects, as the datasheet has a factory chip:
 /// no watchdog from the fuse, BOD off, 20 MHz, UPDI on the reset pin, no
 /// CRC at start-up and no boot or application section. The datasheet, the
@@ -76,9 +98,13 @@ impl World {
         }
     }
 
-    /// The fuse at a data-space address, if it's one of `fuses`.
+    /// The fuse at a data-space address, if it's one of `fuses` and not the
+    /// reserved byte, which the datasheet doesn't say how reads.
     pub fn fuse(&self, addr: usize) -> Option<u8> {
         let offset = addr.checked_sub(usize::from(map::FUSES))?;
+        if FUSE_NAMES.get(offset)?.is_empty() {
+            return None;
+        }
         self.fuses.get(offset).copied()
     }
 
@@ -190,5 +216,19 @@ mod tests {
             }
         );
         assert_eq!(World::NORMAL.fuse(usize::from(map::FUSES) + 9), None);
+        assert_eq!(
+            World::NORMAL.fuse(usize::from(map::FUSES) + 3),
+            None,
+            "reserved"
+        );
+    }
+
+    #[test]
+    fn fuses_that_stop_a_real_chip_are_refused() {
+        assert!(unmodelled_fuse(0, 0x0B).is_some(), "WDTCFG.PERIOD");
+        assert!(unmodelled_fuse(0, 0x10).is_none(), "WDTCFG.WINDOW alone");
+        assert!(unmodelled_fuse(5, 0x04).is_some(), "CRCSRC FLASH");
+        assert!(unmodelled_fuse(5, 0xC4).is_none(), "CRCSRC NOCRC");
+        assert!(unmodelled_fuse(2, 0x01).is_none(), "OSCCFG");
     }
 }

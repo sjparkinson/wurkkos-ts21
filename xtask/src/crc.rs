@@ -13,6 +13,11 @@
 //! the scan that way, over all 16 KB, so it checks [`sign`] rather than
 //! repeating it.
 //!
+//! Microchip's AN2521A ("CRCSCAN on devices in the tinyAVR 1-series", not
+//! in docs/microchip/) agrees: its whole-flash post-build step (§5) is
+//! `srec_cat ... -fill 0xFF ... -CRC16_Big_Endian <end-2> -broken`, where
+//! `-broken` is this CRC, and §6 says a signed section scans to 0x0000.
+//!
 //! None of this has been checked against a real chip yet.
 
 use crate::updi::map::FLASH_SIZE;
