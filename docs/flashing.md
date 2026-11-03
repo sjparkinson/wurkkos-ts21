@@ -90,6 +90,6 @@ The power-on self-tests (docs/ui.md) quietly cap the light at the top of the lin
 
 The programmer writes flash and EEPROM, and only those. That's all a TS21 needs, and it keeps fuses out of reach, since a bad fuse write can turn off UPDI for good.
 
-`xtask/src/updi.rs` is the protocol, covering link set-up, the NVM programming key, reset, page-buffer writes through the NVM controller and reads in 256-byte blocks. The sequences follow Microchip's pymcuprog, and the registers come from the ATDF. `xtask/src/serial.rs` opens the port, configures it with `stty` (115200 baud, 8 data bits, even parity, 2 stop bits) and swallows the echo that a one-wire adapter sends back.
+`xtask/src/updi.rs` is the protocol, covering link set-up, the NVM programming key, reset, page-buffer writes through the NVM controller and reads in 256-byte blocks. The sequences follow Microchip's pymcuprog, and the registers come from the ATDF. `xtask/src/serial.rs` opens the port, configures it with `stty` (115200 baud, 8 data bits, even parity, 2 stop bits) and swallows the echo that a one-wire adapter sends back. It drains anything already waiting in the adapter when it opens the port and after a double break, as avrdude does, so a stray byte can't throw the echo check off.
 
 The tests run all of it against a pretend ATtiny1616 in `updi.rs`. That catches slips in framing and sequencing, but it was written from the same reading of the datasheet as the programmer, so the first run against a real chip is the real test. Start with `ping`, then `backup`.
