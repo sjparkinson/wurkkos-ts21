@@ -125,7 +125,7 @@ fn hex() -> Result<(), String> {
     let firmware = elf.flash_image();
     let image = crc::sign(&firmware)?;
     write(&root().join(HEX), &ihex::encode(&image))?;
-    eprintln!("wrote {HEX}, padded to all of flash with its CRC at the end");
+    eprintln!("wrote {HEX}");
 
     let flash = firmware.len() as u64;
     let ram = elf.ram_bytes().into();
@@ -134,18 +134,15 @@ fn hex() -> Result<(), String> {
         "{}",
         row("flash", flash, Some(map::FLASH_SIZE as u64), "bytes")
     );
-    println!(
-        "{}",
-        row("ram", ram, Some(ram_size), "bytes, plus the stack")
-    );
-    println!("{}", row("stack", sim.stack.into(), None, "bytes at most"));
+    println!("{}", row("ram", ram, Some(ram_size), "bytes"));
+    println!("{}", row("stack", sim.stack.into(), None, "bytes"));
     println!(
         "{}",
         row(
             "loop",
             sim.loop_instructions,
             Some(sim.loop_budget),
-            "instructions per 64 Hz tick, at most"
+            "instructions per 64 Hz tick"
         )
     );
     Ok(())
@@ -320,8 +317,8 @@ mod tests {
             "flash  3,978 / 16,384  24%  bytes"
         );
         assert_eq!(
-            row("stack", 107, None, "bytes at most"),
-            "stack    107                bytes at most"
+            row("stack", 107, None, "bytes"),
+            "stack    107                bytes"
         );
     }
 
