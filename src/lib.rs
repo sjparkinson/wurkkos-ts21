@@ -18,6 +18,7 @@ pub mod testing;
 pub mod thermal;
 pub mod torch;
 pub mod ui;
+pub mod watchdog;
 
 /// How often the firmware samples the switch and steps the UI. The RTC's
 /// periodic interrupt timer divides its 32.768 kHz clock by 512.

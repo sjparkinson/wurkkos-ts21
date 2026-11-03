@@ -29,6 +29,11 @@ pub mod addr {
     /// VREF.CTRLB: ADC0REFEN keeps ADC0's reference running.
     pub const VREF_CTRLB: usize = 0x00A1;
 
+    /// WDT.CTRLA: PERIOD and WINDOW. Behind configuration change protection.
+    pub const WDT_CTRLA: usize = 0x0100;
+    /// WDT.STATUS: SYNCBUSY.
+    pub const WDT_STATUS: usize = 0x0101;
+
     pub const RTC_PITCTRLA: usize = 0x0150;
     pub const RTC_PITSTATUS: usize = 0x0151;
     pub const RTC_PITINTFLAGS: usize = 0x0153;
@@ -84,6 +89,16 @@ pub const CPU_CCP_IOREG: u8 = 0xD8;
 pub const CLKCTRL_PEN: u8 = 0x01;
 /// CLKCTRL.MCLKCTRLB.PDIV = 2X.
 pub const CLKCTRL_PDIV_2X: u8 = 0x00;
+
+/// WDT.CTRLA.PERIOD = 32CLK: 32 cycles of the 1.024 kHz clock. In window
+/// mode that's the open window, after the closed one.
+pub const WDT_PERIOD_32CLK: u8 = 0x03;
+/// WDT.CTRLA.WINDOW = 32CLK: window mode, with a closed window of 32 cycles
+/// after each `wdr`.
+pub const WDT_WINDOW_32CLK: u8 = 0x03 << 4;
+/// WDT.STATUS.SYNCBUSY: CTRLA is still syncing to the WDT clock, so don't
+/// write it again yet.
+pub const WDT_SYNCBUSY: u8 = 0x01;
 
 /// PORTx.PINnCTRL.PULLUPEN.
 pub const PORT_PULLUPEN: u8 = 0x08;
