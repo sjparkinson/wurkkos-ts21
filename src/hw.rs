@@ -298,6 +298,29 @@ pub fn temperature_calibration() -> Calibration {
     }
 }
 
+/// Has CRCSCAN check all of flash against the CRC `cargo xtask hex` puts in
+/// its last two bytes, and says whether it matched. Run it before turning
+/// anything on: the scan stalls the CPU until it's done, 8,192 words at
+/// three clocks each, about 7 ms at the reset clock of 20 MHz / 6.
+///
+/// STATUS.OK reads 1 from reset, before any scan, and the scan only starts
+/// three cycles after ENABLE while the CPU carries on (DS §27.3.1). So
+/// three `nop`s go between the write and the first read, or a read could
+/// see the reset value and pass a flash that's wrong. Then it waits for
+/// BUSY to clear, which it should already have done, since the CPU was
+/// stalled.
+pub fn flash_ok() -> bool {
+    write(
+        reg::CRCSCAN_CTRLB,
+        regs::CRCSCAN_SRC_FLASH | regs::CRCSCAN_MODE_PRIORITY,
+    );
+    write(reg::CRCSCAN_CTRLA, regs::CRCSCAN_ENABLE);
+    // SAFETY: three `nop`s, which touch nothing.
+    unsafe { asm!("nop", "nop", "nop", options(nostack, preserves_flags)) };
+    while read(reg::CRCSCAN_STATUS) & regs::CRCSCAN_BUSY != 0 {}
+    read(reg::CRCSCAN_STATUS) & regs::CRCSCAN_OK != 0
+}
+
 /// The fuse bytes `selftest::Fuses::ok` checks, read from data space. This
 /// only ever reads them.
 pub fn fuses() -> Fuses {

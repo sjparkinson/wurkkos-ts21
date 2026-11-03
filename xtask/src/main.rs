@@ -7,6 +7,7 @@
 #[cfg(test)]
 mod atdf;
 mod avr;
+mod crc;
 mod elf;
 mod ihex;
 mod layout;
@@ -59,7 +60,9 @@ fn main() -> ExitCode {
         ["size"] => size(),
         ["ping", port] => ping(port),
         ["backup", port] => backup(port),
-        ["flash", port] => build().and_then(|(elf, _)| flash(port, &elf.flash_image())),
+        ["flash", port] => build()
+            .and_then(|(elf, _)| crc::sign(&elf.flash_image()))
+            .and_then(|image| flash(port, &image)),
         ["flash", port, file] => read_hex(Path::new(file)).and_then(|image| flash(port, &image)),
         ["restore", port] => restore(port),
         ["simulate"] => simulate::interactive(),
@@ -104,10 +107,18 @@ fn build() -> Result<(elf::Elf, sim::Report), String> {
     Ok((elf, report))
 }
 
+/// Writes the image `flash` would: the firmware padded to all of flash with
+/// 0xFF and its CRC in the last two bytes, which the firmware checks at
+/// power-on (`crc.rs`).
 fn hex() -> Result<(), String> {
-    let image = build()?.0.flash_image();
+    let firmware = build()?.0.flash_image();
+    let image = crc::sign(&firmware)?;
     write(&root().join(HEX), &ihex::encode(&image))?;
-    eprintln!("wrote {HEX} ({} bytes of flash)", image.len());
+    eprintln!(
+        "wrote {HEX} ({} bytes of firmware, padded to {} with its CRC at the end)",
+        firmware.len(),
+        image.len()
+    );
     Ok(())
 }
 

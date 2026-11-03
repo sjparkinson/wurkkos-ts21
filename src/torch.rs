@@ -250,7 +250,10 @@ mod tests {
 
     #[test]
     fn bad_fuses_leave_the_ui_working_on_the_linear_channel() {
-        let mut rig = Rig::with(Faults { fuses: true });
+        let mut rig = Rig::with(Faults {
+            fuses: true,
+            ..Faults::NONE
+        });
         rig.run(false, 3 * 64);
         assert_eq!(rig.level(), 0);
         // Level 50's on the linear channel, so on and off work as usual.

@@ -17,8 +17,9 @@
 //! for the cell (as the 0614 calibration reports it, 3.8 V to start), `temp:60C`
 //! for the MCU (25 °C to start), and `adc:0` for a broken ADC whose every
 //! conversion reads that number. So `cell:3.05V 1C wait:6s` is a low cell.
-//! `fuse:OSCCFG=0x01` sets a fuse byte, which the firmware only reads at
-//! power-on, so it has to come before anything that takes time.
+//! `fuse:OSCCFG=0x01` sets a fuse byte and `flash:corrupt` breaks a byte of
+//! flash, both of which the firmware only checks at power-on, so they have
+//! to come before anything that takes time.
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
@@ -63,13 +64,15 @@ pub enum Action {
     Adc(u16),
     /// A fuse byte, by its offset from FUSE.WDTCFG. Power-on only.
     Fuse { offset: u8, value: u8 },
+    /// A flash byte that doesn't match the CRC. Power-on only.
+    CorruptFlash,
 }
 
 impl Action {
     /// Whether it sets something the firmware only looks at once, at
     /// power-on, so it has to come before anything that takes time.
     fn power_on(self) -> bool {
-        matches!(self, Self::Fuse { .. })
+        matches!(self, Self::Fuse { .. } | Self::CorruptFlash)
     }
 
     /// Whether it takes time, rather than setting the scene.
@@ -97,6 +100,9 @@ impl FromStr for Action {
         }
         if let Some(setting) = word.strip_prefix("fuse:") {
             return fuse(setting);
+        }
+        if word == "flash:corrupt" {
+            return Ok(Self::CorruptFlash);
         }
         if let Some(raw) = word.strip_prefix("adc:") {
             let raw = raw
@@ -249,6 +255,10 @@ pub fn samples(actions: &[Action]) -> Vec<Sample> {
             }
             Action::Fuse { offset, value } => {
                 world.fuses[usize::from(offset)] = value;
+                continue;
+            }
+            Action::CorruptFlash => {
+                world.corrupt_flash = true;
                 continue;
             }
         };
@@ -651,10 +661,21 @@ mod tests {
     }
 
     #[test]
-    fn fuses_only_go_before_anything_that_takes_time() {
-        assert!(parse(&["cell:3.1V", "fuse:WDTCFG=0x0B", "1C"]).is_ok());
-        let err = parse(&["wait:1s", "fuse:WDTCFG=0x0B"]).unwrap_err();
-        assert!(err.contains("power-on"), "{err}");
+    fn fuses_and_flash_only_go_before_anything_that_takes_time() {
+        assert!(parse(&["cell:3.1V", "fuse:WDTCFG=0x0B", "flash:corrupt", "1C"]).is_ok());
+        for late in ["fuse:WDTCFG=0x0B", "flash:corrupt"] {
+            let err = parse(&["wait:1s", late]).unwrap_err();
+            assert!(err.contains("power-on"), "{err}");
+        }
+        assert!("flash:fine".parse::<Action>().is_err());
+    }
+
+    #[test]
+    fn corrupt_flash_shows_nothing_and_keeps_the_ui() {
+        let run = script("flash:corrupt wait:3s");
+        assert_eq!(run.level, 0);
+        assert!(run.lines.is_empty(), "{:?}", run.lines);
+        assert_eq!(script("flash:corrupt wait:3s 1C").level, 50);
     }
 
     #[test]

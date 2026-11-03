@@ -24,6 +24,13 @@ pub mod addr {
 
     pub const CLKCTRL_MCLKCTRLB: usize = 0x0061;
 
+    /// CRCSCAN.CTRLA: ENABLE starts a scan.
+    pub const CRCSCAN_CTRLA: usize = 0x0120;
+    /// CRCSCAN.CTRLB: SRC and MODE.
+    pub const CRCSCAN_CTRLB: usize = 0x0121;
+    /// CRCSCAN.STATUS: BUSY and OK.
+    pub const CRCSCAN_STATUS: usize = 0x0122;
+
     /// VREF.CTRLA: ADC0REFSEL picks the internal reference ADC0 uses or
     /// measures.
     pub const VREF_CTRLA: usize = 0x00A0;
@@ -196,6 +203,19 @@ pub const ADC_MUXPOS_TEMPSENSE: u8 = 0x1E;
 pub const ADC_STCONV: u8 = 0x01;
 /// ADC0.INTFLAGS.RESRDY.
 pub const ADC_RESRDY: u8 = 0x01;
+
+/// CRCSCAN.CTRLA.ENABLE: writing it starts a scan, even when it's already 1.
+pub const CRCSCAN_ENABLE: u8 = 0x01;
+/// CRCSCAN.CTRLB.SRC = FLASH, the whole of flash. The only choice with
+/// BOOTEND and APPEND at 0.
+pub const CRCSCAN_SRC_FLASH: u8 = 0x00;
+/// CRCSCAN.CTRLB.MODE = PRIORITY, the only mode: the CPU stalls until it's
+/// done.
+pub const CRCSCAN_MODE_PRIORITY: u8 = 0x00 << 4;
+/// CRCSCAN.STATUS.BUSY.
+pub const CRCSCAN_BUSY: u8 = 0x01;
+/// CRCSCAN.STATUS.OK. Reads 1 from reset, before any scan.
+pub const CRCSCAN_OK: u8 = 0x02;
 
 /// FUSE.OSCCFG.FREQSEL, the mask.
 pub const FUSE_FREQSEL: u8 = 0x03;
