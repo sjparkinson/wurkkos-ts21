@@ -174,7 +174,7 @@ fn unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// The vendored ATtiny1617 ATDF.
+/// The vendored ATtiny1616 ATDF.
 pub struct Atdf {
     root: Element,
 }
@@ -197,7 +197,7 @@ pub struct Register<'a> {
 
 impl Atdf {
     pub fn load() -> Atdf {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/attiny1617.atdf");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/ATtiny1616.atdf");
         let xml = fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
         Atdf { root: parse(&xml) }

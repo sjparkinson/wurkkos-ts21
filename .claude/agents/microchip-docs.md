@@ -21,7 +21,7 @@ The PDFs are gitignored (Microchip's licence doesn't allow redistributing them),
 
 - The datasheet (DS40002204A) is the reference for the part. The errata (DS80000886) override it: always check the errata for the peripheral in question and say so if it has an entry, even when nobody asked.
 - App notes cover several families and are often written against megaAVR or older tinyAVRs. Say which device an app note's claim was written for, and check it against the 1616 datasheet before calling it true here.
-- `vendor/attiny1617.atdf` is the authority for register addresses and bit masks, and the project's tests check against it. If the datasheet and ATDF disagree, report both and flag it; don't pick one silently.
+- `vendor/ATtiny1616.atdf` is the authority for register addresses and bit masks, and the project's tests check against it. If the datasheet and ATDF disagree, report both and flag it; don't pick one silently.
 - AVR104 (`AVR104A-buffered-eeprom-writes.pdf`, Atmel doc2540) predates the tinyAVR 1-series NVM controller. Its ideas carry over, its register names don't.
 
 ## Answering

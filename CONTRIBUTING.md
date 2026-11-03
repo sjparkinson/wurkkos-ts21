@@ -45,7 +45,7 @@ Keep logic in the library, where `cargo test` can reach it. `src/main.rs` should
 
 ## Registers
 
-There's no PAC. When you need a register, add its address or bitfield value to `src/regs.rs`, taken from the ATtiny1617 ATDF in `vendor/attiny1617.atdf` (same register map as the 1616), with a comment naming the register and bitfield. `src/hw.rs` uses the constant, not the number.
+There's no PAC. When you need a register, add its address or bitfield value to `src/regs.rs`, taken from the ATtiny1616 ATDF in `vendor/ATtiny1616.atdf`, with a comment naming the register and bitfield. `src/hw.rs` uses the constant, not the number.
 
 Then add a row for it to the tests in `xtask/src/atdf.rs`, which parse the ATDF and compare every constant in `src/regs.rs` against it. You can't forget: a constant no test reads is dead code in the xtask build, and clippy fails on it. The NVM and memory-map constants in `xtask/src/updi.rs` get the same check in that file's tests.
 

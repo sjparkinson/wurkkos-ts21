@@ -5,17 +5,33 @@
                        schema-version="4.5"
                        xsi:noNamespaceSchemaLocation="schema/atdf.xsd">
    <variants>
-      <variant ordercode="ATtiny1617-MFR"
-               package="VQFN24"
-               pinout="QFN24"
+      <variant ordercode="ATtiny1616-MFR"
+               package="VQFN20"
+               pinout="QFN20"
                speedmax="20000000"
                tempmax="125"
                tempmin="-40"
                vccmax="5.5"
                vccmin="1.8"/>
-      <variant ordercode="ATtiny1617-MNR"
-               package="VQFN24"
-               pinout="QFN24"
+      <variant ordercode="ATtiny1616-MNR"
+               package="VQFN20"
+               pinout="QFN20"
+               speedmax="20000000"
+               tempmax="105"
+               tempmin="-40"
+               vccmax="5.5"
+               vccmin="1.8"/>
+      <variant ordercode="ATtiny1616-SFR"
+               package="SOIC20"
+               pinout="SOIC20"
+               speedmax="20000000"
+               tempmax="125"
+               tempmin="-40"
+               vccmax="5.5"
+               vccmin="1.8"/>
+      <variant ordercode="ATtiny1616-SNR"
+               package="SOIC20"
+               pinout="SOIC20"
                speedmax="20000000"
                tempmax="105"
                tempmin="-40"
@@ -23,7 +39,7 @@
                vccmin="1.8"/>
    </variants>
    <devices>
-      <device architecture="AVR8X" family="AVR TINY" name="ATtiny1617">
+      <device architecture="AVR8X" family="AVR TINY" name="ATtiny1616">
          <address-spaces>
             <address-space endianness="little"
                            id="data"
@@ -120,7 +136,6 @@
                      <signal function="AC0" group="P" index="0" pad="PA7"/>
                      <signal function="AC0" group="P" index="1" pad="PB5"/>
                      <signal function="AC0" group="P" index="2" pad="PB1"/>
-                     <signal function="AC0" group="P" index="3" pad="PB6"/>
                   </signals>
                </instance>
                <instance name="AC1">
@@ -130,7 +145,6 @@
                                   offset="0x0688"/>
                   <signals>
                      <signal function="AC1" group="N" index="0" pad="PA5"/>
-                     <signal function="AC1" group="N" index="1" pad="PB7"/>
                      <signal function="AC1" group="OUT" index="0" pad="PB3"/>
                      <signal function="AC1" group="P" index="0" pad="PA7"/>
                      <signal function="AC1" group="P" index="1" pad="PA6"/>
@@ -145,12 +159,10 @@
                                   offset="0x0690"/>
                   <signals>
                      <signal function="AC2" group="N" index="0" pad="PA7"/>
-                     <signal function="AC2" group="N" index="1" pad="PB6"/>
                      <signal function="AC2" group="OUT" index="0" pad="PB2"/>
                      <signal function="AC2" group="P" index="0" pad="PA6"/>
                      <signal function="AC2" group="P" index="1" pad="PB0"/>
                      <signal function="AC2" group="P" index="2" pad="PB5"/>
-                     <signal function="AC2" group="P" index="3" pad="PB7"/>
                   </signals>
                </instance>
             </module>
@@ -185,14 +197,10 @@
                      <signal function="AIN1" group="AIN" index="1" pad="PA5"/>
                      <signal function="AIN1" group="AIN" index="2" pad="PA6"/>
                      <signal function="AIN1" group="AIN" index="3" pad="PA7"/>
-                     <signal function="AIN1" group="AIN" index="4" pad="PB7"/>
-                     <signal function="AIN1" group="AIN" index="5" pad="PB6"/>
                      <signal function="AIN1" group="AIN" index="6" pad="PC0"/>
                      <signal function="AIN1" group="AIN" index="7" pad="PC1"/>
                      <signal function="AIN1" group="AIN" index="8" pad="PC2"/>
                      <signal function="AIN1" group="AIN" index="9" pad="PC3"/>
-                     <signal function="AIN1" group="AIN" index="10" pad="PC4"/>
-                     <signal function="AIN1" group="AIN" index="11" pad="PC5"/>
                   </signals>
                </instance>
             </module>
@@ -215,8 +223,6 @@
                      <signal function="CCL" group="LUT0_IN" index="1" pad="PA1"/>
                      <signal function="CCL" group="LUT0_IN" index="2" pad="PA2"/>
                      <signal function="CCL" group="LUT1_IN" index="0" pad="PC3"/>
-                     <signal function="CCL" group="LUT1_IN" index="1" pad="PC4"/>
-                     <signal function="CCL" group="LUT1_IN" index="2" pad="PC5"/>
                      <signal field="PORTMUX.CTRLA.LUT0"
                              function="CCL"
                              group="LUT0_OUT"
@@ -265,10 +271,6 @@
                              function="BREAK"
                              group="BREAK"
                              pad="PA1"/>
-                     <signal field="PORTMUX.CTRLA.EXTBRK"
-                             function="BREAK_ALT"
-                             group="BREAK"
-                             pad="PC4"/>
                   </signals>
                   <parameters>
                      <param name="CORE_VERSION" value="V4"/>
@@ -391,16 +393,6 @@
                              group="EVAPB"
                              index="5"
                              pad="PB5"/>
-                     <signal field="EVSYS.ASYNCCH1.ASYNCCH1"
-                             function="EVAINCH1"
-                             group="EVAPB"
-                             index="6"
-                             pad="PB6"/>
-                     <signal field="EVSYS.ASYNCCH1.ASYNCCH1"
-                             function="EVAINCH1"
-                             group="EVAPB"
-                             index="7"
-                             pad="PB7"/>
                      <signal field="EVSYS.ASYNCCH2.ASYNCCH2"
                              function="EVAINCH2"
                              group="EVAPC"
@@ -421,16 +413,6 @@
                              group="EVAPC"
                              index="3"
                              pad="PC3"/>
-                     <signal field="EVSYS.ASYNCCH2.ASYNCCH2"
-                             function="EVAINCH2"
-                             group="EVAPC"
-                             index="4"
-                             pad="PC4"/>
-                     <signal field="EVSYS.ASYNCCH2.ASYNCCH2"
-                             function="EVAINCH2"
-                             group="EVAPC"
-                             index="5"
-                             pad="PC5"/>
                      <signal field="EVSYS.SYNCCH0.SYNCCH0"
                              function="EVSINCH0"
                              group="EVSPA"
@@ -491,16 +473,6 @@
                              group="EVSPC"
                              index="3"
                              pad="PC3"/>
-                     <signal field="EVSYS.SYNCCH0.SYNCCH0"
-                             function="EVSINCH0"
-                             group="EVSPC"
-                             index="4"
-                             pad="PC4"/>
-                     <signal field="EVSYS.SYNCCH0.SYNCCH0"
-                             function="EVSINCH0"
-                             group="EVSPC"
-                             index="5"
-                             pad="PC5"/>
                      <signal field="EVSYS.SYNCCH1.SYNCCH1"
                              function="EVSINCH1"
                              group="EVSPB"
@@ -531,16 +503,6 @@
                              group="EVSPB"
                              index="5"
                              pad="PB5"/>
-                     <signal field="EVSYS.SYNCCH1.SYNCCH1"
-                             function="EVSINCH1"
-                             group="EVSPB"
-                             index="6"
-                             pad="PB6"/>
-                     <signal field="EVSYS.SYNCCH1.SYNCCH1"
-                             function="EVSINCH1"
-                             group="EVSPB"
-                             index="7"
-                             pad="PB7"/>
                      <signal field="PORTMUX.CTRLA.EVOUT0"
                              function="EVSYS"
                              group="EVOUT"
@@ -620,8 +582,6 @@
                      <signal function="IOPORT" group="PIN" index="3" pad="PB3"/>
                      <signal function="IOPORT" group="PIN" index="4" pad="PB4"/>
                      <signal function="IOPORT" group="PIN" index="5" pad="PB5"/>
-                     <signal function="IOPORT" group="PIN" index="6" pad="PB6"/>
-                     <signal function="IOPORT" group="PIN" index="7" pad="PB7"/>
                   </signals>
                </instance>
                <instance name="PORTC">
@@ -634,8 +594,6 @@
                      <signal function="IOPORT" group="PIN" index="1" pad="PC1"/>
                      <signal function="IOPORT" group="PIN" index="2" pad="PC2"/>
                      <signal function="IOPORT" group="PIN" index="3" pad="PC3"/>
-                     <signal function="IOPORT" group="PIN" index="4" pad="PC4"/>
-                     <signal function="IOPORT" group="PIN" index="5" pad="PC5"/>
                   </signals>
                </instance>
             </module>
@@ -662,8 +620,6 @@
                      <signal function="PTC_X" group="X" index="7" pad="PC1"/>
                      <signal function="PTC_X" group="X" index="8" pad="PC2"/>
                      <signal function="PTC_X" group="X" index="9" pad="PC3"/>
-                     <signal function="PTC_X" group="X" index="10" pad="PC4"/>
-                     <signal function="PTC_X" group="X" index="11" pad="PC5"/>
                      <signal function="PTC_X" group="X" index="12" pad="PB5"/>
                      <signal function="PTC_X" group="X" index="13" pad="PB4"/>
                      <signal function="PTC_Y" group="Y" index="0" pad="PA4"/>
@@ -676,8 +632,6 @@
                      <signal function="PTC_Y" group="Y" index="7" pad="PC1"/>
                      <signal function="PTC_Y" group="Y" index="8" pad="PC2"/>
                      <signal function="PTC_Y" group="Y" index="9" pad="PC3"/>
-                     <signal function="PTC_Y" group="Y" index="10" pad="PC4"/>
-                     <signal function="PTC_Y" group="Y" index="11" pad="PC5"/>
                      <signal function="PTC_Y" group="Y" index="12" pad="PB5"/>
                      <signal function="PTC_Y" group="Y" index="13" pad="PB4"/>
                   </signals>
@@ -820,21 +774,11 @@
                              group="WO"
                              index="4"
                              pad="PA4"/>
-                     <signal field="PORTMUX.CTRLC.TCA04"
-                             function="TCA0_ALT"
-                             group="WO"
-                             index="4"
-                             pad="PC4"/>
                      <signal field="PORTMUX.CTRLC.TCA05"
                              function="TCA0"
                              group="WO"
                              index="5"
                              pad="PA5"/>
-                     <signal field="PORTMUX.CTRLC.TCA05"
-                             function="TCA0_ALT"
-                             group="WO"
-                             index="5"
-                             pad="PC5"/>
                   </signals>
                </instance>
             </module>
@@ -868,11 +812,6 @@
                              group="WO"
                              index="0"
                              pad="PA3"/>
-                     <signal field="PORTMUX.CTRLD.TCB1"
-                             function="TCB1_ALT"
-                             group="WO"
-                             index="0"
-                             pad="PC4"/>
                   </signals>
                </instance>
             </module>
@@ -1057,7 +996,7 @@
             <property-group name="SIGNATURES">
                <property name="SIGNATURE0" value="0x1E"/>
                <property name="SIGNATURE1" value="0x94"/>
-               <property name="SIGNATURE2" value="0x20"/>
+               <property name="SIGNATURE2" value="0x21"/>
             </property-group>
          </property-groups>
       </device>
@@ -1608,7 +1547,8 @@
                <bitfield caption="Clock Source Selection"
                          mask="0x40"
                          name="CLKSRC"
-                         rw="RW"/>
+                         rw="RW"
+                         values="CCL_CLKSRC"/>
                <bitfield caption="Edge Detection Enable"
                          mask="0x80"
                          name="EDGEDET"
@@ -1665,7 +1605,8 @@
                <bitfield caption="Clock Source Selection"
                          mask="0x40"
                          name="CLKSRC"
-                         rw="RW"/>
+                         rw="RW"
+                         values="CCL_CLKSRC"/>
                <bitfield caption="Edge Detection Enable"
                          mask="0x80"
                          name="EDGEDET"
@@ -1707,6 +1648,10 @@
                       rw="RW"
                       size="1"/>
          </register-group>
+         <value-group caption="Clock Source Selection" name="CCL_CLKSRC">
+            <value caption="CLK_PER is clocking the LUT" name="CLKPER" value="0x0"/>
+            <value caption="IN[2] is clocking the LUT" name="IN2" value="0x1"/>
+         </value-group>
          <value-group caption="Edge Detection Enable select" name="CCL_EDGEDET">
             <value caption="Edge detector is disabled" name="DIS" value="0x0"/>
             <value caption="Edge detector is enabled" name="EN" value="0x1"/>
@@ -3930,7 +3875,7 @@
             <register caption="Revision ID"
                       name="REVID"
                       offset="0x01"
-                      rw="RW"
+                      rw="R"
                       size="1"/>
             <register caption="External Break"
                       initval="0x00"
@@ -5928,7 +5873,7 @@
       </module>
    </modules>
    <pinouts>
-      <pinout name="QFN24">
+      <pinout name="QFN20">
          <pin pad="PA2" position="1"/>
          <pin pad="PA3" position="2"/>
          <pin pad="GND" position="3"/>
@@ -5937,22 +5882,40 @@
          <pin pad="PA5" position="6"/>
          <pin pad="PA6" position="7"/>
          <pin pad="PA7" position="8"/>
-         <pin pad="PB7" position="9"/>
-         <pin pad="PB6" position="10"/>
-         <pin pad="PB5" position="11"/>
-         <pin pad="PB4" position="12"/>
-         <pin pad="PB3" position="13"/>
-         <pin pad="PB2" position="14"/>
-         <pin pad="PB1" position="15"/>
-         <pin pad="PB0" position="16"/>
-         <pin pad="PC0" position="17"/>
-         <pin pad="PC1" position="18"/>
-         <pin pad="PC2" position="19"/>
-         <pin pad="PC3" position="20"/>
-         <pin pad="PC4" position="21"/>
-         <pin pad="PC5" position="22"/>
-         <pin pad="PA0" position="23"/>
-         <pin pad="PA1" position="24"/>
+         <pin pad="PB5" position="9"/>
+         <pin pad="PB4" position="10"/>
+         <pin pad="PB3" position="11"/>
+         <pin pad="PB2" position="12"/>
+         <pin pad="PB1" position="13"/>
+         <pin pad="PB0" position="14"/>
+         <pin pad="PC0" position="15"/>
+         <pin pad="PC1" position="16"/>
+         <pin pad="PC2" position="17"/>
+         <pin pad="PC3" position="18"/>
+         <pin pad="PA0" position="19"/>
+         <pin pad="PA1" position="20"/>
+      </pinout>
+      <pinout name="SOIC20">
+         <pin pad="VDD" position="1"/>
+         <pin pad="PA4" position="2"/>
+         <pin pad="PA5" position="3"/>
+         <pin pad="PA6" position="4"/>
+         <pin pad="PA7" position="5"/>
+         <pin pad="PB5" position="6"/>
+         <pin pad="PB4" position="7"/>
+         <pin pad="PB3" position="8"/>
+         <pin pad="PB2" position="9"/>
+         <pin pad="PB1" position="10"/>
+         <pin pad="PB0" position="11"/>
+         <pin pad="PC0" position="12"/>
+         <pin pad="PC1" position="13"/>
+         <pin pad="PC2" position="14"/>
+         <pin pad="PC3" position="15"/>
+         <pin pad="PA0" position="16"/>
+         <pin pad="PA1" position="17"/>
+         <pin pad="PA2" position="18"/>
+         <pin pad="PA3" position="19"/>
+         <pin pad="GND" position="20"/>
       </pinout>
    </pinouts>
 </avr-tools-device-file>
