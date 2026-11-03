@@ -116,29 +116,43 @@ fn hex() -> Result<(), String> {
     write(&root().join(HEX), &ihex::encode(&image))?;
     eprintln!("wrote {HEX}, padded to all of flash with its CRC at the end");
 
-    let flash = firmware.len() as u32;
-    let flash_size = map::FLASH_SIZE as u32;
-    let ram = elf.ram_bytes();
-    let ram_size = elf::RAM.end - elf::RAM.start;
+    let flash = firmware.len() as u64;
+    let ram = elf.ram_bytes().into();
+    let ram_size = (elf::RAM.end - elf::RAM.start).into();
     println!(
-        "flash {:>6} / {} bytes ({}%)",
-        commas(flash.into()),
-        commas(flash_size.into()),
-        flash * 100 / flash_size
+        "{}",
+        row("flash", flash, Some(map::FLASH_SIZE as u64), "bytes")
     );
     println!(
-        "ram   {:>6} / {} bytes ({}%), plus the stack",
-        commas(ram.into()),
-        commas(ram_size.into()),
-        ram * 100 / ram_size
+        "{}",
+        row("ram", ram, Some(ram_size), "bytes, plus the stack")
     );
-    println!("stack {:>6} bytes at most", commas(sim.stack.into()));
+    println!("{}", row("stack", sim.stack.into(), None, "bytes at most"));
     println!(
-        "loop  {:>6} instructions at most per 64 Hz tick (budget {})",
-        commas(sim.loop_instructions),
-        commas(sim.loop_budget)
+        "{}",
+        row(
+            "loop",
+            sim.loop_instructions,
+            Some(sim.loop_budget),
+            "instructions per 64 Hz tick, at most"
+        )
     );
     Ok(())
+}
+
+/// One line of the size report, in columns: used, out of, percent, unit.
+fn row(label: &str, used: u64, of: Option<u64>, unit: &str) -> String {
+    let (of, percent) = match of {
+        Some(of) => (
+            format!("/ {:>6}", commas(of)),
+            format!("{:>3}%", used * 100 / of),
+        ),
+        None => (String::new(), String::new()),
+    };
+    format!(
+        "{label:<5} {:>6} {of:<8} {percent:>4}  {unit}",
+        commas(used)
+    )
 }
 
 /// `39062` as `39,062`.
@@ -286,7 +300,19 @@ fn run(command: &mut Command) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::commas;
+    use super::{commas, row};
+
+    #[test]
+    fn rows_line_up_with_and_without_a_total() {
+        assert_eq!(
+            row("flash", 3978, Some(16384), "bytes"),
+            "flash  3,978 / 16,384  24%  bytes"
+        );
+        assert_eq!(
+            row("stack", 107, None, "bytes at most"),
+            "stack    107                bytes at most"
+        );
+    }
 
     #[test]
     fn commas_group_thousands() {
