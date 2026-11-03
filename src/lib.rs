@@ -11,6 +11,8 @@ pub mod button;
 pub mod gradual;
 pub mod limits;
 pub mod ramp;
+pub mod regs;
+pub mod selftest;
 pub mod sensors;
 pub mod temp;
 #[cfg(any(test, feature = "testing"))]

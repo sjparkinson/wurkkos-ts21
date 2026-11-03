@@ -17,6 +17,7 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 use ts21::ramp::{Output, PWM_TOP};
+use ts21::selftest::Fuses;
 use ts21::sensors::{Channel, Convert};
 use ts21::temp::Calibration;
 
@@ -294,6 +295,18 @@ pub fn temperature_calibration() -> Calibration {
     Calibration {
         offset: read(reg::SIGROW_TEMPSENSE1) as i8,
         gain: read(reg::SIGROW_TEMPSENSE0),
+    }
+}
+
+/// The fuse bytes `selftest::Fuses::ok` checks, read from data space. This
+/// only ever reads them.
+pub fn fuses() -> Fuses {
+    Fuses {
+        wdtcfg: read(reg::FUSE_WDTCFG),
+        osccfg: read(reg::FUSE_OSCCFG),
+        syscfg0: read(reg::FUSE_SYSCFG0),
+        append: read(reg::FUSE_APPEND),
+        bootend: read(reg::FUSE_BOOTEND),
     }
 }
 

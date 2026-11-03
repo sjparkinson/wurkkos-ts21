@@ -27,6 +27,7 @@ src/battery.rs    battery readings to centivolts, and low-voltage protection
 src/thermal.rs    temperatures in, a ceiling on the level out
 src/sensors.rs    which ADC channel to read each tick, and when a reading's due
 src/limits.rs     ADC readings in, the UI's level capped by the cell and the heat out
+src/selftest.rs   the power-on self-tests' rules, and what a failure means
 src/ui.rs         the state machine docs/ui.md describes
 src/torch.rs      one pass of the firmware loop: switch sample and ADC result in, level out
 src/watchdog.rs   the watchdog's window, and which ticks feed it

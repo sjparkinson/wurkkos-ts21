@@ -16,10 +16,14 @@
 //! power-on takes the temperature too, light on or not. If any of them is
 //! garbage, the light gives one short dim blink from off, so a bad ADC setup
 //! shows without a debugger.
+//!
+//! A failed power-on self-test (`selftest::Faults`) caps the light at the
+//! top of the linear channel for as long as the cell's in.
 
 use crate::battery::{self, Protection, Verdict};
 use crate::gradual::Gradual;
-use crate::ramp::LEVELS;
+use crate::ramp::{LEVELS, LINEAR_MAX};
+use crate::selftest::Faults;
 use crate::sensors::{Convert, Reading, Schedule};
 use crate::temp::Calibration;
 use crate::thermal::{self, Thermal};
@@ -65,11 +69,15 @@ pub struct Limits {
     /// Ticks of diagnostic blink left.
     blink: u8,
     convert: Option<Convert>,
+    /// The highest level the power-on self-tests allow: all of them, or the
+    /// top of the linear channel if one failed.
+    cap: u8,
 }
 
 impl Limits {
     /// `calibration` is the chip's own, from the signature row.
-    pub const fn new(calibration: Calibration) -> Self {
+    /// `faults` is what the power-on self-tests found.
+    pub const fn new(calibration: Calibration, faults: Faults) -> Self {
         Self {
             schedule: Schedule::new(),
             calibration,
@@ -83,6 +91,7 @@ impl Limits {
             suspect: false,
             blink: 0,
             convert: None,
+            cap: if faults.any() { LINEAR_MAX } else { LEVELS },
         }
     }
 
@@ -114,6 +123,7 @@ impl Limits {
         // last tick's level while the UI holds steady, and the UI's on the
         // tick it turns on. The blink isn't a load worth judging the cell
         // by, so it counts as off.
+        let ui = ui.min(self.cap);
         let level = match on {
             true => ui.min(self.thermal.ceiling()).min(self.battery.level()),
             false => 0,
@@ -203,8 +213,13 @@ mod tests {
 
     impl Run {
         fn new() -> Self {
+            Self::with(Faults::NONE)
+        }
+
+        /// After power-on self-tests that found `faults`.
+        fn with(faults: Faults) -> Self {
             Self {
-                limits: Limits::new(CALIBRATION),
+                limits: Limits::new(CALIBRATION, faults),
                 adc: Adc::new(),
                 ui: 0,
                 uis: Vec::new(),
@@ -409,7 +424,7 @@ mod tests {
 
     #[test]
     fn no_result_at_all_is_garbage_too() {
-        let mut limits = Limits::new(CALIBRATION);
+        let mut limits = Limits::new(CALIBRATION, Faults::NONE);
         for _ in 0..30 * TICKS_PER_SECOND {
             limits.tick(LEVELS, None);
         }
@@ -492,5 +507,50 @@ mod tests {
         assert_eq!(run.ticks(1), 0);
         run.secs(2);
         assert!(run.levels.iter().rev().take(128).all(|&l| l == 0));
+    }
+
+    const FUSES: Faults = Faults { fuses: true };
+
+    #[test]
+    fn a_failed_self_test_refuses_the_fet_for_good() {
+        let mut run = Run::with(FUSES);
+        run.secs(3);
+        run.ui = LEVELS;
+        assert_eq!(run.secs(600), LINEAR_MAX);
+        assert!(run.levels.iter().all(|&l| l <= LINEAR_MAX));
+        // Off and on again doesn't clear it; only a power cycle with good
+        // fuses and flash does.
+        run.ui = 0;
+        run.secs(1);
+        run.ui = LEVELS;
+        assert_eq!(run.ticks(1), LINEAR_MAX);
+        assert_eq!(run.offs, 0);
+    }
+
+    #[test]
+    fn a_failed_self_test_leaves_the_linear_channel_alone() {
+        let mut run = Run::with(FUSES);
+        run.secs(3);
+        for ui in [1, 50, LINEAR_MAX] {
+            run.ui = ui;
+            assert_eq!(run.secs(10), ui);
+        }
+    }
+
+    #[test]
+    fn a_failed_self_test_still_lets_the_battery_turn_it_off() {
+        let mut run = Run::with(FUSES);
+        run.adc.voltage = voltage_reading(290);
+        run.ui = LEVELS;
+        run.secs(10);
+        assert_eq!(run.offs, 1);
+        assert!(run.levels.iter().all(|&l| l <= LINEAR_MAX));
+    }
+
+    #[test]
+    fn a_failed_self_test_shows_nothing_from_off() {
+        let mut run = Run::with(FUSES);
+        assert_eq!(run.secs(10), 0);
+        assert!(run.levels.iter().all(|&l| l == 0));
     }
 }

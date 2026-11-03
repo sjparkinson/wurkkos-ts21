@@ -10,8 +10,10 @@
 
 #[cfg(target_arch = "avr")]
 mod hw;
+// The library owns src/regs.rs, since its self-tests check fuse fields with
+// the same masks; hw.rs and rt.rs reach it as `crate::regs`.
 #[cfg(target_arch = "avr")]
-mod regs;
+use ts21::regs;
 #[cfg(target_arch = "avr")]
 mod rt;
 
@@ -22,13 +24,20 @@ mod rt;
 extern "C" fn main() -> ! {
     use ts21::{
         ramp,
+        selftest::Faults,
         torch::{Changes, Torch},
         watchdog::Feeder,
     };
 
+    // The self-tests come before anything's turned on. A failure doesn't
+    // stop the torch, it quietly refuses the FET (src/selftest.rs).
+    let faults = Faults {
+        fuses: !hw::fuses().ok(),
+    };
+
     hw::init();
 
-    let mut torch = Torch::new(hw::temperature_calibration());
+    let mut torch = Torch::new(hw::temperature_calibration(), faults);
     let mut changes = Changes::new();
     let mut feeder = Feeder::new();
 
