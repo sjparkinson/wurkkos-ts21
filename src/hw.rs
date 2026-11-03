@@ -9,7 +9,7 @@
 //! | PA5 | Side switch, active low, pulled up    |
 //! | PB0 | FET channel, TCA0 WO0                 |
 //! | PB1 | Linear (7135) channel, TCA0 WO1       |
-//! | PB5 | Aux / button LED                      |
+//! | PB5 | Amber button LED, lit by the pull-up  |
 
 #![allow(unsafe_code)]
 
@@ -29,8 +29,14 @@ const LINEAR: u8 = 1; // PB1
 const AUX: u8 = 5; // PB5
 
 /// The PORTB pins we drive. PORTB has PB0 to PB5 on the 20-pin package.
-const PORTB_OUTPUTS: u8 = 1 << FET | 1 << LINEAR | 1 << AUX;
+const PORTB_OUTPUTS: u8 = 1 << FET | 1 << LINEAR;
 const PORTB_PINS: u8 = 6;
+
+// The amber button LED stays on, dimly, whenever there's a cell in. PB5 is
+// an input with its pull-up on, like every other pin we don't drive, and
+// the pull-up's trickle through the LED is enough to see it. That's
+// Anduril's low aux setting. Driving the pin high would cost milliamps.
+const _: () = assert!(PORTB_OUTPUTS & 1 << AUX == 0);
 
 /// WDT clocks in a WDT.CTRLA WINDOW or PERIOD setting `n`, 1 to 11.
 const fn wdt_clocks(n: u8) -> u16 {
@@ -155,7 +161,8 @@ pub fn init() {
     );
     while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
 
-    // Pull every pin we don't drive up, so nothing floats and leaks current.
+    // Pull every pin we don't drive up, so nothing floats and leaks current,
+    // and so the button LED on PB5 lights.
     for pin in 0..8 {
         let ctrl = match pin {
             SWITCH => regs::PORT_PULLUPEN | regs::PORT_ISC_BOTHEDGES,
