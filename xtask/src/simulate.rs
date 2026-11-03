@@ -760,6 +760,8 @@ mod tests {
     fn broken_ram_or_registers_leave_it_dark() {
         for script_text in [
             "ram:stuck:0x3800.3=1 wait:3s 1C wait:1s",
+            "ram:alias:0x3900=0x3800 1C wait:2s",
+            "ram:bridge:0x3C00.0.1 1C wait:2s",
             "reg:r24.0=1 1C 2H wait:1s",
         ] {
             let run = script(script_text);

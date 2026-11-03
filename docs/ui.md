@@ -1,6 +1,6 @@
 # The UI
 
-What every click and hold does. This is the spec. `src/ui.rs` implements the clicks and `src/limits.rs` the low battery, the heat and what a failed self-test does, and their tests check it, so change this file in the same commit as the code.
+What every click and hold does. This is the spec. `src/ui.rs` implements the clicks and `src/limits.rs` the low battery, the heat and what a failed flash or fuse check does, and their tests check it. A failed register or RAM test is `src/rt.rs`'s, and the simulator checks that, so change this file in the same commit as the code.
 
 The notation is Anduril's. **1C** is one click, **1H** press and hold, and so on. Clicks count once the switch has been left alone for about 280 ms.
 
@@ -49,7 +49,7 @@ The thresholds and the 0614 voltage calibration are a starting point, not measur
 
 Before it turns anything on, the firmware checks flash against the CRC that `cargo xtask hex` stores in its last two bytes, and reads its fuses back (`src/selftest.rs` has which fields and why). It never writes them. A failure doesn't leave a dead torch: the light quietly refuses the FET until the cell comes out, and does everything else as usual, low-voltage protection included.
 
-Before any of that, before memory's even set up, it tests every CPU register and all of RAM (`src/rt.rs` has how, after AN2632 §5 and §9.2). Those failures are different. The Rust code that caps the light can't be trusted on a chip with broken RAM or registers, so the firmware stops there for good, with the FET and linear pins held low. Nothing responds, and the button LED stays dark too, which is how to tell it from a torch that's only off. It's most likely a damaged chip. Taking the cell out and putting it back runs the tests again.
+Before any of that, before memory's even set up, it tests r0 to r31, SREG, the stack pointer and all of RAM (`src/rt.rs` has how, after AN2632 §3.1, §5 and §9.2). Those failures are different. The Rust code that caps the light can't be trusted on a chip with broken RAM or registers, so the firmware stops there for good, with the FET and linear pins held low. Nothing responds, and the button LED stays dark too, which is how to tell it from a torch that's only off. It's most likely a damaged chip. Taking the cell out and putting it back runs the tests again. The library never runs on a chip like that, so `cargo test` only checks these rows' scripts parse and play dead; the real test is `cargo xtask hex`, which runs them on the simulated chip and also sweeps every stuck register bit and a spread of RAM faults (`startup_faults` in `xtask/src/sim.rs`).
 
 The examples break a byte of flash with `flash:corrupt`, and set a fuse byte with `fuse:OSCCFG=0x01`, using the datasheet's names. `ram:stuck:0x3800.3=1` sticks bit 3 of 0x3800 high, `ram:alias:0x3900=0x3800` sends 0x3900 to 0x3800's byte, `ram:bridge:0x3C00.0.1` shorts two bits of a byte together, and `reg:r24.0=1` sticks bit 0 of r24 high. The firmware only checks them at power-on, so they go before anything that takes time.
 

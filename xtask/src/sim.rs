@@ -474,12 +474,9 @@ fn ui_example(
         }
         Boot::Main => in_step(sim, samples, report)?,
         Boot::Failed => {
+            // A dead rig ignores every tick, so its level is where it starts.
             stays_dark(&mut sim)?;
-            let mut rig = Rig::new(&world);
-            for sample in &samples {
-                rig.tick(sample.pressed, &sample.world);
-            }
-            rig.level()
+            Rig::new(&world).level()
         }
     };
     if example.expect.holds(level) {
