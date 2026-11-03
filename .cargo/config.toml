@@ -2,7 +2,7 @@
 # Build the firmware ELF: target/avr-none/release/wurkkos-ts21-0614.elf
 fw = "build --package ts21 --release --target avr-none -Zbuild-std=core"
 # Lint the firmware as the AVR sees it (the host only sees the stub main).
-fw-clippy = "clippy --package ts21 --release --target avr-none -Zbuild-std=core -- -D warnings"
+clippy-fw = "clippy --package ts21 --release --target avr-none -Zbuild-std=core -- -D warnings"
 # Hex conversion, size report, flashing and backups. See xtask/src/main.rs.
 xtask = "run --quiet --package xtask --"
 

@@ -46,7 +46,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: cargo fw-clippy
+      - run: cargo clippy-fw
       - run: cargo xtask size
       - run: cargo xtask hex
 

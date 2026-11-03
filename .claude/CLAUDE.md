@@ -9,13 +9,13 @@ cargo fmt --check                                          # formatting, as CI r
 cargo test --workspace --locked -q                         # host tests, run these constantly
 cargo clippy --workspace --all-targets --locked -- -D warnings   # host lints
 cargo fw                                                   # firmware ELF
-cargo fw-clippy                                            # lint hw.rs and rt.rs, which the host never compiles
+cargo clippy-fw                                            # lint hw.rs and rt.rs, which the host never compiles
 cargo xtask size                                           # flash/RAM use, after any firmware change
 ```
 
 CONTRIBUTING.md lists every check CI runs. Plain `cargo test` only tests the root package, so always pass `--workspace`.
 
-`cargo fw`, `fw-clippy` and the xtask commands rebuild `core` with `-Zbuild-std`. The first run on a machine fetches crates from crates.io and writes to `~/.cargo` and `~/.rustup`, which the sandbox may block. If it does, rerun outside the sandbox; nothing else in this repo needs that.
+`cargo fw`, `clippy-fw` and the xtask commands rebuild `core` with `-Zbuild-std`. The first run on a machine fetches crates from crates.io and writes to `~/.cargo` and `~/.rustup`, which the sandbox may block. If it does, rerun outside the sandbox; nothing else in this repo needs that.
 
 ## Agents
 

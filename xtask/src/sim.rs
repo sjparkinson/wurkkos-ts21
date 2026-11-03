@@ -114,7 +114,7 @@ const PIT_SYNC_READS: u8 = 2;
 /// `PIT_SYNC_READS`.
 const WDT_SYNC_READS: u8 = 2;
 /// WDT.STATUS.LOCK. Only the simulator needs it (to refuse it), so it isn't
-/// in regs.rs, where an unused constant fails `cargo fw-clippy`. atdf.rs
+/// in regs.rs, where an unused constant fails `cargo clippy-fw`. atdf.rs
 /// checks it.
 pub(crate) const WDT_LOCK: u8 = 0x80;
 /// WDT.CTRLA.PERIOD's mask, and its largest value, 8KCLK. atdf.rs checks both.
