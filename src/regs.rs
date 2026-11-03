@@ -79,6 +79,18 @@ pub mod addr {
     pub const SIGROW_TEMPSENSE0: usize = 0x1120;
     /// SIGROW.TEMPSENSE1: the temperature sensor's offset, signed.
     pub const SIGROW_TEMPSENSE1: usize = 0x1121;
+
+    // Interrupts and sleep.
+
+    /// GPIO.GPIOR0, a general-purpose byte in the I/O space, which the
+    /// tick interrupt uses as its flag.
+    pub const GPIO_GPIOR0: usize = 0x001C;
+    /// SLPCTRL.CTRLA: SEN and SMODE.
+    pub const SLPCTRL_CTRLA: usize = 0x0050;
+    /// RTC.PITINTCTRL: PI enables the PIT's interrupt.
+    pub const RTC_PITINTCTRL: usize = 0x0152;
+    /// PORTA.INTFLAGS: a pin-change flag per pin, cleared by writing 1.
+    pub const PORTA_INTFLAGS: usize = 0x0409;
 }
 
 /// CPU.CCP: the key that unlocks I/O registers behind configuration change
@@ -122,7 +134,7 @@ pub const RTC_PITEN: u8 = 0x01;
 pub const RTC_PERIOD_CYC512: u8 = 0x08 << 3;
 /// RTC.PITSTATUS.CTRLBUSY.
 pub const RTC_CTRLBUSY: u8 = 0x01;
-/// RTC.PITINTFLAGS.PI.
+/// RTC.PITINTFLAGS.PI, and RTC.PITINTCTRL.PI, its enable, at the same bit.
 pub const RTC_PI: u8 = 0x01;
 
 /// VREF.CTRLA.ADC0REFSEL = 1V1, for the temperature sensor.
@@ -173,3 +185,16 @@ pub const ADC_RESRDY: u8 = 0x01;
 
 /// Entries in the vector table: reset plus 30 interrupts.
 pub const VECTORS: usize = 31;
+
+/// PORTx.INTFLAGS.INT, every pin's flag. Writing it clears them all.
+pub const PORT_INT_ALL: u8 = 0xFF;
+/// SLPCTRL.CTRLA.SEN: `sleep` sleeps. Clear, it does nothing.
+pub const SLPCTRL_SEN: u8 = 0x01;
+/// SLPCTRL.CTRLA.SMODE = IDLE: only the CPU and flash stop.
+pub const SLPCTRL_SMODE_IDLE: u8 = 0x0 << 1;
+
+/// Vector numbers, from the ATDF's `<interrupts>`. PORTA.PORT, PORTA's
+/// pin-change interrupt.
+pub const VECTOR_PORTA_PORT: usize = 3;
+/// RTC.PIT, the periodic interrupt timer.
+pub const VECTOR_RTC_PIT: usize = 7;

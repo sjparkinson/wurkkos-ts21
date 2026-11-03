@@ -248,6 +248,17 @@ impl Atdf {
             + 1
     }
 
+    /// The vector number of `instance`'s interrupt `name`, such as
+    /// `vector("RTC", "PIT")`.
+    pub fn vector(&self, instance: &str, name: &str) -> u32 {
+        self.device()
+            .child("interrupts")
+            .all("interrupt")
+            .find(|i| i.attr("module-instance") == Some(instance) && i.attr("name") == Some(name))
+            .unwrap_or_else(|| panic!("no interrupt {instance}.{name}"))
+            .num("index")
+    }
+
     /// `register("TCA0", Some("SINGLE"), "CTRLA")` is TCA0.CTRLA in single
     /// mode. Pass a mode only for modules that have them.
     pub fn register(&self, instance: &str, mode: Option<&str>, name: &str) -> Register<'_> {
@@ -397,6 +408,11 @@ mod tests {
                 "TEMPSENSE1",
                 1,
             ),
+            // Interrupts and sleep.
+            (regs::addr::GPIO_GPIOR0, "GPIO", None, "GPIOR0", 1),
+            (regs::addr::SLPCTRL_CTRLA, "SLPCTRL", None, "CTRLA", 1),
+            (regs::addr::RTC_PITINTCTRL, "RTC", None, "PITINTCTRL", 1),
+            (regs::addr::PORTA_INTFLAGS, "PORTA", None, "INTFLAGS", 1),
         ] {
             let (address, theirs) = at(instance, mode, name);
             assert!(
@@ -603,6 +619,28 @@ mod tests {
                 adc_intflags.mask("RESRDY"),
                 "ADC0.INTFLAGS.RESRDY",
             ),
+            // Interrupts and sleep.
+            (
+                regs::RTC_PI,
+                atdf.register("RTC", None, "PITINTCTRL").mask("PI"),
+                "RTC.PITINTCTRL.PI",
+            ),
+            (
+                regs::PORT_INT_ALL,
+                atdf.register("PORTA", None, "INTFLAGS").mask("INT"),
+                "PORT.INTFLAGS.INT",
+            ),
+            (
+                regs::SLPCTRL_SEN,
+                atdf.register("SLPCTRL", None, "CTRLA").mask("SEN"),
+                "SLPCTRL.CTRLA.SEN",
+            ),
+            (
+                regs::SLPCTRL_SMODE_IDLE,
+                atdf.register("SLPCTRL", None, "CTRLA")
+                    .value("SMODE", "IDLE"),
+                "SLPCTRL.CTRLA.SMODE=IDLE",
+            ),
         ] {
             assert!(
                 u32::from(ours) == theirs,
@@ -614,6 +652,23 @@ mod tests {
     #[test]
     fn vector_count_matches_the_atdf() {
         assert_eq!(regs::VECTORS as u32, Atdf::load().vectors());
+    }
+
+    #[test]
+    fn vector_numbers_match_the_atdf() {
+        let atdf = Atdf::load();
+        for (ours, instance, name) in [
+            (regs::VECTOR_PORTA_PORT, "PORTA", "PORT"),
+            (regs::VECTOR_RTC_PIT, "RTC", "PIT"),
+            (crate::sim::VECTOR_PORTB_PORT, "PORTB", "PORT"),
+            (crate::sim::VECTOR_PORTC_PORT, "PORTC", "PORT"),
+        ] {
+            assert_eq!(
+                ours as u32,
+                atdf.vector(instance, name),
+                "{instance}.{name}"
+            );
+        }
     }
 
     #[test]
@@ -775,5 +830,24 @@ mod tests {
             let theirs = atdf.register("CPU", None, name).address;
             assert_eq!(u32::from(ours), theirs, "CPU.{name}");
         }
+    }
+
+    #[test]
+    fn simulator_pin_sense_values_match_the_atdf() {
+        use crate::sim;
+        let atdf = Atdf::load();
+        let pinctrl = atdf.register("PORTA", None, "PIN0CTRL");
+        assert_eq!(u32::from(sim::ISC), pinctrl.mask("ISC"), "ISC mask");
+        for (ours, name) in [
+            (sim::ISC_INTDISABLE, "INTDISABLE"),
+            (sim::ISC_BOTHEDGES, "BOTHEDGES"),
+            (sim::ISC_RISING, "RISING"),
+            (sim::ISC_FALLING, "FALLING"),
+            (sim::ISC_INPUT_DISABLE, "INPUT_DISABLE"),
+            (sim::ISC_LEVEL, "LEVEL"),
+        ] {
+            assert_eq!(u32::from(ours), pinctrl.value("ISC", name), "ISC={name}");
+        }
+        assert_eq!(u32::from(sim::PORT_INVEN), pinctrl.mask("INVEN"), "INVEN");
     }
 }

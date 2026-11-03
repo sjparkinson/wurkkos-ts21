@@ -51,4 +51,4 @@ The thresholds and the 0614 voltage calibration are a starting point, not measur
 |---|---|---|
 | Sleep when off | Powers down and wakes on the switch, so the light can sit in a drawer for a year | Planned |
 
-Until sleep is in, this isn't firmware to carry: it busy-waits with the CPU awake and drains the cell in days. See the [roadmap](roadmap.md).
+Until it powers down when off, this isn't firmware to carry. It idle-sleeps between ticks, on or off, which the datasheet puts at 1.1 mA typical at 10 MHz and 3 V against 3.1 mA awake (DS40002204A table 36-4), before the timer, the ADC's reference and the rest of the driver, so it still drains the cell in months. See the [roadmap](roadmap.md).
