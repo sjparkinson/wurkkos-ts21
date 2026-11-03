@@ -28,9 +28,10 @@
 //!   clock), and then reads the scripted world (`world.rs`). Starting a
 //!   conversion mid-conversion, changing its setup mid-conversion, reading
 //!   RES before RESRDY or its high byte first are errors. The first
-//!   conversion after a change of reference or input reads 0, so a firmware
-//!   that stopped throwing it away would blink at power-on and part company
-//!   with the library.
+//!   conversion after a change of reference or input reads 0, which the
+//!   firmware throws away. One that didn't would see garbage the library
+//!   never does and cap itself at level 75, which only shows against the
+//!   library once the UI goes above that.
 //! - SIGROW.TEMPSENSE0 and 1 hold `world::CALIBRATION`.
 //! - The fuses read as the world's (`world::FACTORY_FUSES` unless a script
 //!   says otherwise), and writing any of them is an error.
@@ -738,8 +739,8 @@ const CONVERSION_INSTRUCTIONS: u64 = 1_000;
 /// What the first conversion after a change of reference or input reads.
 /// The datasheet doesn't promise it's wrong, but Anduril finds it unstable,
 /// so the model makes it as wrong as it gets. The firmware throws it away;
-/// if it ever stopped, the power-on blink would give it away against the
-/// library, which never sees this.
+/// if it ever stopped, the garbage would cap it at level 75, which the
+/// in-step check only catches once the UI goes above that.
 const UNSETTLED: u16 = 0;
 
 /// CPU cycles a second, from `hw::init`'s clock setup.

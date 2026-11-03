@@ -12,11 +12,6 @@
 //! go, and then drops its ceiling to the top of the linear channel rather
 //! than trusting it or turning the light off.
 //!
-//! As a diagnostic for the first flash, the first round of readings after
-//! power-on takes the temperature too, light on or not. If any of them is
-//! garbage, the light gives one short dim blink from off, so a bad ADC setup
-//! shows without a debugger.
-//!
 //! A failed power-on self-test (`selftest::Faults`) caps the light at the
 //! top of the linear channel for as long as the cell's in.
 
@@ -27,11 +22,6 @@ use crate::selftest::Faults;
 use crate::sensors::{Convert, Reading, Schedule};
 use crate::temp::Calibration;
 use crate::thermal::{self, Thermal};
-
-/// The level of the power-on diagnostic blink: dim, on the linear channel.
-pub const BLINK_LEVEL: u8 = 20;
-/// How long it lasts: a quarter of a second.
-pub const BLINK_TICKS: u8 = 16;
 
 /// Ticks per level as the battery ceiling fades down, and back up. Down is a
 /// level a tick, quicker than thermal's, since the cell's already under its
@@ -62,12 +52,6 @@ pub struct Limits {
     on: bool,
     /// The level the light's at, as of the last tick.
     level: u8,
-    /// True until the first temperature reading's in.
-    first: bool,
-    /// Whether anything in the first round was garbage.
-    suspect: bool,
-    /// Ticks of diagnostic blink left.
-    blink: u8,
     convert: Option<Convert>,
     /// The highest level the power-on self-tests allow: all of them, or the
     /// top of the linear channel if one failed.
@@ -87,9 +71,6 @@ impl Limits {
             thermal: Thermal::new(thermal::Config::DEFAULT),
             on: false,
             level: 0,
-            first: true,
-            suspect: false,
-            blink: 0,
             convert: None,
             cap: if faults.any() { LINEAR_MAX } else { LEVELS },
         }
@@ -121,21 +102,19 @@ impl Limits {
         self.on = on;
         // The level the light's at this tick, before the ceilings move. It's
         // last tick's level while the UI holds steady, and the UI's on the
-        // tick it turns on. The blink isn't a load worth judging the cell
-        // by, so it counts as off.
+        // tick it turns on.
         let ui = ui.min(self.cap);
         let level = match on {
             true => ui.min(self.thermal.ceiling()).min(self.battery.level()),
             false => 0,
         };
 
-        let (reading, convert) = self.schedule.tick(result, on || self.first);
+        let (reading, convert) = self.schedule.tick(result, on);
         self.convert = convert;
         let mut off = false;
         match reading {
             Some(Reading::Voltage(raw)) => {
                 let centivolts = battery::centivolts(raw);
-                self.diagnose(battery::plausible(centivolts));
                 match self.protection.sample(centivolts, level) {
                     Verdict::Off => off = true,
                     Verdict::Ceiling(ceiling) => self.battery_ceiling(ceiling, level),
@@ -143,11 +122,6 @@ impl Limits {
             }
             Some(Reading::Temperature(raw)) => {
                 let kelvin = self.calibration.kelvin(raw);
-                self.diagnose(thermal::plausible(kelvin));
-                if self.first && self.suspect && !on {
-                    self.blink = BLINK_TICKS;
-                }
-                self.first = false;
                 if on {
                     self.thermal.sample(kelvin, level);
                 }
@@ -158,11 +132,7 @@ impl Limits {
         let thermal = self.thermal.tick();
         let battery = self.battery.tick(self.battery_target);
         self.level = if on && !off {
-            self.blink = 0;
             ui.min(thermal).min(battery)
-        } else if self.blink > 0 {
-            self.blink -= 1;
-            BLINK_LEVEL
         } else {
             0
         };
@@ -181,12 +151,6 @@ impl Limits {
             self.battery.cap(level.max(ceiling));
         }
         self.battery_target = ceiling;
-    }
-
-    /// Notes whether a reading in the first round made sense, for the
-    /// power-on blink.
-    fn diagnose(&mut self, plausible: bool) {
-        self.suspect |= self.first && !plausible;
     }
 }
 
@@ -270,7 +234,7 @@ mod tests {
     #[test]
     fn a_good_cell_and_a_cool_head_leave_the_ui_alone() {
         let mut run = Run::new();
-        assert_eq!(run.secs(1), 0, "no blink with good readings");
+        assert_eq!(run.secs(1), 0, "dark from off");
         for ui in [1, 50, LINEAR_MAX, LEVELS] {
             run.ui = ui;
             assert_eq!(run.secs(60), ui);
@@ -432,19 +396,22 @@ mod tests {
     }
 
     #[test]
-    fn the_temperature_is_only_read_on_or_at_power_on() {
+    fn the_temperature_is_only_read_while_on() {
         let mut run = Run::new();
-        let mut temperatures = 0;
-        for tick in 0..60 * TICKS_PER_SECOND {
+        let reads = |run: &Run| {
+            run.limits.convert().map(|c| c.channel) == Some(crate::sensors::Channel::Temperature)
+        };
+        for _ in 0..60 * TICKS_PER_SECOND {
             run.tick();
-            let reads = run.limits.convert().map(|c| c.channel)
-                == Some(crate::sensors::Channel::Temperature);
-            if reads {
-                assert!(tick < 16, "tick {tick}");
-                temperatures += 1;
-            }
+            assert!(!reads(&run), "off");
         }
-        assert_eq!(temperatures, 2, "a setup and the real one");
+        run.ui = 50;
+        let mut temperatures = 0;
+        for _ in 0..TICKS_PER_SECOND {
+            run.tick();
+            temperatures += u32::from(reads(&run));
+        }
+        assert!(temperatures > 0, "on");
     }
 
     #[test]
@@ -463,50 +430,18 @@ mod tests {
     }
 
     #[test]
-    fn garbage_at_power_on_blinks_once_dimly() {
+    fn garbage_from_power_on_shows_nothing_from_off() {
         for (voltage, temperature) in [(0, 531), (1731, 0), (0, 0), (4 * 1023, 1023)] {
             let mut run = Run::new();
             run.adc.voltage = voltage;
             run.adc.temperature = temperature;
             run.secs(10);
-            let lit: Vec<usize> = (0..run.levels.len())
-                .filter(|&t| run.levels[t] != 0)
-                .collect();
-            assert_eq!(
-                lit.len(),
-                usize::from(BLINK_TICKS),
+            assert!(
+                run.levels.iter().all(|&l| l == 0),
                 "{voltage}, {temperature}"
             );
-            assert!(lit.windows(2).all(|w| w[1] == w[0] + 1), "one blink");
-            assert!(lit.iter().all(|&t| run.levels[t] == BLINK_LEVEL));
-            assert!(lit[0] < 16, "within the first round");
+            assert_eq!(run.offs, 0);
         }
-    }
-
-    #[test]
-    fn garbage_later_on_doesnt_blink() {
-        let mut run = Run::new();
-        run.secs(1);
-        run.adc.voltage = 0;
-        run.adc.temperature = 0;
-        assert!(run.levels.iter().all(|&l| l == 0));
-        run.secs(10);
-        assert!(run.levels.iter().all(|&l| l == 0));
-    }
-
-    #[test]
-    fn turning_on_mid_blink_stops_it() {
-        let mut run = Run::new();
-        run.adc.voltage = 0;
-        // The blink starts once the first temperature reading's in.
-        assert_eq!(run.ticks(10), 0);
-        assert_eq!(run.ticks(1), BLINK_LEVEL);
-        run.ui = 50;
-        run.ticks(1);
-        run.ui = 0;
-        assert_eq!(run.ticks(1), 0);
-        run.secs(2);
-        assert!(run.levels.iter().rev().take(128).all(|&l| l == 0));
     }
 
     const FUSES: Faults = Faults {

@@ -31,9 +31,8 @@
 //! ("first result is unstable", `fsm/adc.c`). It costs a tick, so it's cheap
 //! insurance.
 //!
-//! The temperature is only read when asked for: the caller asks while the
-//! light's on, and once at power-on so a bad setup shows up straight away.
-//! The voltage is read all the time.
+//! The temperature is only read when asked for, which the caller does while
+//! the light's on. The voltage is read all the time.
 
 /// What the ADC is measuring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

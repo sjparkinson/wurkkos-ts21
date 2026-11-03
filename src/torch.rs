@@ -88,7 +88,6 @@ impl<T: Copy + PartialEq> Changes<T> {
 mod tests {
     use super::*;
     use crate::button::RELEASE_TICKS;
-    use crate::limits::{BLINK_LEVEL, BLINK_TICKS};
     use crate::ramp::{LEVELS, LINEAR_MAX, Output, output};
     use crate::testing::{Adc, CALIBRATION};
     use crate::ui::LEVEL;
@@ -228,18 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_adc_blinks_at_power_on_and_still_works() {
+    fn a_dead_adc_stays_dark_at_power_on_and_still_works() {
         let mut rig = Rig::new();
         (rig.adc.voltage, rig.adc.temperature) = (0, 0);
-        let mut lit = 0;
-        for _ in 0..64 {
-            rig.tick(false);
-            if rig.level() != 0 {
-                assert_eq!(rig.level(), BLINK_LEVEL);
-                lit += 1;
-            }
-        }
-        assert_eq!(lit, BLINK_TICKS);
+        rig.run(false, 64);
+        assert_eq!(rig.level(), 0);
         // At level 50 the floor's above it, so on and off work as usual.
         rig.click();
         rig.run(false, 60 * 64);
