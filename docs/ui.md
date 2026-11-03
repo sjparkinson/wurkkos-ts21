@@ -6,7 +6,7 @@ The notation is Anduril's. **1C** is one click, **1H** press and hold, and so on
 
 `cargo xtask simulate` runs this UI in a terminal, live or from a script in the same notation (`cargo xtask simulate 1C 2H:1.5s 3C`).
 
-Every row has an example: a script in that notation, starting from a torch that's just had its battery put in, and how the light should be after it (`off`, `on` or `level N`). `cargo test` runs the examples against the library, and `cargo xtask hex` runs them against the built firmware on a simulated chip, so a row without one, or one that's wrong, fails both. Only Planned rows can leave it as `-`.
+Every row has an example: a script in that notation, starting from a torch that's just had its battery put in, and how the light should be after it (`off`, `on` or `level N`). `cargo test` runs the examples against the library, and `cargo xtask hex` runs them against the built firmware on a simulated chip, so a row without one, or one that's wrong, fails both. Only Planned rows can leave it as `-`. The background table at the end is the exception, since it isn't clicks.
 
 For the first flash the UI is as small as it gets, so that when something doesn't work it's the hardware or the toolchain, not the UI. The full UI (ramping, turbo, lockout, moonlight) is on the `fancy-ui` branch and comes back once this has been checked on a real torch.
 
@@ -62,6 +62,7 @@ The examples break a byte of flash with `flash:corrupt`, and set a fuse byte wit
 
 | What | Does | Status |
 |---|---|---|
+| Button LED | The amber LED under the switch glows dimly whenever there's a cell in, on or off, so you can find the torch in the dark. It's lit by the pin's pull-up, so it costs microamps. The blue one is the charger's | Done |
 | Sleep when off | Powers down and wakes on the switch, so the light can sit in a drawer for a year | Planned |
 
 Until it powers down when off, this isn't firmware to carry. It idle-sleeps between ticks, on or off, which the datasheet puts at 1.1 mA typical at 10 MHz and 3 V against 3.1 mA awake (DS40002204A table 36-4), before the timer, the ADC's reference and the rest of the driver, so it still drains the cell in months. See the [roadmap](roadmap.md).

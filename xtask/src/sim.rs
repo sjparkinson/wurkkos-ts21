@@ -477,12 +477,21 @@ fn in_step(
     if !sim.chip.watchdog_windowed() {
         return Err("hw::init never enabled the watchdog in window mode".into());
     }
+    if !sim.chip.button_led_lit() {
+        return Err("hw::init left PB5 without its pull-up, so the button LED is out".into());
+    }
     let mut rig = Rig::new(&power_on);
     for (tick, sample) in samples.enumerate() {
         sim.chip.world = sample.world;
         let took = sim
             .tick(sample.pressed)
             .map_err(|e| format!("tick {tick}: {e}"))?;
+        if !sim.chip.button_led_lit() {
+            return Err(format!(
+                "tick {tick}: PB5 isn't an input with its pull-up on, \
+                 so the button LED is out"
+            ));
+        }
         report.loop_instructions = report.loop_instructions.max(took);
         rig.tick(sample.pressed, &sample.world);
         let output = ramp::output(rig.level());
@@ -798,6 +807,16 @@ impl Chip {
     /// started it yet.
     fn watchdog_windowed(&self) -> bool {
         self.watchdog_running() && self.io[reg::WDT_CTRLA] & WDT_WINDOW != 0
+    }
+
+    /// Whether the amber button LED on PB5 is lit by its pull-up: an input
+    /// with PULLUPEN set, which is how docs/ui.md says it always is. Only
+    /// VPORTB.DIR is stored; if PORTB.DIR and friends get modelled, they
+    /// have to write through to it, or this and `leds` go stale.
+    fn button_led_lit(&self) -> bool {
+        const AUX: u8 = 1 << 5;
+        self.io[reg::VPORTB_DIR] & AUX == 0
+            && self.io[reg::PORTB_PIN0CTRL + 5] & regs::PORT_PULLUPEN != 0
     }
 
     /// Spends the CCP key on a write to protected register `a`, or refuses
@@ -1861,6 +1880,16 @@ mod tests {
 
         c.io[pin5] = ISC_LEVEL;
         assert!(c.set_switch(false).unwrap_err().contains("ISC"));
+    }
+
+    #[test]
+    fn the_button_led_needs_pb5_an_input_with_its_pull_up() {
+        let mut c = chip();
+        assert!(!c.button_led_lit(), "reset: no pull-up");
+        c.io[reg::PORTB_PIN0CTRL + 5] = regs::PORT_PULLUPEN;
+        assert!(c.button_led_lit());
+        c.io[reg::VPORTB_DIR] = 1 << 5;
+        assert!(!c.button_led_lit(), "driven, not pulled up");
     }
 
     #[test]

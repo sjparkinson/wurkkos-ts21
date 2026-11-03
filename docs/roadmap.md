@@ -13,7 +13,8 @@ Roughly in order. Each step should leave a torch that's no worse than the step b
 - [ ] Ping, back up and flash a real TS21, which is also the first real test of the programmer
 - [ ] Confirm the batched UPDI frames work on a real chip. `write_page` now sends the RSD toggle, REPEAT, the page data and the RSD toggle back in one frame, and `read` sends REPEAT and LD together. The fake chip is happy with both; if a real flash fails partway through a page, split them back into separate sends first. Flash is committed with PAGEWRITE (0x01) and EEPROM with PAGEERASEWRITE (0x03), and only the fake chip has seen either, so if flash fails `verify` and EEPROM doesn't, suspect PAGEWRITE.
 - [ ] See whether the `wait_nvm` after `NVM_PAGE_BUFFER_CLEAR` ever sees the controller busy. pymcuprog waits there, so keep it unless a real chip shows the first poll is always idle. It's one round trip per page.
-- [ ] Check PB5 is the button LED and decide what it does
+- [x] Check PB5 is the button LED and decide what it does: amber, always on, lit by its pull-up
+- [ ] See the amber button LED glow on a real TS21, which is the first check that PB5 is it
 - [ ] Bring back the full UI from the `fancy-ui` branch, with ramping, moonlight, turbo and lockout
 
 ## 2. It's safe to leave a cell in

@@ -17,7 +17,7 @@ Anduril builds model 0614 from `hw/sofirn/sp36-t1616`, which includes `hw/sofirn
 | PA5 | Side switch | Active low with the internal pull-up, interrupt on both edges |
 | PB0 | FET channel | TCA0 WO0 (CMP0) |
 | PB1 | Linear channel ("1×7135") | TCA0 WO1 (CMP1) |
-| PB5 | Aux LED | Single channel, likely the button LED's amber element |
+| PB5 | Aux LED | Single channel, likely the button LED's amber element (see [the button LED](#the-button-led)) |
 | VCC | Battery voltage | The MCU measures its own supply, probably about 0.3 V under the cell (see below) |
 
 Every other pin gets its pull-up turned on so it doesn't float and leak current.
@@ -116,9 +116,28 @@ A separate Injoinic IP5310 chip handles charging (at about 1.6 A), so the firmwa
 
 These come from [the 2021 teardown](https://budgetlightforum.com/t/wurkkos-ts21-tear-down/68750), [1Lumen](https://1lumen.com/review/wurkkos-ts21/), [ZeroAir](https://zeroair.org/2021/10/12/wurkkos-ts21-anduril-flashlight-review/), [rockenrooster](https://reviews.rockenrooster.dedyn.io/wurkkos-ts21-review/) and [the BLF review](https://budgetlightforum.com/t/review-wurkkos-ts21-sst20-4000k-anduril-1-an-excellent-budget-enthusiast-light/68189). They all predate the switch to the ATtiny1616, and nobody's said the rest of the light changed with it.
 
+## The button LED
+
+There's an amber LED and a blue one under the switch. The blue one lights while charging. Confirmed, by an owner. Only the amber one seems to have an MCU pin, PB5, so the blue one is likely the charger's.
+
+There are no aux LEDs on the face. [1Lumen](https://1lumen.com/review/wurkkos-ts21/) says the light has none beyond the switch, and [LiquidRetro](https://liquidretro.net/2022/02/06/wurkkos-ts21-review-3200-lumens-sst20-90-cri-21700-usb-c/) says Anduril's aux channel "on the TS21 is on the button". Confirmed. Some of the switch's light leaks out through the optic, and there's a foil disc that's meant to stop it ([BLF modding thread](https://budgetlightforum.com/t/wurkkos-ts21-modding-advice/69374)). Anduril's TS10 config calls PB5 a "front-facing aux LED" because the TS10 V2 has real front aux; the TS21 shares the pin map, not the LEDs.
+
+Anduril drives it at three levels in `mcu_set_aux1_power()` ([`arch/attiny1616.c`](https://github.com/ToyKeeper/anduril/blob/trunk/arch/attiny1616.c), read on trunk, not at the pinned hash). Confirmed from the code, likely for the TS21 since it comes from the TS10 config:
+
+| Level | Pin | Current through the LED |
+|---|---|---|
+| Off | Output, driven low | None |
+| Low | Input, `PINnCTRL.PULLUPEN` set | Whatever the pull-up lets through, tens of µA |
+| High | Output, driven high | Set by the resistor on the board, a few mA |
+
+Low works because the pull-up is a weak resistor from the pin to VCC (20 to 50 kΩ, 35 kΩ typical, DS40002204A Electrical Characteristics). With the pin an input, the only path for that current is through the LED to ground, and LEDs are visible at tens of µA. Roughly (VCC − the LED's forward voltage) / 35 kΩ, about 50 µA with a full cell and an amber LED at about 2 V (my estimate). It dims as the cell runs down. There's nothing between low and high: the pull-up's strength isn't adjustable, and PB5 isn't on a timer channel this firmware uses, so anything in between would mean software PWM and waking the chip all the time. The pull-up is disconnected whenever the pin is an output, and pin settings don't change in any sleep mode (DS40002204A §16.3.5), so low survives power-down. Confirmed.
+
+The two measurements in [the teardown thread](https://budgetlightforum.com/t/wurkkos-ts21-tear-down/68750) put low at 50 to 64 µA over off (116 against 180 µA, and 30 against 80 µA), and high at anywhere from 3 to 13.5 mA. Likely; neither says which firmware.
+
+This firmware leaves it on low all the time. PB5 isn't in `PORTB_OUTPUTS` in `src/hw.rs`, so `hw::init` gives it a pull-up like every other pin it doesn't drive, and nothing touches it after that.
+
 ## Open questions
 
-- Is PB5 really the button LED's amber element on the TS21? Anduril's TS10 config calls it front-facing aux, and the SP36 config talks about a button LED. A multimeter on the driver would settle it, and so would flashing a build that blinks it. [LiquidRetro's review](https://liquidretro.net/tag/wurkkos-ts21-user-manual/) of the Anduril 2 light describes red, blue and amber under the switch, with amber as the locator, which fits PB5 being amber and the charger owning the rest.
-- What lights the button LED's blue element? The charger, or something else?
+- Is PB5 really the button LED's amber element on the TS21? It's the only aux pin in the config Wurkkos ships, the light has no other aux, and [LiquidRetro's review](https://liquidretro.net/tag/wurkkos-ts21-user-manual/) has amber as the locator, so it's very likely. Seeing it glow after a flash of this firmware settles it.
 - How close is the 0614 voltage calibration on this light to better than 0.1 V (it's within that at 3.57 to 4.08 V, see [the driver](#the-driver)), what is it near 3 V, and how much does the cell sag on the FET at turbo? That decides whether 3.10 V and 2.99 V under load are in the right place.
 - Does the TS21 driver match the TS10 exactly (same 7135 current, same FET), or only in pinout? The calibration numbers differ slightly between the TS10 and Q8 builds.
