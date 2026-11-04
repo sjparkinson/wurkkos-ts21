@@ -93,6 +93,8 @@ pub mod addr {
     pub const TCA0_CTRLECLR: usize = 0x0A04;
     /// TCA0.CTRLESET: writing a 1 sets that bit of CTRLE, here LUPD.
     pub const TCA0_CTRLESET: usize = 0x0A05;
+    /// TCA0.CTRLFSET: reads the buffer valid flags.
+    pub const TCA0_CTRLFSET: usize = 0x0A07;
     /// 16-bit: write through `write16`, low byte first.
     pub const TCA0_CNT: usize = 0x0A20;
     /// 16-bit, the live period, which PERBUF only reaches at BOTTOM. Resets to
@@ -218,6 +220,12 @@ pub const TCA_WGMODE_SINGLESLOPE: u8 = 0x03;
 /// TCA0.CTRLESET.LUPD and TCA0.CTRLECLR.LUPD (single mode): holds PERBUF and
 /// the CMPnBUFs back from the next UPDATE.
 pub const TCA_LUPD: u8 = 0x02;
+/// TCA0.CTRLFSET.PERBV (single mode): PERBUF is waiting for an UPDATE.
+pub const TCA_PERBV: u8 = 0x01;
+/// TCA0.CTRLFSET.CMP0BV (single mode), the same for CMP0BUF.
+pub const TCA_CMP0BV: u8 = 0x02;
+/// TCA0.CTRLFSET.CMP1BV (single mode), the same for CMP1BUF.
+pub const TCA_CMP1BV: u8 = 0x04;
 /// TCA0.CTRLESET.CMD = UPDATE (single mode): the same as an UPDATE condition,
 /// but now, and LUPD doesn't stop it (DS40002204A §20.3.3.5).
 pub const TCA_CMD_UPDATE: u8 = 0x01 << 2;

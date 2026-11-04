@@ -295,9 +295,15 @@ const OVERDUE: u8 = 1 << 0;
 /// Whether both PWM channels are really at 0, not only their BUF registers,
 /// which reach CMPn at the next BOTTOM. The datasheet doesn't say whether
 /// `set_output` writing CNT counts as one, so this reads the real thing. PER
-/// lands on the same update, and the longest cycle is well inside a tick.
+/// lands on the same update, and the longest cycle is well inside a tick. The
+/// buffers have to be empty too, or the first pass's off, which leaves the
+/// compares at 0 as they were, would freeze with an update still pending, as
+/// the datasheet only promises TCA0 runs in idle (section 20.3.6).
 fn output_settled() -> bool {
-    read16(reg::TCA0_CMP0) == 0 && read16(reg::TCA0_CMP1) == 0
+    const PENDING: u8 = regs::TCA_PERBV | regs::TCA_CMP0BV | regs::TCA_CMP1BV;
+    read(reg::TCA0_CTRLFSET) & PENDING == 0
+        && read16(reg::TCA0_CMP0) == 0
+        && read16(reg::TCA0_CMP1) == 0
 }
 
 /// Sets up the sleep that [`wait_for_tick`] goes on to do. `rest` is

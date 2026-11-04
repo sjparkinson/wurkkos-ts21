@@ -79,8 +79,10 @@
 //!   a BOTTOM, so this guesses that it doesn't and pushes BOTTOM a full cycle
 //!   away. The real wait can be far shorter, so the firmware mustn't lean on
 //!   a pass that writes the output staying in idle: `Torch::tick` rests in
-//!   that same pass. Sleeping with LUPD set is an error, and the phase isn't
-//!   frozen in power-down, since nothing's left pending for it to matter.
+//!   that same pass. CNT only takes 0 while running. Sleeping with LUPD set
+//!   is an error. TCA0 stops in power-down, since §20.3.6 only promises idle,
+//!   so powering down also wants the buffers empty and PER back at the off
+//!   output's. CTRLA only takes the one setting, and CTRLB refuses ALUPD.
 //! - CRCSCAN runs CRC-16-CCITT over all of flash and sets STATUS.OK if it
 //!   comes to 0, which is what a correct checksum in the last two bytes
 //!   does (`crc.rs`). The firmware runs on the image `cargo xtask hex`
@@ -253,6 +255,8 @@ pub const ISC_INPUT_DISABLE: u8 = regs::PORT_ISC_INPUT_DISABLE;
 pub const ISC_LEVEL: u8 = 0x5;
 /// TCA0.CTRLB.WGMODE's mask. atdf.rs checks it.
 pub(crate) const TCA_WGMODE: u8 = 0x07;
+/// TCA0.CTRLB.ALUPD, which the simulator refuses. atdf.rs checks it.
+pub(crate) const TCA_ALUPD: u8 = 0x08;
 /// PORTx.PINnCTRL.INVEN, which the simulator refuses on PA5.
 pub const PORT_INVEN: u8 = 0x80;
 /// PORTA.INTFLAGS: a pin-change flag per pin, cleared by writing 1. The
@@ -2038,6 +2042,8 @@ struct Chip {
     lupd: bool,
     /// Drops writes that set LUPD, for `lock_taken_out`.
     lupd_broken: bool,
+    /// In power-down, so TCA0's stopped.
+    tca_frozen: bool,
     /// The high byte of a CMPn, latched into TEMP by reading its low byte,
     /// and which register that was.
     compare_temp: Option<(usize, u8)>,
@@ -2199,6 +2205,7 @@ impl Chip {
             buffer_valid: [false; 3],
             lupd: false,
             lupd_broken: false,
+            tca_frozen: false,
             compare_temp: None,
             interrupted: None,
             power_downs: 0,
@@ -2344,6 +2351,19 @@ impl Chip {
                 "powers down with TCA0's compares at {:?} and their BUFs at {bufs:?}, \
                  so the light's on or could come back on at that duty",
                 self.compare
+            ));
+        }
+        if self.buffer_valid != [false; 3] {
+            return Err(format!(
+                "powers down with TCA0's buffers {:?} still waiting for an UPDATE, \
+                 and TCA0 stops, so they'd land on waking",
+                self.buffer_valid
+            ));
+        }
+        let per = self.wide(reg::TCA0_PER);
+        if per != ramp::Output::OFF.top - 1 {
+            return Err(format!(
+                "powers down with TCA0.PER at {per}, not the off output's"
             ));
         }
         Ok(())
@@ -2802,6 +2822,9 @@ impl Chip {
     /// from BOTTOM, which is where it starts. Each BOTTOM is an overflow, and
     /// PER's what it was for the cycle that ended, until the UPDATE there.
     fn tca_advance(&mut self) -> Result<(), String> {
+        if self.tca_frozen {
+            return Ok(());
+        }
         if !self.tca_running() {
             self.next_bottom = self.now + self.tca_cycle();
             return Ok(());
@@ -2873,6 +2896,13 @@ impl Chip {
     /// The firmware has finished writing a 16-bit TCA0 register.
     fn tca_written(&mut self, low: usize) -> Result<(), String> {
         if low == reg::TCA0_CNT {
+            let cnt = self.wide(reg::TCA0_CNT);
+            if cnt != 0 && self.tca_running() {
+                return Err(format!(
+                    "writes {cnt} to TCA0.CNT with the timer running, and the \
+                     simulator only models restarting the cycle"
+                ));
+            }
             self.next_bottom = self.now + self.tca_cycle();
         } else if low == reg::TCA0_PER {
             if self.tca_running() {
@@ -2938,7 +2968,6 @@ fn plain(addr: usize) -> bool {
                 | reg::CLKCTRL_MCLKCTRLB
                 | reg::WDT_CTRLA
                 | reg::RTC_PITCTRLA
-                | reg::TCA0_CTRLA
                 | reg::TCA0_CTRLB
                 | reg::VREF_CTRLA
                 | reg::VREF_CTRLB
@@ -3011,6 +3040,7 @@ fn name(addr: usize) -> String {
         (reg::TCA0_CTRLB, "TCA0.CTRLB"),
         (reg::TCA0_CTRLECLR, "TCA0.CTRLECLR"),
         (reg::TCA0_CTRLESET, "TCA0.CTRLESET"),
+        (reg::TCA0_CTRLFSET, "TCA0.CTRLFSET"),
         (reg::TCA0_CNT, "TCA0.CNT"),
         (reg::TCA0_PER, "TCA0.PER"),
         (reg::TCA0_CMP0, "TCA0.CMP0"),
@@ -3433,7 +3463,15 @@ impl Bus for Chip {
     }
 
     fn idle(&mut self) -> Result<(), String> {
-        self.wait_for_pit()
+        let from = self.now;
+        self.tca_frozen =
+            self.io[reg::SLPCTRL_CTRLA] == regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN;
+        let waited = self.wait_for_pit();
+        if self.tca_frozen {
+            self.tca_frozen = false;
+            self.next_bottom += self.now - from;
+        }
+        waited
     }
 
     fn read(&mut self, addr: u16) -> Result<u8, String> {
@@ -3505,6 +3543,11 @@ impl Bus for Chip {
                  so it gets whatever ADC0.TEMP held"
                     .into()
             }),
+            reg::TCA0_CTRLFSET => {
+                let bits = [regs::TCA_PERBV, regs::TCA_CMP0BV, regs::TCA_CMP1BV];
+                let valid = iter::zip(bits, self.buffer_valid).filter(|&(_, valid)| valid);
+                Ok(valid.fold(0, |all, (bit, _)| all | bit))
+            }
             reg::TCA0_CMP0 | reg::TCA0_CMP1 | reg::TCA0_PER => {
                 let [lo, hi] = match a {
                     reg::TCA0_PER => self.wide(reg::TCA0_PER),
@@ -3573,12 +3616,27 @@ impl Bus for Chip {
                 }
                 self.io[a] = value;
             }
+            reg::TCA0_CTRLA => {
+                if value != regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE {
+                    return Err(format!(
+                        "writes {value:#04x} to TCA0.CTRLA: the period and the duty \
+                         cycles assume the timer runs undivided, and it never stops"
+                    ));
+                }
+                self.io[a] = value;
+            }
             reg::TCA0_CTRLB => {
                 // 0 is its reset value, which startup puts back.
                 if value != 0 && value & TCA_WGMODE != regs::TCA_WGMODE_SINGLESLOPE {
                     return Err(format!(
                         "writes {value:#04x} to TCA0.CTRLB: the period and the duty \
                          cycles assume single-slope"
+                    ));
+                }
+                if value & TCA_ALUPD != 0 {
+                    return Err(format!(
+                        "writes {value:#04x} to TCA0.CTRLB: ALUPD would take LUPD out of \
+                         the firmware's hands (section 20.5.2)"
                     ));
                 }
                 self.io[a] = value;
@@ -4359,6 +4417,94 @@ mod tests {
                 assert_eq!(live(&c), (out.top, out.fet, out.linear));
             }
         }
+    }
+
+    #[test]
+    fn per_and_perbuf_reset_to_all_ones() {
+        let c = chip();
+        assert_eq!(c.wide(reg::TCA0_PER), 0xFFFF);
+        assert_eq!(c.wide(reg::TCA0_PERBUF), 0xFFFF);
+    }
+
+    #[test]
+    fn clearing_the_lock_on_a_stopped_timer_checks_nothing() {
+        let mut c = chip();
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        write_wide(&mut c, reg::TCA0_PERBUF, 100);
+        assert_eq!(c.write(reg::TCA0_CTRLECLR as u16, regs::TCA_LUPD), Ok(()));
+    }
+
+    #[test]
+    fn refuses_a_non_zero_cnt_with_the_timer_running() {
+        let mut c = pwm_at(0);
+        let err = try_wide(&mut c, reg::TCA0_CNT, 300).unwrap_err();
+        assert!(err.contains("TCA0.CNT"), "{err}");
+        assert_eq!(try_wide(&mut c, reg::TCA0_CNT, 0), Ok(()));
+    }
+
+    #[test]
+    fn refuses_a_divided_or_stopped_timer() {
+        let ctrla = reg::TCA0_CTRLA as u16;
+        let mut c = chip();
+        // CLKSEL = DIV2.
+        let err = c.write(ctrla, 0x02 | regs::TCA_ENABLE).unwrap_err();
+        assert!(err.contains("undivided"), "{err}");
+        assert!(c.write(ctrla, 0).is_err());
+        assert_eq!(
+            c.write(ctrla, regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn refuses_alupd() {
+        let mut c = chip();
+        let value = TCA_ALUPD | regs::TCA_WGMODE_SINGLESLOPE;
+        let err = c.write(reg::TCA0_CTRLB as u16, value).unwrap_err();
+        assert!(err.contains("ALUPD"), "{err}");
+    }
+
+    #[test]
+    fn ctrlf_reads_the_buffer_valid_flags() {
+        let mut c = chip();
+        assert_eq!(c.read(reg::TCA0_CTRLFSET as u16), Ok(0));
+        write_wide(&mut c, reg::TCA0_PERBUF, 254);
+        write_wide(&mut c, reg::TCA0_CMP1BUF, 0);
+        assert_eq!(
+            c.read(reg::TCA0_CTRLFSET as u16),
+            Ok(regs::TCA_PERBV | regs::TCA_CMP1BV)
+        );
+    }
+
+    #[test]
+    fn wont_power_down_with_a_buffer_waiting() {
+        let mut c = ready_to_power_down();
+        c.buffer_valid[0] = true;
+        assert!(c.sleep().unwrap_err().contains("UPDATE"));
+    }
+
+    #[test]
+    fn wont_power_down_on_a_long_period() {
+        let mut c = ready_to_power_down();
+        c.wide[1] = ramp::MAX_TOP - 1;
+        assert!(c.sleep().unwrap_err().contains("TCA0.PER"));
+    }
+
+    #[test]
+    fn power_down_stops_the_counter_where_it_is() {
+        let mut c = pwm_at(0);
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
+        c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_PDOWN;
+        let out = ramp::output(ramp::LEVELS);
+        set_output(&mut c, out).unwrap();
+        let left = c.next_bottom - c.now;
+        c.idle().unwrap();
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0, "frozen");
+        assert_eq!(c.next_bottom - c.now, left, "the same way from BOTTOM");
+
+        c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_IDLE;
+        c.idle().unwrap();
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), out.fet, "idle runs it");
     }
 
     #[test]
@@ -5160,6 +5306,7 @@ mod tests {
         c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_PDOWN;
         c.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
         c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
+        c.wide[1] = ramp::Output::OFF.top - 1;
         c
     }
 
