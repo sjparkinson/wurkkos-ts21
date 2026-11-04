@@ -70,6 +70,52 @@ impl Faults {
     }
 }
 
+/// How many bytes one pass of the periodic RAM test covers. src/rt.rs keeps
+/// a copy of them in CPU registers while it tests them, so this is as many
+/// as it has registers to spare.
+pub const RAM_SECTION: u16 = 16;
+/// How far on the next section starts. It's less than [`RAM_SECTION`] so
+/// neighbouring sections overlap, as AN2632 §3.5 wants: a coupling fault
+/// between two bytes only shows if they're tested together.
+pub const RAM_STEP: u16 = 8;
+/// Sections in a sweep of all of SRAM, at one a tick: just under 4 seconds.
+pub const RAM_SECTIONS: u8 = ((SRAM_BYTES - RAM_SECTION) / RAM_STEP + 1) as u8;
+
+const SRAM_BYTES: u16 = (regs::addr::SRAM_END - regs::addr::SRAM_START) as u16;
+
+// The sections reach the end of SRAM exactly, and fit a `u8`.
+const _: () = {
+    assert!((SRAM_BYTES - RAM_SECTION).is_multiple_of(RAM_STEP));
+    assert!((SRAM_BYTES - RAM_SECTION) / RAM_STEP < 255);
+    assert!(RAM_STEP < RAM_SECTION);
+};
+
+/// Which section of SRAM the periodic test does next. It's kept as a count
+/// rather than an address because it lives in the RAM it's testing: if it's
+/// corrupted before the test gets to it, the worst that can happen is a
+/// different section, never a pointer into the peripherals' registers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RamSweep {
+    next: u8,
+}
+
+impl RamSweep {
+    pub const fn new() -> Self {
+        Self { next: 0 }
+    }
+
+    /// The first address of the section to test now, moving on to the next.
+    pub fn next_section(&mut self) -> u16 {
+        let section = if self.next < RAM_SECTIONS {
+            self.next
+        } else {
+            0
+        };
+        self.next = section + 1;
+        regs::addr::SRAM_START as u16 + u16::from(section) * RAM_STEP
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +129,46 @@ mod tests {
         append: 0x00,
         bootend: 0x00,
     };
+
+    #[test]
+    fn a_sweep_covers_all_of_sram_with_each_section_overlapping_the_last() {
+        let mut sweep = RamSweep::new();
+        let mut tested = [false; regs::addr::SRAM_END - regs::addr::SRAM_START];
+        let mut last = None;
+        for _ in 0..RAM_SECTIONS {
+            let start = sweep.next_section();
+            let from = usize::from(start) - regs::addr::SRAM_START;
+            tested[from..from + usize::from(RAM_SECTION)].fill(true);
+            if let Some(last) = last {
+                assert_eq!(start - last, RAM_STEP);
+            }
+            last = Some(start);
+        }
+        assert!(tested.iter().all(|&t| t));
+        assert_eq!(
+            last.map(|l| usize::from(l + RAM_SECTION)),
+            Some(regs::addr::SRAM_END)
+        );
+    }
+
+    #[test]
+    fn a_sweep_starts_again_at_the_bottom() {
+        let mut sweep = RamSweep::new();
+        let first = sweep.next_section();
+        for _ in 1..RAM_SECTIONS {
+            sweep.next_section();
+        }
+        assert_eq!(sweep.next_section(), first);
+    }
+
+    #[test]
+    fn any_corrupted_count_still_lands_in_sram() {
+        for next in 0..=u8::MAX {
+            let start = RamSweep { next }.next_section();
+            assert!(usize::from(start) >= regs::addr::SRAM_START);
+            assert!(usize::from(start + RAM_SECTION) <= regs::addr::SRAM_END);
+        }
+    }
 
     #[test]
     fn factory_fuses_pass() {

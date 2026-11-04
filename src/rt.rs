@@ -273,7 +273,8 @@ global_asm!(
     // The test is destructive, which is why it runs before .data and .bss
     // exist and before anything's on the stack. AN2632 tests SRAM in
     // sections, saving each one first, so it can run while the application
-    // does. That's not needed at power-on.
+    // does. That's not needed at power-on; `__ram_section` further down
+    // does it for the main loop.
     //
     // AN2632 runs it with D = 0x00, which can't tell two bits in a byte
     // apart, since they always hold the same value. Its option for that is
@@ -368,8 +369,8 @@ global_asm!(
     //
     // `out` then writes r1 (zero) to SREG, the CPU status register, which
     // holds the flags (carry, zero and so on) and the global interrupt
-    // enable bit. The register test above left its last pattern in it, so
-    // this clears that.
+    // enable bit. The tests above left their compare flags in it, so this
+    // clears those.
     //
     // SP, the stack pointer, already points at the top of SRAM: the
     // register test put it back where reset left it.
@@ -446,6 +447,135 @@ global_asm!(
     "  cli",
     "1:",
     "  rjmp 1b",
+    "",
+    // # The periodic RAM test (AN2632 §3.5 and §9.2)
+    //
+    // `test_ram_section` below calls this from the main loop, with the
+    // section's first address in r25:r24, as the calling convention has it.
+    // It's the March test above on `RAM_SECTION` bytes with the same four
+    // backgrounds, so everything said there holds within a section.
+    //
+    // The test is destructive, so the section has to be put back. AN2632
+    // keeps a reserved block of SRAM for that, which then needs testing
+    // itself, and which rules out testing the live stack. Here the copy goes
+    // in r2 to r17 instead, and nothing between `cli` and `out` touches the
+    // stack, or anything else in RAM. So the section can be anywhere: the
+    // stack, this call's own return address and the registers it's just
+    // pushed included. Nothing can see them mid-test, since interrupts are
+    // off and it's the only code running.
+    //
+    // r18 is D and r19 its complement, r20 to r23 the backgrounds still to
+    // come and r29 how many. X walks the section, Z remembers its start,
+    // r25:r24 its end, and r28 holds SREG. r2 to r17 and Y are the caller's
+    // by the calling convention, so they go on the stack first.
+    //
+    // It's 24 instructions a byte for each background, as above, plus the
+    // copying: 1,656 instructions, and by the instruction set manual's AVRxt
+    // timings about 2,320 cycles. That's about 0.46 ms at 5 MHz, 3% of a
+    // tick, nearly all with interrupts off, which only delays the tick's
+    // handler. xtask's simulator holds it to `SECTION_BUDGET` instructions.
+    // Not measured on a real chip.
+    ".section .text.__ram_section, \"ax\", @progbits",
+    ".macro or_stop",
+    "  breq 9f",
+    "  rjmp __ram_section_failed",
+    "9:",
+    ".endm",
+    ".global __ram_section",
+    "__ram_section:",
+    ".irp reg, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,28,29",
+    "  push r\\reg",
+    ".endr",
+    "  in r28, {sreg}",
+    "  cli",
+    "  movw r30, r24",
+    "  movw r26, r24",
+    ".irp reg, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17",
+    "  ld r\\reg, X+",
+    ".endr",
+    "  movw r24, r26",
+    "  ldi r20, 0xAA",
+    "  ldi r21, 0x55",
+    "  ldi r22, 0x33",
+    "  ldi r23, 0x0F",
+    "  ldi r29, 4",
+    "5:",
+    "  mov r18, r20",
+    "  mov r19, r20",
+    "  com r19",
+    // ⇕(wD).
+    "  movw r26, r30",
+    "1:",
+    "  st X+, r18",
+    "  cp r26, r24",
+    "  cpc r27, r25",
+    "  brne 1b",
+    // ⇑(rD, w~D).
+    "  movw r26, r30",
+    "2:",
+    "  ld r0, X",
+    "  cp r0, r18",
+    "  or_stop",
+    "  st X+, r19",
+    "  cp r26, r24",
+    "  cpc r27, r25",
+    "  brne 2b",
+    // ⇓(r~D, wD).
+    "3:",
+    "  ld r0, -X",
+    "  cp r0, r19",
+    "  or_stop",
+    "  st X, r18",
+    "  cp r26, r30",
+    "  cpc r27, r31",
+    "  brne 3b",
+    // ⇕(rD).
+    "4:",
+    "  ld r0, X+",
+    "  cp r0, r18",
+    "  or_stop",
+    "  cp r26, r24",
+    "  cpc r27, r25",
+    "  brne 4b",
+    "  mov r20, r21",
+    "  mov r21, r22",
+    "  mov r22, r23",
+    "  dec r29",
+    "  brne 5b",
+    // X is at the end of the section again. Put it back, and only then let
+    // interrupts in and use the stack.
+    ".irp reg, 17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2",
+    "  st -X, r\\reg",
+    ".endr",
+    "  out {sreg}, r28",
+    ".irp reg, 29,28,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2",
+    "  pop r\\reg",
+    ".endr",
+    "  ret",
+    "",
+    // Where a failed section ends up. This isn't power-on: TCA0 is driving
+    // the pins, and the waveform outputs override PORT, so it's not enough
+    // to stop here. Clearing CMPnEN hands both pins back to PORT, and
+    // they're still outputs with OUT at 0, so they go low. CTRLB isn't
+    // double-buffered (DS40002204A §20.3.3.2), so that's most likely at
+    // once, but the datasheet gives no delay, and `hw::prepare_sleep` only
+    // ever does this with the compares at 0. Dropping a pin mid-pulse is
+    // still to check on a real light. This uses no stack, since RAM's just
+    // been shown to be broken.
+    //
+    // Interrupts stay off, and nothing here touches the watchdog, which is
+    // only fed from the main loop. So it resets the chip about 67 WDT clocks
+    // after the last `wdr` at most: the 64 of the two windows, and up to
+    // three for that `wdr` to sync (§19.3.6), about 65 ms nominal. That
+    // reruns the power-on test, and a fault that's still there stops in
+    // `__selftest_failed` with the watchdog off, for good. One that's gone
+    // leaves a working torch, off.
+    ".global __ram_section_failed",
+    "__ram_section_failed:",
+    "  ldi r16, {tca_pins_off}",
+    "  sts {tca0_ctrlb}, r16",
+    "1:",
+    "  rjmp 1b",
     // The unhandled slots: from 1 up to RTC_PIT, and from there to the end.
     // Slot 0 is reset.
     before_pit = const regs::VECTOR_RTC_PIT - 1,
@@ -476,7 +606,27 @@ global_asm!(
     // What the RAM test walks.
     sram_start = const regs::addr::SRAM_START,
     sram_end = const regs::addr::SRAM_END,
+    // TCA0.CTRLB without CMP0EN and CMP1EN.
+    tca0_ctrlb = const regs::addr::TCA0_CTRLB,
+    tca_pins_off = const regs::TCA_WGMODE_SINGLESLOPE,
 );
+
+// `__ram_section` keeps its copy of a section in r2 to r17.
+const _: () = assert!(ts21::selftest::RAM_SECTION == 16);
+
+/// Tests a section of SRAM, starting at `start`, in place. If it's broken
+/// this never returns: see `__ram_section_failed`.
+// The link probe has this file too, and never calls it.
+#[allow(dead_code)]
+pub fn test_ram_section(start: u16) {
+    unsafe extern "C" {
+        fn __ram_section(start: u16);
+    }
+    // SAFETY: `RamSweep::next_section` only gives sections inside SRAM, and
+    // the routine puts back what it finds there, with interrupts off, and
+    // saves the registers the calling convention says it must.
+    unsafe { __ram_section(start) }
+}
 
 /// The register test writes this and its complement into every register,
 /// so each bit goes both ways.
