@@ -384,6 +384,13 @@ mod tests {
             (regs::addr::TCA0_PERBUF, "TCA0", single, "PERBUF", 2),
             (regs::addr::TCA0_CMP0BUF, "TCA0", single, "CMP0BUF", 2),
             (regs::addr::TCA0_CMP1BUF, "TCA0", single, "CMP1BUF", 2),
+            (regs::addr::TCA0_PER, "TCA0", single, "PER", 2),
+            (regs::addr::TCA0_INTFLAGS, "TCA0", single, "INTFLAGS", 1),
+            (regs::addr::TCB0_CTRLA, "TCB0", None, "CTRLA", 1),
+            (regs::addr::TCB0_INTCTRL, "TCB0", None, "INTCTRL", 1),
+            (regs::addr::TCB0_INTFLAGS, "TCB0", None, "INTFLAGS", 1),
+            (regs::addr::TCB0_CNT, "TCB0", None, "CNT", 2),
+            (regs::addr::TCB0_CCMP, "TCB0", None, "CCMP", 2),
             (regs::addr::VREF_CTRLA, "VREF", None, "CTRLA", 1),
             (regs::addr::VREF_CTRLB, "VREF", None, "CTRLB", 1),
             (regs::addr::RSTCTRL_RSTFR, "RSTCTRL", None, "RSTFR", 1),
@@ -416,6 +423,7 @@ mod tests {
             ),
             // Interrupts and sleep.
             (regs::addr::GPIO_GPIOR0, "GPIO", None, "GPIOR0", 1),
+            (regs::addr::GPIO_GPIOR1, "GPIO", None, "GPIOR1", 1),
             (regs::addr::SLPCTRL_CTRLA, "SLPCTRL", None, "CTRLA", 1),
             (regs::addr::RTC_PITINTCTRL, "RTC", None, "PITINTCTRL", 1),
             (crate::sim::PORTA_INTFLAGS, "PORTA", None, "INTFLAGS", 1),
@@ -569,6 +577,33 @@ mod tests {
                 regs::TCA_WGMODE_SINGLESLOPE,
                 ctrlb.value("WGMODE", "SINGLESLOPE"),
                 "TCA0.CTRLB.WGMODE=SINGLESLOPE",
+            ),
+            (
+                regs::TCA_OVF,
+                atdf.register("TCA0", Some("SINGLE"), "INTFLAGS")
+                    .mask("OVF"),
+                "TCA0.INTFLAGS.OVF",
+            ),
+            (
+                regs::TCB_ENABLE,
+                atdf.register("TCB0", None, "CTRLA").mask("ENABLE"),
+                "TCB0.CTRLA.ENABLE",
+            ),
+            (
+                regs::TCB_CLKSEL_CLKDIV2,
+                atdf.register("TCB0", None, "CTRLA")
+                    .value("CLKSEL", "CLKDIV2"),
+                "TCB0.CTRLA.CLKSEL=CLKDIV2",
+            ),
+            (
+                regs::TCB_CAPT,
+                atdf.register("TCB0", None, "INTFLAGS").mask("CAPT"),
+                "TCB0.INTFLAGS.CAPT",
+            ),
+            (
+                regs::TCB_CAPT,
+                atdf.register("TCB0", None, "INTCTRL").mask("CAPT"),
+                "TCB0.INTCTRL.CAPT",
             ),
             (
                 regs::RTC_PITEN,
@@ -755,6 +790,7 @@ mod tests {
         for (ours, instance, name) in [
             (crate::sim::VECTOR_PORTA_PORT, "PORTA", "PORT"),
             (regs::VECTOR_RTC_PIT, "RTC", "PIT"),
+            (regs::VECTOR_TCB0_INT, "TCB0", "INT"),
             (crate::sim::VECTOR_PORTB_PORT, "PORTB", "PORT"),
             (crate::sim::VECTOR_PORTC_PORT, "PORTC", "PORT"),
         ] {

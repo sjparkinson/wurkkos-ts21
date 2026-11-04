@@ -26,7 +26,9 @@
 //! is a press that comes and goes during the watchdog's proof. A script's
 //! are all there from power-on, so they have to come before anything that
 //! takes time. `hang` can go anywhere: the firmware stops there until the
-//! watchdog resets it, once.
+//! watchdog resets it, once. `osc:dead` and `osc:40%` set the 32 kHz
+//! oscillator, `clk:400%` the main clock and `tca:stopped` stops TCA0, at any
+//! point in a script, since the firmware keeps checking those.
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
@@ -38,7 +40,9 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::world::{FUSE_NAMES, RamFault, RegisterFault, Rig, WdtFault, World, unmodelled_fuse};
+use crate::world::{
+    FUSE_NAMES, RamFault, RegisterFault, Rig, WdtFault, World, clock_percent, unmodelled_fuse,
+};
 use ts21::TICKS_PER_SECOND;
 use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
@@ -83,6 +87,13 @@ pub enum Action {
     ProofPress,
     /// The firmware hangs, until the watchdog resets it.
     Hang,
+    /// The 32 kHz oscillator's speed from now on, as a percentage, 0 being
+    /// dead.
+    Osc32k(u16),
+    /// The main clock's speed from now on, as a percentage.
+    MainClock(u16),
+    /// TCA0 stops counting from now on.
+    TcaStopped,
 }
 
 impl Action {
@@ -143,6 +154,18 @@ impl FromStr for Action {
         }
         if word == "hang" {
             return Ok(Self::Hang);
+        }
+        if word == "osc:dead" {
+            return Ok(Self::Osc32k(0));
+        }
+        if let Some(speed) = word.strip_prefix("osc:") {
+            return clock_percent(speed).map(Self::Osc32k);
+        }
+        if let Some(speed) = word.strip_prefix("clk:") {
+            return clock_percent(speed).map(Self::MainClock);
+        }
+        if word == "tca:stopped" {
+            return Ok(Self::TcaStopped);
         }
         if let Some(raw) = word.strip_prefix("adc:") {
             let raw = raw
@@ -330,6 +353,18 @@ pub fn samples(actions: &[Action]) -> Vec<Sample> {
             }
             Action::Hang => {
                 world.hang = true;
+                continue;
+            }
+            Action::Osc32k(percent) => {
+                world.osc32k = percent;
+                continue;
+            }
+            Action::MainClock(percent) => {
+                world.main_clock = percent;
+                continue;
+            }
+            Action::TcaStopped => {
+                world.tca_stopped = true;
                 continue;
             }
         };

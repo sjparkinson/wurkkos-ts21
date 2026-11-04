@@ -33,6 +33,7 @@ mod hw {
     pub const LINEAR: u8 = 1;
 
     pub extern "avr-interrupt" fn rtc_pit() {}
+    pub extern "avr-interrupt" fn tcb0_int() {}
 }
 
 #[cfg(target_arch = "avr")]
