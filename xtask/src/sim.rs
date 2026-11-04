@@ -11,7 +11,10 @@
 //!   those four instructions, or until the first store or `sleep` (§8.5.7).
 //! - TCA0's 16-bit registers are written low byte, then high byte, through
 //!   the shared TEMP byte. The other way round, the real chip pairs the high
-//!   byte with a stale low one.
+//!   byte with a stale low one. A handler that lands with one of them
+//!   halfway through an access, reading or writing, can't touch any of them,
+//!   since they all share that byte (§8.5.6, §20.5.13).
+//! - A handler gives back every register, SREG and SP as it found them.
 //! - RTC.PITCTRLA isn't written while PITSTATUS.CTRLBUSY is set. The real
 //!   chip drops that write.
 //! - The watchdog: WDT.CTRLA takes the CCP key and isn't written while
@@ -769,6 +772,10 @@ struct Sim {
     /// register test before it points SP all over SRAM without pushing
     /// anything, so the stack checks wait until it's done.
     testing: Option<u32>,
+    /// What the running handler has to give back.
+    landed: Option<Landed>,
+    /// Handlers so far that landed with a TCA0 16-bit access half done.
+    mid_access: u32,
 }
 
 /// Where startup ended up.
@@ -813,6 +820,8 @@ impl Sim {
             executed: 0,
             unhandled,
             testing: None,
+            landed: None,
+            mid_access: 0,
         })
     }
 
@@ -861,7 +870,9 @@ impl Sim {
         }
         let pc = self.cpu.pc;
         let awake = !self.cpu.asleep;
+        let handling = self.cpu.handling;
         self.cpu.step(&mut self.chip)?;
+        self.watch_handler(handling)?;
         if awake {
             self.executed += 1;
             self.chip.elapse()?;
@@ -979,6 +990,9 @@ struct Chip {
     /// The high byte of a CMPn, latched into TEMP by reading its low byte,
     /// and which register that was.
     compare_temp: Option<(usize, u8)>,
+    /// The low byte of the TCA0 register the running handler caught halfway
+    /// through an access, which is what it mustn't disturb.
+    interrupted: Option<usize>,
     /// Times `sleep` has run in power-down.
     power_downs: u64,
     /// What the ADC measures.
@@ -1095,6 +1109,7 @@ impl Chip {
             compare: [0; 2],
             compare_update: None,
             compare_temp: None,
+            interrupted: None,
             power_downs: 0,
             world: World::NORMAL,
             adc: Adc::default(),
@@ -1634,6 +1649,96 @@ fn name(addr: usize) -> String {
         .map_or_else(|| format!("{addr:#06x}"), |(_, n)| (*n).to_string())
 }
 
+/// What a handler found when it landed, with its return address pushed.
+struct Landed {
+    r: [u8; 32],
+    sreg: u8,
+    sp: u16,
+}
+
+impl Sim {
+    /// Takes note of a handler starting or finishing. `before` is what the
+    /// CPU was handling before the step just run.
+    fn watch_handler(&mut self, before: Option<u8>) -> Result<(), String> {
+        match (before, self.cpu.handling) {
+            (None, Some(_)) => {
+                self.chip.interrupted = self.chip.temp_held();
+                self.mid_access += u32::from(self.chip.interrupted.is_some());
+                self.landed = Some(Landed {
+                    r: self.cpu.r,
+                    sreg: self.cpu.sreg,
+                    sp: self.cpu.sp,
+                });
+            }
+            (Some(vector), None) => {
+                self.chip.interrupted = None;
+                if let Some(landed) = self.landed.take() {
+                    self.gave_back(&landed)
+                        .map_err(|e| format!("the handler for {}: {e}", vector_name(vector)))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A handler lands between any two instructions of the main loop, so
+    /// anything it changes, the compiled code around it sees change at random.
+    fn gave_back(&self, landed: &Landed) -> Result<(), String> {
+        let changed = (0..32).find(|&n| self.cpu.r[n] != landed.r[n]);
+        if let Some(n) = changed {
+            return Err(format!(
+                "returns with r{n} at {:#04x}, not the {:#04x} it found",
+                self.cpu.r[n], landed.r[n]
+            ));
+        }
+        if self.cpu.sreg != landed.sreg {
+            return Err(format!(
+                "returns with SREG at {:#04x}, not the {:#04x} it found",
+                self.cpu.sreg, landed.sreg
+            ));
+        }
+        if self.cpu.sp != landed.sp.wrapping_add(2) {
+            return Err(format!(
+                "returns with SP at {:#06x}, having found it at {:#06x}",
+                self.cpu.sp,
+                landed.sp.wrapping_add(2)
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Chip {
+    /// The low byte of the TCA0 register that's halfway through an access,
+    /// with TEMP holding the other half.
+    fn temp_held(&self) -> Option<usize> {
+        self.temp.or(self.compare_temp).map(|(low, _)| low)
+    }
+
+    /// Refuses a handler's access to `a`, if it's one of TCA0's 16-bit
+    /// registers and the handler caught the main loop halfway through one.
+    /// TCA0 has one TEMP for all of them (§20.5.13), so the handler overwrites
+    /// the main loop's half and the main loop finishes with the wrong one.
+    /// §8.5.6 also allows saving and restoring TCA0.TEMP in the handler, which
+    /// isn't modelled: the firmware's handlers leave TCA0 alone.
+    fn temp_undisturbed(&self, a: usize) -> Result<(), String> {
+        let Some(low) = self.interrupted else {
+            return Ok(());
+        };
+        let reads = [reg::TCA0_CMP0, reg::TCA0_CMP1];
+        if WIDE.iter().chain(&reads).any(|&w| w == a & !1) {
+            return Err(format!(
+                "a handler touches {} with the main loop halfway through {}, and they \
+                 share TCA0's TEMP byte, so one corrupts the other (section 8.5.6)",
+                name(a & !1),
+                name(low)
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Bus for Chip {
     fn fetch(&self, pc: u32) -> Option<u16> {
         word(&self.flash, pc as usize * 2)
@@ -1703,6 +1808,7 @@ impl Bus for Chip {
 
     fn read(&mut self, addr: u16) -> Result<u8, String> {
         let a = usize::from(addr);
+        self.temp_undisturbed(a)?;
         if SRAM.contains(&addr) {
             let Some(fault) = self.world.ram else {
                 return Ok(self.sram[usize::from(addr - SRAM.start)]);
@@ -1788,6 +1894,7 @@ impl Bus for Chip {
 
     fn write(&mut self, addr: u16, value: u8) -> Result<(), String> {
         let a = usize::from(addr);
+        self.temp_undisturbed(a)?;
         self.ccp_hold = false;
         if SRAM.contains(&addr) {
             let cell = self.world.ram.map_or(addr, |fault| fault.cell(addr));
@@ -2839,6 +2946,8 @@ mod tests {
     const OUT_GPIOR0_R17: u16 = 0xBB1C; // out GPIO.GPIOR0, r17
     const STS_R17: u16 = 0x9310; // sts k, r17; k is the next word
     const STS_R18: u16 = 0x9320;
+    const LDS_R19: u16 = 0x9130; // lds r19, k
+    const LDS_R20: u16 = 0x9140;
 
     /// Where `counting_handler` writes down r17.
     const SEEN: u16 = 0x3900;
@@ -2949,6 +3058,134 @@ mod tests {
         assert_eq!(s.chip.porta_flags, SWITCH, "pending");
         s.step().unwrap();
         assert_eq!(s.cpu.handling, Some(VECTOR_PORTA_PORT as u8));
+    }
+
+    /// `main`'s first access to a TCA0 register, halfway: r18 is 0xFF, then
+    /// `first` runs, and the PORTA interrupt lands before `second`.
+    fn landing_between(first: [u16; 2], second: [u16; 2], handler: &[u16]) -> Sim {
+        let main = [SET_UP[0], first[0], first[1], second[0], second[1], SPIN];
+        let mut s = sim_with_handler(&main, handler);
+        s.cpu.sreg |= 1 << I;
+        for _ in 0..3 {
+            s.step().unwrap(); // jmp, ldi and `first`
+        }
+        s.chip.porta_flags = SWITCH;
+        s.step().unwrap();
+        assert!(s.cpu.handling.is_some());
+        s
+    }
+
+    fn landing_mid_write(handler: &[u16]) -> Sim {
+        let low = reg::TCA0_CMP0BUF as u16;
+        landing_between([STS_R18, low], [STS_R18, low + 1], handler)
+    }
+
+    fn landing_mid_read(handler: &[u16]) -> Sim {
+        let low = reg::TCA0_CMP0 as u16;
+        landing_between([LDS_R19, low], [LDS_R20, low + 1], handler)
+    }
+
+    /// Clears PORTA's flags with r18, and that's all.
+    fn quiet_handler() -> Vec<u16> {
+        vec![STS_R18, PORTA_INTFLAGS as u16, RETI]
+    }
+
+    /// A handler landing between the two bytes is exercised, and one that
+    /// leaves TCA0 alone doesn't stop the write arriving whole.
+    #[test]
+    fn a_handler_lands_between_a_low_and_a_high_byte_write() {
+        let mut s = landing_mid_write(&quiet_handler());
+        assert_eq!(s.chip.temp, Some((reg::TCA0_CMP0BUF, 0xFF)));
+        assert_eq!(s.chip.wide(reg::TCA0_CMP0BUF), 0, "not written yet");
+        assert_eq!(s.mid_access, 1);
+        for _ in 0..4 {
+            s.step().unwrap(); // the handler's sts and reti, then the high byte
+        }
+        assert_eq!(s.cpu.handling, None);
+        assert_eq!(s.chip.temp, None);
+        assert_eq!(s.chip.wide(reg::TCA0_CMP0BUF), 0xFFFF);
+    }
+
+    #[test]
+    fn a_handler_lands_between_a_low_and_a_high_byte_read() {
+        let mut s = landing_mid_read(&quiet_handler());
+        assert_eq!(s.mid_access, 1);
+        for _ in 0..4 {
+            s.step().unwrap();
+        }
+        assert_eq!(s.chip.compare_temp, None);
+    }
+
+    /// Runs on through the handler to the error it has to end in.
+    fn refused(mut s: Sim) -> String {
+        (0..4).try_for_each(|_| s.step()).unwrap_err()
+    }
+
+    #[test]
+    fn a_handler_cant_touch_tca0s_temp_mid_write() {
+        let write = |addr: usize| [STS_R18, addr as u16, RETI];
+        let read = |addr: usize| [LDS_R19, addr as u16, RETI];
+        // Another register's low byte, its high byte, the same register, and
+        // a read, whose low byte would overwrite TEMP with its own high byte.
+        for (handler, touched) in [
+            (write(reg::TCA0_CMP1BUF), "TCA0.CMP1BUF"),
+            (write(reg::TCA0_CMP1BUF + 1), "TCA0.CMP1BUF"),
+            (write(reg::TCA0_CMP0BUF), "TCA0.CMP0BUF"),
+            (write(reg::TCA0_CNT), "TCA0.CNT"),
+            (write(reg::TCA0_PERBUF), "TCA0.PERBUF"),
+            (read(reg::TCA0_CMP1), "TCA0.CMP1"),
+        ] {
+            let err = refused(landing_mid_write(&handler));
+            let want = format!("touches {touched} with the main loop halfway through TCA0.CMP0BUF");
+            assert!(err.contains(&want), "{err}");
+            assert!(err.contains("section 8.5.6"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_handler_cant_touch_tca0s_temp_mid_read() {
+        let handler = [STS_R18, reg::TCA0_CNT as u16, RETI];
+        let err = refused(landing_mid_read(&handler));
+        assert!(err.contains("halfway through TCA0.CMP0"), "{err}");
+    }
+
+    #[test]
+    fn a_handler_is_free_with_tca0_when_nothing_was_halfway() {
+        let low = reg::TCA0_CMP1BUF as u16;
+        let handler = [
+            STS_R18,
+            low,
+            STS_R18,
+            low + 1,
+            STS_R18,
+            PORTA_INTFLAGS as u16,
+            RETI,
+        ];
+        let mut s = sim_with_handler(&[SET_UP[0], SEI, NOP, SPIN], &handler);
+        s.chip.porta_flags = SWITCH;
+        for _ in 0..10 {
+            s.step().unwrap();
+        }
+        assert_eq!(s.chip.wide(reg::TCA0_CMP1BUF), 0xFFFF);
+        assert_eq!(s.mid_access, 0);
+    }
+
+    #[test]
+    fn a_handler_gives_back_what_it_found() {
+        let flags = PORTA_INTFLAGS as u16;
+        // lds r19, SEEN changes r19; sec changes SREG; push r18 leaves SP down.
+        for (body, want) in [
+            (vec![LDS_R19, SEEN], "r19 at 0xa5"),
+            (vec![0x9408], "SREG at 0x81"),
+            (vec![0x932F], "SP at 0x3ffe"),
+        ] {
+            let handler = [&body[..], &[STS_R18, flags, RETI]].concat();
+            let mut s = sim_with_handler(&[SET_UP[0], SEI, NOP, SPIN], &handler);
+            s.chip.porta_flags = SWITCH;
+            let err = (0..12).try_for_each(|_| s.step()).unwrap_err();
+            assert!(err.contains("PORTA_PORT (vector 3)"), "{err}");
+            assert!(err.contains(want), "{err}");
+        }
     }
 
     /// Polling the PIT flag doesn't move time on, and the loop budget
