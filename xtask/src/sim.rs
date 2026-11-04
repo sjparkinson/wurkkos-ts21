@@ -197,6 +197,9 @@ pub(crate) const WDT_WINDOW: u8 = 0xF0;
 /// the WDT by 32. Only at CYC512, so a tick refuses any other PIT period
 /// while the WDT's on.
 const WDT_CLOCKS_PER_TICK: u32 = 16;
+/// What the error says when the watchdog runs out, which a `wdr` in the
+/// closed window's error doesn't.
+const WDT_TIMED_OUT: &str = "without wdr";
 // The WDT model counts whole ticks, which only works while a pass can't
 // overrun one and drop a tick unseen.
 const _: () = assert!(TICK_BUDGET < TICK_CYCLES / 2);
@@ -568,14 +571,24 @@ fn ui_example(
     }
 }
 
+/// The `cli` instruction.
+const CLI: u16 = 0x94F8;
+
 /// Checks a chip that's stopped in `__selftest_failed` stays there, with
 /// the FET and linear pins driven low and everything else off.
 /// It presses and releases the switch a few times on the way, since
 /// "nothing, ever" includes clicks.
 fn stays_dark(sim: &mut Sim) -> Result<(), String> {
     // `__selftest_failed` starts with a `cli`, then spins.
+    let cli = sim.cpu.pc;
+    if word(&sim.chip.flash, cli as usize * 2) != Some(CLI) {
+        return Err("__selftest_failed doesn't start with cli".into());
+    }
     sim.step()?;
     let failed = sim.cpu.pc;
+    if failed != cli + 1 {
+        return Err(format!("went from cli to {:#06x}", failed * 2));
+    }
     for step in 0..2_000 {
         if step % 250 == 0 {
             sim.chip.set_switch(step % 500 == 0)?;
@@ -914,8 +927,14 @@ fn run_until(sim: &mut Sim, failed: u32, ticks: u32) -> Result<Option<u32>, Stri
 
 /// Checks a chip that's just reached `__ram_section_failed` turns the light
 /// off straight away and stays there, with interrupts off and without
-/// feeding the watchdog, until the watchdog resets it.
+/// feeding the watchdog, until the watchdog resets it, on the tick the
+/// last feed's windows run out (§19.3.3.2). A feed in the closed window would
+/// reset it too, but that's a fault, and one in the open window pushes the
+/// reset past that tick.
 fn held_low_until_reset(sim: &mut Sim) -> Result<(), String> {
+    let timeout = (sim.chip.wdt_closed() + sim.chip.wdt_open()).div_ceil(WDT_CLOCKS_PER_TICK);
+    let left = timeout.saturating_sub(sim.chip.wdt.ticks);
+    let reset_on = sim.chip.ticks + left;
     sim.step()?; // ldi
     sim.step()?; // sts
     let stopped = sim.cpu.pc;
@@ -931,8 +950,8 @@ fn held_low_until_reset(sim: &mut Sim) -> Result<(), String> {
     if sim.cpu.flag(I) {
         return Err("failed the periodic RAM test with interrupts on".into());
     }
-    let timeout = u64::from(WDT_CLOCKS_PER_TICK.div_ceil(2)) * PIT_PERIOD;
-    for _ in 0..timeout {
+    // A whole timeout past that, so a late reset gets called late.
+    for _ in 0..u64::from(left + timeout + 1) * PIT_PERIOD {
         match sim.step() {
             Ok(()) if sim.cpu.pc == stopped => {}
             Ok(()) => {
@@ -941,7 +960,13 @@ fn held_low_until_reset(sim: &mut Sim) -> Result<(), String> {
                     sim.cpu.pc * 2
                 ));
             }
-            Err(e) if e.contains("would have reset") => return Ok(()),
+            Err(e) if e.contains(WDT_TIMED_OUT) && sim.chip.ticks == reset_on => return Ok(()),
+            Err(e) if e.contains(WDT_TIMED_OUT) => {
+                return Err(format!(
+                    "the watchdog reset it on tick {}, not {reset_on}: {e}",
+                    sim.chip.ticks
+                ));
+            }
             Err(e) => return Err(e),
         }
     }
@@ -1828,9 +1853,8 @@ impl Chip {
         let timeout = self.wdt_closed() + self.wdt_open();
         if clocks >= timeout {
             return Err(format!(
-                "the watchdog went {ticks} ticks ({clocks} WDT clocks) without \
-                 wdr, against a {timeout}-clock timeout, so the chip would \
-                 have reset"
+                "the watchdog went {ticks} ticks ({clocks} WDT clocks) {WDT_TIMED_OUT}, \
+                 against a {timeout}-clock timeout, so the chip would have reset"
             ));
         }
         Ok(())
@@ -3584,23 +3608,111 @@ mod tests {
             s.chip.io[reg::VPORTB_DIR] = FET | LINEAR;
             s.step().unwrap(); // jmp
         };
-        let mut s = sim(&[SPIN]);
+        let mut s = sim(&[CLI, SPIN]);
         dark(&mut s);
         assert_eq!(stays_dark(&mut s), Ok(()));
 
-        let mut s = sim(&[SPIN]);
+        let mut s = sim(&[CLI, SPIN]);
         s.step().unwrap();
         assert!(stays_dark(&mut s).unwrap_err().contains("floating"));
 
-        let mut s = sim(&[SPIN]);
+        // The `cli` can't clear an I bit that's stuck.
+        let mut s = sim(&[CLI, SPIN]);
         dark(&mut s);
-        s.cpu.sreg |= 1 << I;
+        s.chip.world.register = Some(RegisterFault::Stuck {
+            reg: Register::Sreg,
+            bit: I,
+            high: true,
+        });
         assert!(stays_dark(&mut s).unwrap_err().contains("interrupts on"));
 
         // nop, then back to the start: it leaves the spin.
-        let mut s = sim(&[NOP, 0xCFFE]);
+        let mut s = sim(&[CLI, NOP, 0xCFFE]);
         dark(&mut s);
         assert!(stays_dark(&mut s).unwrap_err().contains("left"));
+
+        let mut s = sim(&[NOP, SPIN]);
+        dark(&mut s);
+        assert!(stays_dark(&mut s).unwrap_err().contains("cli"));
+    }
+
+    /// `__ram_section_failed`'s shape: two instructions, then the spin.
+    const STOP: [u16; 3] = [NOP, NOP, SPIN];
+
+    /// A chip about to run `main` as if it were `__ram_section_failed`, with
+    /// the windows `hw::init` sets, just fed.
+    fn failing(main: &[u16]) -> Sim {
+        let mut s = sim(main);
+        s.step().unwrap(); // jmp
+        s.chip.io[reg::VPORTB_DIR] = FET | LINEAR;
+        s.chip.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        s.chip.io[reg::WDT_CTRLA] = regs::WDT_WINDOW_32CLK | regs::WDT_PERIOD_32CLK;
+        s.chip.wdt.windowed = true;
+        s
+    }
+
+    #[test]
+    fn a_failed_section_holds_the_light_off_until_the_watchdog_runs_out() {
+        assert_eq!(held_low_until_reset(&mut failing(&STOP)), Ok(()));
+
+        let mut s = failing(&STOP);
+        s.chip.wdt.ticks = 3;
+        let tick = s.chip.ticks;
+        assert_eq!(held_low_until_reset(&mut s), Ok(()));
+        assert_eq!(s.chip.ticks, tick + 1, "a tick's left of the 64 clocks");
+    }
+
+    #[test]
+    fn a_failed_section_mustnt_leave_the_light_on_or_the_pins_floating() {
+        let mut s = failing(&STOP);
+        s.chip.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
+        s.chip.io[reg::TCA0_CTRLB] = regs::TCA_CMP0EN | regs::TCA_CMP1EN;
+        s.chip.wide = [0, 255, 200, 100];
+        assert!(held_low_until_reset(&mut s).unwrap_err().contains("LEDs"));
+
+        let mut s = failing(&STOP);
+        s.chip.io[reg::VPORTB_DIR] = FET;
+        let err = held_low_until_reset(&mut s).unwrap_err();
+        assert!(err.contains("floating"), "{err}");
+
+        let mut s = failing(&STOP);
+        s.cpu.sreg |= 1 << I;
+        let err = held_low_until_reset(&mut s).unwrap_err();
+        assert!(err.contains("interrupts on"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_section_mustnt_go_anywhere_or_feed_the_watchdog() {
+        // A nop where the spin should be, then back to it.
+        let err = held_low_until_reset(&mut failing(&[NOP, NOP, NOP, 0xCFFE])).unwrap_err();
+        assert!(err.contains("left"), "{err}");
+
+        // A wdr in the closed window.
+        const WDR: u16 = 0x95A8;
+        let err = held_low_until_reset(&mut failing(&[WDR, NOP, SPIN])).unwrap_err();
+        assert!(err.contains("closed window"), "{err}");
+
+        // A wdr in the open window, which puts the reset off.
+        let mut s = failing(&[WDR, NOP, SPIN]);
+        s.chip.wdt.ticks = 3;
+        let err = held_low_until_reset(&mut s).unwrap_err();
+        assert!(err.contains("the watchdog reset it on tick"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_section_needs_the_watchdog_to_reset_it() {
+        let mut s = failing(&STOP);
+        s.chip.io[reg::WDT_CTRLA] = 0;
+        let err = held_low_until_reset(&mut s).unwrap_err();
+        assert!(err.contains("never reset"), "{err}");
+    }
+
+    #[test]
+    fn an_rjmp_only_goes_forwards_and_within_reach() {
+        assert_eq!(rjmp(10, 11), Ok(0xC000));
+        assert_eq!(rjmp(10, 2058), Ok(0xC7FF));
+        assert!(rjmp(10, 2059).unwrap_err().contains("can't reach"));
+        assert!(rjmp(10, 10).unwrap_err().contains("can't reach"));
     }
 
     #[test]
