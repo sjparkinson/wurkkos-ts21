@@ -35,9 +35,13 @@ use core::arch::global_asm;
 
 use crate::regs;
 
-// The table below has the one handled vector, with runs of unhandled slots
-// either side of it.
-const _: () = assert!(0 < regs::VECTOR_RTC_PIT && regs::VECTOR_RTC_PIT < regs::VECTORS);
+// The table below lists the handled vectors in this order, with runs of
+// unhandled slots between them.
+const _: () = assert!(
+    0 < regs::VECTOR_RTC_PIT
+        && regs::VECTOR_RTC_PIT < regs::VECTOR_TCB0_INT
+        && regs::VECTOR_TCB0_INT < regs::VECTORS
+);
 
 // `global_asm!` drops raw assembly into the object file, outside any Rust
 // function. The `{...}` placeholders are filled from the arguments at the
@@ -64,14 +68,18 @@ global_asm!(
     // Slot 0 is reset.
     "  jmp __reset",
     // Slots 1 to 30 are the interrupts. `.rept` and `.endr` make the
-    // assembler repeat the line between them. One has a handler in hw.rs,
-    // RTC_PIT (the tick). The rest go to `__unhandled_interrupt`. Nothing
-    // enables them, so they can't fire.
+    // assembler repeat the line between them. Two have handlers in hw.rs,
+    // RTC_PIT (the tick) and TCB0_INT (the tick's deadline). The rest go to
+    // `__unhandled_interrupt`. Nothing enables them, so they can't fire.
     "  .rept {before_pit}",
     "  jmp __unhandled_interrupt",
     "  .endr",
     "  jmp {rtc_pit}",
-    "  .rept {after_pit}",
+    "  .rept {before_tcb0}",
+    "  jmp __unhandled_interrupt",
+    "  .endr",
+    "  jmp {tcb0_int}",
+    "  .rept {after_tcb0}",
     "  jmp __unhandled_interrupt",
     "  .endr",
     "",
@@ -665,11 +673,13 @@ global_asm!(
     ".endr",
     "1:",
     "  rjmp 1b",
-    // The unhandled slots: from 1 up to RTC_PIT, and from there to the end.
-    // Slot 0 is reset.
+    // The unhandled slots: from 1 up to RTC_PIT, between the two handled
+    // vectors, and from TCB0_INT to the end. Slot 0 is reset.
     before_pit = const regs::VECTOR_RTC_PIT - 1,
     rtc_pit = sym crate::hw::rtc_pit,
-    after_pit = const regs::VECTORS - regs::VECTOR_RTC_PIT - 1,
+    before_tcb0 = const regs::VECTOR_TCB0_INT - regs::VECTOR_RTC_PIT - 1,
+    tcb0_int = sym crate::hw::tcb0_int,
+    after_tcb0 = const regs::VECTORS - regs::VECTOR_TCB0_INT - 1,
     // SREG's I/O address, small enough for `out` to reach.
     sreg = const regs::addr::CPU_SREG,
     // The pins to hold low, and their direction register.

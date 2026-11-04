@@ -1,6 +1,6 @@
 # The UI
 
-What every click and hold does. This is the spec. `src/ui.rs` implements the clicks and `src/limits.rs` the low battery, the heat and what a failed flash, fuse or watchdog check does, and `src/watchdog.rs` the proof and what each reset means, and their tests check it. A failed register or RAM test is `src/rt.rs`'s, and the simulator checks that, so change this file in the same commit as the code.
+What every click and hold does. This is the spec. `src/ui.rs` implements the clicks, `src/limits.rs` the low battery, the heat and what a failed flash, fuse or watchdog check does, `src/watchdog.rs` the proof and what each reset means, and `src/torch.rs` what a failed clock check does, and their tests check it. A failed register or RAM test is `src/rt.rs`'s, and the simulator checks that, so change this file in the same commit as the code.
 
 The notation is Anduril's. **1C** is one click, **1H** press and hold, and so on. Clicks count once the switch has been left alone for about 280 ms.
 
@@ -28,7 +28,7 @@ It always comes on at level 50 of 150, which is on the linear channel. The FET n
 
 ## Low battery and heat
 
-These aren't clicks, they're what the light does on its own. The Action column says what's going on, and the examples set the scene with words `cargo xtask simulate` understands: `cell:3.05V` for the cell (it starts at 3.8 V), `temp:70C` for the MCU (it starts at 25 °C) and `adc:0` for an ADC that reads 0 every time.
+These aren't clicks, they're what the light does on its own. The Action column says what's going on, and the examples set the scene with words `cargo xtask simulate` understands: `cell:3.05V` for the cell (it starts at 3.8 V), `temp:70C` for the MCU (it starts at 25 °C), `adc:0` for an ADC that reads 0 every time, `osc:40%` or `osc:dead` for the 32 kHz oscillator, `clk:400%` for the main clock and `tca:stopped` for a TCA0 that's stopped counting.
 
 The light runs at the lowest of the UI's level, the thermal ceiling, the battery ceiling and the self-test cap below, and both ceilings fade a level at a time rather than jump. Readings that can't be real (a voltage outside 2.00 to 4.60 V, a temperature outside -40 to 150 °C) are never taken as safe: a second of them drops that ceiling to level 75, the top of the linear channel, and never turns the light off.
 
@@ -42,6 +42,18 @@ The light runs at the lowest of the UI's level, the thermal ceiling, the battery
 | MCU over 45 °C, on | Fades down towards level 75, never below it, and back up as it cools. At level 50 that's nothing yet, since 50 is under the floor; it shows once the full UI's back | `temp:70C 1C wait:60s` → level 50 | Done |
 | Garbage readings, on | Ceiling at level 75, so nothing changes at level 50 | `adc:0 1C wait:10s` → level 50 | Done |
 | Garbage readings, off | Nothing. The light never lights on its own | `adc:0 1H:3s wait:1s` → off | Done |
+| 32 kHz oscillator stops, on | Off within two ticks, and it stays off until the cell comes out: clicks do nothing | `1C wait:1s osc:dead wait:1s 1C` → off | Done |
+| 32 kHz oscillator dead from power-on | Off for good, as above | `osc:dead 1C wait:2s` → off | Done |
+| Main clock badly wrong, on | Off within a second, for good | `1C wait:1s clk:400% wait:2s 1C` → off | Done |
+| 32 kHz oscillator badly wrong from power-on | Off for good, before a click can turn it on | `osc:200% 1C wait:2s` → off | Done |
+| TCA0 stopped, on | Off within a second, for good | `1C wait:1s tca:stopped wait:2s 1C` → off | Done |
+| TCA0 stopped, then 1C | Off as usual, and for good at the next power-on count | `1C wait:1s tca:stopped 1C wait:3s` → off | Done |
+| 32 kHz oscillator stops during a count | Off for good, as above | `1C wait:576ms osc:dead wait:3s` → off | Done |
+| TCA0 and the 32 kHz oscillator both stop during a count | Off for good, as above | `1C wait:576ms osc:dead tca:stopped wait:3s 1C` → off | Done |
+| A clock badly wrong only while the torch rests | Nothing, since nothing's counted at rest | `wait:1s osc:40% wait:1s osc:100% wait:1s 1C wait:1s` → level 50 | Done |
+| Clocks at the edge of their spread | Nothing. The 32 kHz oscillator alone can be 30% out on a good chip | `osc:130% 1C wait:2s` → level 50 | Done |
+
+The clock check counts how many PWM cycles fit between two 64 Hz ticks, which is the main clock against the 32 kHz oscillator. It runs once at power-on and once a second while the light's on, and a tick that doesn't come at all is caught sooner, by a timer on the main clock that gives up on it after about 26 ms. Anything from 154 to 512 passes, against 306 on a perfect chip (`selftest::ClockCheck` has the sums). That's wide, since a false trip turns a working torch off for good, so it only catches a clock out by about a half or more. A light that fails it is off, and it looks like a torch that's off with the button LED lit, except that nothing turns it on until the cell's been taken out and put back.
 
 The cell's only read with the light on or the switch in use, since the ADC can't run while the torch [sleeps](#always-on-in-the-background). After five minutes off it forgets the last readings, so a cell that ran down in a drawer is judged on what it reads now, while clicking off and on can't buy a sagging cell more time. It also means a battery ceiling only climbs while the cell's being read: after stepping down, the light can come back dimmer than it should, then fade up.
 
@@ -49,7 +61,7 @@ The thresholds and the 0614 voltage calibration are a starting point, not measur
 
 ## Self-tests at power-on
 
-Before it turns anything on, the firmware checks flash against the CRC that `cargo xtask hex` stores in its last two bytes, and reads its fuses back (`src/selftest.rs` has which fields and why). It never writes them. A failure doesn't leave a dead torch: the light quietly refuses the FET until the cell comes out, and does everything else as usual, low-voltage protection included.
+Before it turns anything on, the firmware checks flash against the CRC that `cargo xtask hex` stores in its last two bytes, and reads its fuses back (`src/selftest.rs` has which fields and why). It never writes them. A failure doesn't leave a dead torch: the light quietly refuses the FET until the cell comes out, and does everything else as usual, low-voltage protection included. The clock check runs at power-on too, but it keeps running and a failure turns the light off, so it's [above](#low-battery-and-heat).
 
 Before any of that, before memory's even set up, it tests r0 to r31, SREG and the stack pointer on every reset, and all of RAM on a power-on or UPDI reset and after a hang (`src/rt.rs` has how, after AN2632 §3.1, §5 and §9.2). The watchdog proof's own resets skip the RAM test, and so do brown-out, software and external resets, which have nothing to say about RAM. Those failures are different. The Rust code that caps the light can't be trusted on a chip with broken RAM or registers, so the firmware stops there for good, with the FET and linear pins held low. Nothing responds, and the button LED stays dark too, which is how to tell it from a torch that's only off. It's most likely a damaged chip.
 

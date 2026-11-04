@@ -5,7 +5,7 @@
 
 use crate::button::{Clicks, Event};
 use crate::limits::Limits;
-use crate::selftest::Faults;
+use crate::selftest::{ClockCheck, Faults};
 use crate::sensors::Convert;
 use crate::temp::Calibration;
 use crate::ui::Ui;
@@ -15,6 +15,7 @@ pub struct Torch {
     clicks: Clicks,
     ui: Ui,
     limits: Limits,
+    clock: ClockCheck,
 }
 
 impl Torch {
@@ -25,13 +26,20 @@ impl Torch {
             clicks: Clicks::new(),
             ui: Ui::new(),
             limits: Limits::new(calibration, faults),
+            clock: ClockCheck::new(),
         }
     }
 
     /// One 64 Hz tick, `pressed` meaning the switch is down and `adc` the
     /// ADC's result, if it has one ready. Returns the click or hold this
-    /// sample finished, if any.
+    /// sample finished, if any. After a failed clock check it does nothing
+    /// but keep the light off.
     pub fn tick(&mut self, pressed: bool, adc: Option<u16>) -> Option<Event> {
+        if self.clock.failed() {
+            self.ui.off();
+            self.limits.rest();
+            return None;
+        }
         let event = self.clicks.tick(pressed);
         if let Some(event) = event {
             self.ui.handle(event);
@@ -41,18 +49,39 @@ impl Torch {
         }
         // Checked again, so a pass that turns the light off has already
         // rested if the firmware powers down straight after it.
-        if self.resting() {
+        let resting = self.resting();
+        if resting {
             self.limits.rest();
         }
+        self.clock.tick(resting);
         event
     }
 
     /// Whether there's nothing to do until the switch moves: the light's
     /// off and no click is being counted. The firmware powers down between
     /// these ticks, and a press ends it on the tick that sees the press, in
-    /// time to read the cell before a click can turn the light on.
+    /// time to read the cell before a click can turn the light on. A torch
+    /// that's failed its clock check rests for good.
     pub fn resting(&self) -> bool {
-        self.clicks.idle() && self.ui.output_level() == 0 && self.limits.level() == 0
+        self.clock.failed()
+            || self.clicks.idle() && self.ui.output_level() == 0 && self.limits.level() == 0
+    }
+
+    /// Whether the wait for the next tick should count TCA0's overflows
+    /// and hand them to [`Torch::clock`].
+    pub fn clock_due(&self) -> bool {
+        self.clock.due()
+    }
+
+    /// What the wait for a tick counted, or `selftest::NO_TICK` if the tick
+    /// never came.
+    pub fn clock(&mut self, overflows: u16) {
+        self.clock.result(overflows);
+    }
+
+    /// Whether the clock check has failed, so the light's off for good.
+    pub fn clock_failed(&self) -> bool {
+        self.clock.failed()
     }
 
     /// The level the LEDs should be at right now, `0` meaning off.
@@ -102,6 +131,7 @@ mod tests {
     use super::*;
     use crate::button::RELEASE_TICKS;
     use crate::ramp::{LEVELS, LINEAR_MAX, Output, output};
+    use crate::selftest::{NO_TICK, OVERFLOWS_MAX, OVERFLOWS_MIN};
     use crate::sensors::Channel;
     use crate::testing::{Adc, CALIBRATION, voltage_reading};
     use crate::ui::LEVEL;
@@ -295,6 +325,66 @@ mod tests {
         rig.run(true, 1);
         rig.run(false, RELEASE_TICKS + 1);
         assert_eq!(rig.level(), LEVEL);
+    }
+
+    #[test]
+    fn a_bad_clock_turns_the_light_off_on_the_next_tick_and_clicks_do_nothing() {
+        for overflows in [0, OVERFLOWS_MIN - 1, OVERFLOWS_MAX + 1, NO_TICK] {
+            let mut rig = Rig::new();
+            rig.click();
+            assert_eq!(rig.level(), LEVEL);
+            rig.torch.clock(overflows);
+            rig.tick(false);
+            assert_eq!(rig.level(), 0, "{overflows}");
+            assert!(rig.torch.resting(), "{overflows}");
+            assert_eq!(rig.torch.convert(), None, "{overflows}");
+            for _ in 0..3 {
+                rig.click();
+                assert_eq!(rig.level(), 0, "{overflows}");
+                assert!(rig.torch.resting(), "{overflows}");
+            }
+            rig.run(true, 3 * 64);
+            assert_eq!(rig.level(), 0, "{overflows}");
+        }
+    }
+
+    #[test]
+    fn a_failed_power_on_count_beats_the_first_click() {
+        for overflows in [0, OVERFLOWS_MIN - 1, OVERFLOWS_MAX + 1, NO_TICK] {
+            let mut rig = Rig::new();
+            rig.tick(false);
+            assert!(rig.torch.clock_due());
+            rig.torch.clock(overflows);
+            rig.click();
+            assert_eq!(rig.level(), 0, "{overflows}");
+            assert!(rig.torch.resting(), "{overflows}");
+        }
+    }
+
+    #[test]
+    fn a_clock_on_the_edge_of_its_window_leaves_the_light_alone() {
+        for overflows in [OVERFLOWS_MIN, OVERFLOWS_MAX] {
+            let mut rig = Rig::new();
+            rig.click();
+            rig.torch.clock(overflows);
+            rig.tick(false);
+            assert_eq!(rig.level(), LEVEL);
+            assert!(!rig.torch.clock_failed());
+        }
+    }
+
+    #[test]
+    fn counts_the_clock_after_the_first_tick_then_once_a_second_while_on() {
+        let mut rig = Rig::new();
+        assert!(!rig.torch.clock_due());
+        rig.tick(false);
+        assert!(rig.torch.clock_due());
+        rig.torch.clock(306);
+        rig.run(false, 3 * 64);
+        assert!(!rig.torch.clock_due(), "at rest");
+        rig.click();
+        rig.run(false, u16::from(crate::selftest::CLOCK_CHECK_TICKS));
+        assert!(rig.torch.clock_due());
     }
 
     #[test]

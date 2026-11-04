@@ -18,7 +18,7 @@ use core::mem::MaybeUninit;
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use ts21::ramp::{Output, PWM_TOP};
-use ts21::selftest::Fuses;
+use ts21::selftest::{Fuses, NO_TICK, OVERFLOWS_MAX};
 use ts21::sensors::{Channel, Convert};
 use ts21::temp::Calibration;
 
@@ -148,13 +148,39 @@ fn protected_write(addr: usize, value: u8) {
     }
 }
 
+/// Polls of a sync flag before giving up on it. The datasheet gives no time
+/// for WDT.CTRLA's sync. Going by the 2 to 3 WDT clocks a `wdr` takes
+/// (section 19.3.6), it's likely 3 ms, or 4.3 ms with the oscillator 30% slow,
+/// so about 22,000 cycles. A poll compiles to about 12, so this is about 40 ms,
+/// nine times that.
+const SYNC_POLLS: u16 = 16_384;
+
+/// TCB0's TOP, as far as it goes. At CLK_PER / 2 it fires about 131,072 cycles
+/// after CNT was last reset: 26.2 ms, against the 22.3 ms a tick can take with
+/// the 32 kHz oscillator 30% slow, and 25 ms with the main clock 5% fast.
+const TICK_DEADLINE: u16 = u16::MAX;
+
+// A counted wait restarts the deadline, and hits its ceiling before that
+// goes off, so the deadline only ends one with TCA0 stopped as well.
+const _: () = assert!(OVERFLOWS_MAX as u32 * (PWM_TOP as u32) < 2 * (TICK_DEADLINE as u32));
+
+/// Whether `mask` in `addr` clears soon enough. Everything that syncs to the
+/// 32 kHz oscillator waits here, since with that oscillator dead nothing
+/// would ever clear it, not even the watchdog, which runs off the same one.
+fn synced(addr: usize, mask: u8) -> bool {
+    (0..SYNC_POLLS).any(|_| read(addr) & mask == 0)
+}
+
+/// Sets everything up, and says whether the 32 kHz oscillator's alive. If it
+/// isn't, the PIT is left off.
+///
 /// `watchdog` is `WDT.CTRLA` for this boot, from `ts21::watchdog::Proof`. It's
 /// the only thing that changes between a step of the proof and normal use.
 /// Either way TCA0 starts with both compares at 0, and nothing but
 /// `set_output` changes them, so on every boot of the proof the pins are held
 /// low as they are with the light off. During a reset itself nothing holds
 /// them: every output tri-states (section 16.3.1).
-pub fn init(watchdog: u8) {
+pub fn init(watchdog: u8) -> bool {
     // 20 MHz oscillator (the factory OSCCFG fuse) divided by 4. 5 MHz is in
     // spec down to 1.8 V. 10 MHz needs 2.7 V (table 36-3), and VCC can go
     // under that near the cut-off, or on the FET quicker than the low-voltage
@@ -173,9 +199,9 @@ pub fn init(watchdog: u8) {
     // syncing. It keeps counting in every sleep mode, which is fine, since
     // the PIT does too and the loop runs every tick, on or off. Never set
     // WDT.STATUS.LOCK and never touch the WDTCFG fuse.
-    while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
+    let mut alive = synced(reg::WDT_STATUS, regs::WDT_SYNCBUSY);
     protected_write(reg::WDT_CTRLA, watchdog);
-    while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
+    alive &= synced(reg::WDT_STATUS, regs::WDT_SYNCBUSY);
 
     // Pull every pin we don't drive up, so nothing floats and leaks current,
     // and so the button LED on PB5 lights. Turn off the input buffers we
@@ -205,7 +231,10 @@ pub fn init(watchdog: u8) {
     // 5 MHz clock. The BUF registers apply at the end of a cycle, so level
     // changes never glitch. A compare of 0 holds the pin low and one over
     // PER holds it high (section 20.3.3.4.3), so PER is one under the top
-    // duty.
+    // duty. PER itself too, or the first cycle runs at its reset value of
+    // 0xFFFF until the buffer lands at BOTTOM (section 20.3.3.3): 13 ms of a
+    // tick, which is enough to fail the clock check at power-on.
+    write16(reg::TCA0_PER, PWM_TOP - 1);
     write16(reg::TCA0_PERBUF, PWM_TOP - 1);
     write16(reg::TCA0_CMP0BUF, 0);
     write16(reg::TCA0_CMP1BUF, 0);
@@ -230,12 +259,24 @@ pub fn init(watchdog: u8) {
     // stays at its reset value: any write to it stretches the PIT's period
     // and clearing RTCEN stops the PIT (errata DS80000886C 2.6.1 and 2.6.2).
     write(reg::RTC_PITINTCTRL, regs::RTC_PI);
-    while read(reg::RTC_PITSTATUS) & regs::RTC_CTRLBUSY != 0 {}
-    write(reg::RTC_PITCTRLA, regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN);
-    // The first sleep is power-down, and the datasheet doesn't say this
-    // write finishes syncing with the peripheral clock stopped. If it didn't,
-    // there'd be no ticks, so see it through.
-    while read(reg::RTC_PITSTATUS) & regs::RTC_CTRLBUSY != 0 {}
+    alive &= synced(reg::RTC_PITSTATUS, regs::RTC_CTRLBUSY);
+    if alive {
+        write(reg::RTC_PITCTRLA, regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN);
+        // The first sleep is power-down, and the datasheet doesn't say this
+        // write finishes syncing with the peripheral clock stopped. If it
+        // didn't, there'd be no ticks, so see it through.
+        alive = synced(reg::RTC_PITSTATUS, regs::RTC_CTRLBUSY);
+    }
+
+    // The deadline for the next tick, in TCB0's periodic interrupt mode,
+    // which is CTRLB's reset value. No other enabled interrupt comes off the
+    // main clock, and TCA0's would come 306 times a tick, so without this a
+    // dead 32 kHz oscillator would leave the light on with nothing running: no
+    // tick, no low-voltage protection, and no watchdog, which stops with it.
+    write16(reg::TCB0_CCMP, TICK_DEADLINE);
+    write(reg::TCB0_INTCTRL, regs::TCB_CAPT);
+    write(reg::TCB0_CTRLA, regs::TCB_CLKSEL_CLKDIV2 | regs::TCB_ENABLE);
+    alive
 }
 
 /// The bit in GPIOR0 that [`rtc_pit`] sets each tick. AN2515C section 4.5
@@ -247,6 +288,10 @@ pub fn init(watchdog: u8) {
 /// of RAM.
 const TICK: u8 = 1 << 0;
 
+/// What [`tcb0_int`] leaves in GPIOR1. It has a byte to itself because
+/// [`rtc_pit`] and the loop write all of GPIOR0.
+const OVERDUE: u8 = 1 << 0;
+
 /// Whether both PWM channels are really at 0, not only their BUF registers,
 /// which reach CMPn at the next BOTTOM. The datasheet doesn't say whether
 /// `set_output` writing CNT counts as one, so this reads the real thing.
@@ -257,8 +302,8 @@ fn output_settled() -> bool {
 /// Sets up the sleep that [`wait_for_tick`] goes on to do. `rest` is
 /// `Torch::resting`.
 ///
-/// Power-down stops TCA0 where it is, so it waits until the compares have
-/// settled at 0, a tick after the output went off. The datasheet doesn't say
+/// Power-down stops TCA0 where it is, so it waits until the compares are at
+/// 0, which `set_output` sees to as the output goes off. The datasheet doesn't say
 /// what level a waveform output holds in sleep, so CMPnEN goes off too,
 /// handing the pins to PORT, whose OUT is 0: the FET can't freeze on. They
 /// come back only while the compares are 0, or they'd glitch the old duty.
@@ -301,26 +346,85 @@ fn prepare_sleep(rest: bool) {
 /// If it isn't set yet, `sei` and `sleep` go back to back (AN2515C section
 /// 4.5): the instruction after `sei` always runs before a pending
 /// interrupt, so a tick that arrived after the check wakes the `sleep` at
-/// once rather than being slept through. The PIT's the only interrupt there
-/// is, but the flag still earns its place: without it, a tick that landed
-/// while the loop was busy would go uncounted, and the next feed would come
-/// a tick late, at the very end of the watchdog's open window.
-pub fn wait_for_tick(rest: bool) {
+/// once rather than being slept through. The flag earns its place: without
+/// it, a tick that landed while the loop was busy would go uncounted, and the
+/// next feed would come a tick late, at the very end of the watchdog's open
+/// window.
+///
+/// Returns false if [`tcb0_int`] gave up on the tick instead, which only
+/// happens in idle, since TCB0 stops in power-down. With the PIT the only
+/// thing that wakes it from there, a chip that's powered down when its 32 kHz
+/// oscillator dies stays down, which is off, until the cell comes out.
+pub fn wait_for_tick(rest: bool) -> bool {
     prepare_sleep(rest);
     loop {
         // SAFETY: `cli` only clears SREG.I. With no `nomem`, it's also a
         // compiler barrier, so the GPIOR0 read can't move above it.
         unsafe { asm!("cli", options(nostack)) };
-        if read(reg::GPIO_GPIOR0) & TICK != 0 {
+        let ticked = read(reg::GPIO_GPIOR0) & TICK != 0;
+        let overdue = read(reg::GPIO_GPIOR1) & OVERDUE != 0;
+        if ticked || overdue {
             write(reg::GPIO_GPIOR0, 0);
+            write(reg::GPIO_GPIOR1, 0);
+            write16(reg::TCB0_CNT, 0);
             // SAFETY: `sei` only sets SREG.I.
             unsafe { asm!("sei", options(nostack)) };
-            return;
+            return ticked;
         }
         // SAFETY: sets SREG.I and sleeps until an interrupt, whose handler
         // returns here. The handler saves what it touches.
         unsafe { asm!("sei", "sleep", options(nostack)) };
     }
+}
+
+/// Waits for the next tick like [`wait_for_tick`], awake, and counts TCA0's
+/// overflows on the way (`selftest::ClockCheck`). The firmware has no use for
+/// a 19.6 kHz interrupt, so this polls, with interrupts off so the PIT's flag
+/// stays up for it to see, and returns as soon as it's seen it. It never
+/// sleeps, so TCA0 keeps running even if the torch is resting.
+///
+/// The count starts where the last pass ended, not on the tick, so it's short
+/// by that pass. RTC.CTRLA stays out of it: the PIT's flag is the RTC tick
+/// here, and setting RTCEN to read RTC.CNT would stretch a PIT period (errata
+/// DS80000886C 2.6.1). A count over the ceiling stops there, so a dead 32 kHz
+/// oscillator can't hold it, and returns [`NO_TICK`]. The deadline restarts
+/// with the count, so it can't cut a good one short, and it's what ends this
+/// if TCA0 has stopped too.
+pub fn count_tick() -> u16 {
+    prepare_sleep(false);
+    // SAFETY: `cli` only clears SREG.I. With no `nomem`, it's also a compiler
+    // barrier, so nothing below can move above it.
+    unsafe { asm!("cli", options(nostack)) };
+    write(reg::TCA0_INTFLAGS, regs::TCA_OVF);
+    write16(reg::TCB0_CNT, 0);
+    let mut overflows = 0;
+    while read(reg::RTC_PITINTFLAGS) & regs::RTC_PI == 0 && overflows != NO_TICK {
+        if read(reg::TCB0_INTFLAGS) & regs::TCB_CAPT != 0 {
+            overflows = NO_TICK;
+        } else if read(reg::TCA0_INTFLAGS) & regs::TCA_OVF != 0 {
+            write(reg::TCA0_INTFLAGS, regs::TCA_OVF);
+            overflows += 1;
+            if overflows > OVERFLOWS_MAX {
+                overflows = NO_TICK;
+            }
+        }
+    }
+    if overflows != NO_TICK {
+        write(reg::RTC_PITINTFLAGS, regs::RTC_PI);
+        write16(reg::TCB0_CNT, 0);
+    }
+    // SAFETY: `sei` only sets SREG.I.
+    unsafe { asm!("sei", options(nostack)) };
+    overflows
+}
+
+/// TCB0_INT, vector 13: the tick's more than 26 ms late. Like [`rtc_pit`] it
+/// leaves a flag for [`wait_for_tick`], which is all it needs to do, since the
+/// point of it is to wake the CPU. Writing nothing wider than a byte, it can't
+/// upset a 16-bit write in the main loop.
+pub extern "avr-interrupt" fn tcb0_int() {
+    write(reg::TCB0_INTFLAGS, regs::TCB_CAPT);
+    write(reg::GPIO_GPIOR1, OVERDUE);
 }
 
 /// RTC_PIT, vector 7: the 64 Hz tick. It clears the PIT's flag and sets
@@ -510,5 +614,12 @@ pub fn set_output(output: Output) {
     if output == Output::OFF {
         // Restart the cycle so the next turn-on is consistent.
         write16(reg::TCA0_CNT, 0);
+        // The compares too, now, not at the next BOTTOM, which a stopped TCA0
+        // would never reach. That lets `prepare_sleep` power down on this
+        // pass, and it's that which takes the pins off TCA0 and leaves them
+        // low, whatever state the timer's in. The BUF writes above come
+        // first, since one still pending would land on top of these.
+        write16(reg::TCA0_CMP0, 0);
+        write16(reg::TCA0_CMP1, 0);
     }
 }

@@ -1,6 +1,6 @@
 //! What the torch sees, for the simulators: the cell's voltage, the MCU's
-//! temperature, an ADC that's broken, and the fuses, flash, RAM and CPU
-//! registers it checks at power-on.
+//! temperature, an ADC that's broken, the fuses, flash, RAM and CPU registers
+//! it checks at power-on, and the clocks it checks against each other.
 //!
 //! The library-side runs (`simulate.rs`) and the firmware on the simulated
 //! chip (`sim.rs`) both get their raw readings from here, so the two see
@@ -10,7 +10,8 @@ use std::fmt;
 use std::mem;
 use std::str::FromStr;
 
-use ts21::selftest::{Faults, Fuses};
+use ts21::ramp::PWM_TOP;
+use ts21::selftest::{Faults, Fuses, NO_TICK, OVERFLOWS_MAX};
 use ts21::sensors::Channel;
 use ts21::testing::{Adc, temperature_reading, voltage_reading};
 use ts21::torch::Torch;
@@ -493,6 +494,15 @@ fn bit_number(s: &str) -> Result<u8, String> {
         .ok_or_else(|| format!("expected a bit from 0 to 7, not `{s}`"))
 }
 
+/// A clock's speed in a script: `40%` of what it should be. The range keeps
+/// a tick longer than `sim.rs`'s budget for a pass.
+pub fn clock_percent(s: &str) -> Result<u16, String> {
+    s.strip_suffix('%')
+        .and_then(|n| n.parse().ok())
+        .filter(|n| (25..=400).contains(n))
+        .ok_or_else(|| format!("expected a speed from 25% to 400%, not `{s}`"))
+}
+
 /// `0` or `1`.
 fn level(s: &str) -> Result<bool, String> {
     match s {
@@ -528,6 +538,13 @@ pub struct World {
     /// The firmware's stuck, and stays stuck until the watchdog resets it.
     /// It's up to whoever's running the firmware to see that happens once.
     pub hang: bool,
+    /// The 32 kHz oscillator, as a percentage of 32.768 kHz, 0 being dead.
+    /// The PIT and the WDT run off it, so they go with it.
+    pub osc32k: u16,
+    /// The main clock, as a percentage of 5 MHz.
+    pub main_clock: u16,
+    /// TCA0's stopped counting, with the rest of the chip fine.
+    pub tca_stopped: bool,
 }
 
 impl Default for World {
@@ -549,7 +566,29 @@ impl World {
         wdt: None,
         proof_press: None,
         hang: false,
+        osc32k: 100,
+        main_clock: 100,
+        tca_stopped: false,
     };
+
+    /// TCA0 overflows between two ticks in this world, to the nearest below,
+    /// or `NO_TICK` with no ticks.
+    pub fn overflows(&self) -> u16 {
+        if self.osc32k == 0 {
+            return NO_TICK;
+        }
+        if self.tca_stopped {
+            return 0;
+        }
+        let cycles = 5_000_000 * u64::from(self.main_clock) / u64::from(self.osc32k);
+        (cycles / u64::from(PWM_TOP) / u64::from(ts21::TICKS_PER_SECOND)) as u16
+    }
+
+    /// Whether the tick's so late that the firmware gives up on it, rather
+    /// than waiting to count it.
+    pub fn overdue(&self) -> bool {
+        self.overflows() > OVERFLOWS_MAX
+    }
 
     /// Whether src/rt.rs's startup tests find a broken register or byte of
     /// RAM, and stop there with the light off for good. The library never
@@ -611,6 +650,8 @@ pub struct Rig {
     owed_press: bool,
     /// It's hung and been reset, which only happens the once.
     hung: bool,
+    /// What the wait after the last tick counted, if it was a counted one.
+    counted: Option<u16>,
 }
 
 impl Default for Rig {
@@ -623,12 +664,18 @@ impl Rig {
     /// A torch that's just had its cell put in, in `world`, which decides
     /// what its power-on self-tests find.
     pub fn new(world: &World) -> Self {
+        let mut torch = Torch::new(CALIBRATION, world.faults());
+        // `hw::init` gives up on a dead oscillator's sync flags.
+        if world.osc32k == 0 {
+            torch.clock(NO_TICK);
+        }
         Self {
-            torch: Torch::new(CALIBRATION, world.faults()),
+            torch,
             adc: Adc::new(),
             dead: world.dead(),
             owed_press: world.proof_press.is_some(),
             hung: false,
+            counted: None,
         }
     }
 
@@ -642,6 +689,7 @@ impl Rig {
             // at once; `sim.rs` waits for the bite and starts here from it.
             self.hung = true;
             self.adc = Adc::new();
+            self.counted = None;
             let faults = Faults {
                 watchdog: true,
                 ..world.faults()
@@ -649,9 +697,18 @@ impl Rig {
             self.torch = Torch::new(CALIBRATION, faults);
         }
         let pressed = pressed || mem::take(&mut self.owed_press);
+        if let Some(overflows) = self.counted.take() {
+            self.torch.clock(overflows);
+        } else if world.osc32k == 0 || world.overdue() && !self.torch.resting() {
+            // At rest TCB0 is stopped, so a late tick goes unseen. A dead
+            // oscillator stays off that way anyway, since no tick ever comes
+            // to see a press.
+            self.torch.clock(NO_TICK);
+        }
         let event = self.torch.tick(pressed, self.adc.result());
         self.adc
             .start_with(self.torch.convert(), |channel| world.reading(channel));
+        self.counted = self.torch.clock_due().then(|| world.overflows());
         event
     }
 
@@ -991,6 +1048,71 @@ mod tests {
             assert_eq!(rig.level(), 0);
         }
         assert!(!World::NORMAL.dead());
+    }
+
+    #[test]
+    fn overflows_follow_the_two_clocks() {
+        let world = |osc32k, main_clock| World {
+            osc32k,
+            main_clock,
+            ..World::NORMAL
+        };
+        assert_eq!(World::NORMAL.overflows(), 306);
+        assert_eq!(world(50, 100).overflows(), 612);
+        assert_eq!(world(100, 200).overflows(), 612);
+        assert_eq!(world(200, 100).overflows(), 153);
+        assert_eq!(world(0, 100).overflows(), NO_TICK);
+        let stopped = World {
+            tca_stopped: true,
+            ..World::NORMAL
+        };
+        assert_eq!(stopped.overflows(), 0);
+        assert!(world(0, 100).overdue() && world(50, 100).overdue());
+        assert!(!World::NORMAL.overdue() && !stopped.overdue());
+    }
+
+    #[test]
+    fn the_rig_turns_off_for_a_clock_that_goes_wrong() {
+        for world in [
+            World {
+                osc32k: 0,
+                ..World::NORMAL
+            },
+            World {
+                main_clock: 400,
+                ..World::NORMAL
+            },
+            World {
+                osc32k: 200,
+                ..World::NORMAL
+            },
+            World {
+                tca_stopped: true,
+                ..World::NORMAL
+            },
+        ] {
+            let mut rig = Rig::default();
+            for pressed in [true, true, true, true, false]
+                .into_iter()
+                .chain([false; 80])
+            {
+                rig.tick(pressed, &World::NORMAL);
+            }
+            assert_eq!(rig.level(), 50);
+            for _ in 0..80 {
+                rig.tick(false, &world);
+            }
+            assert_eq!(rig.level(), 0);
+            assert!(rig.torch.clock_failed());
+        }
+    }
+
+    #[test]
+    fn reads_clock_speeds() {
+        assert_eq!(clock_percent("40%"), Ok(40));
+        for bad in ["40", "24%", "401%", "%", "x%"] {
+            assert!(clock_percent(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

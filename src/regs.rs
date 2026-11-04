@@ -96,12 +96,28 @@ pub mod addr {
     pub const TCA0_CMP0: usize = 0x0A28;
     /// 16-bit, as for CMP0.
     pub const TCA0_CMP1: usize = 0x0A2A;
+    /// 16-bit, the live period, which PERBUF only reaches at BOTTOM. Resets to
+    /// 0xFFFF.
+    pub const TCA0_PER: usize = 0x0A26;
+    /// TCA0.INTFLAGS: OVF goes up at each overflow, cleared by writing 1.
+    pub const TCA0_INTFLAGS: usize = 0x0A0B;
     /// 16-bit.
     pub const TCA0_PERBUF: usize = 0x0A36;
     /// 16-bit.
     pub const TCA0_CMP0BUF: usize = 0x0A38;
     /// 16-bit.
     pub const TCA0_CMP1BUF: usize = 0x0A3A;
+
+    /// TCB0.CTRLA: ENABLE and CLKSEL.
+    pub const TCB0_CTRLA: usize = 0x0A40;
+    /// TCB0.INTCTRL: CAPT enables the interrupt at TOP.
+    pub const TCB0_INTCTRL: usize = 0x0A45;
+    /// TCB0.INTFLAGS: CAPT, cleared by writing 1.
+    pub const TCB0_INTFLAGS: usize = 0x0A46;
+    /// TCB0.CNT, 16-bit: write through `write16`, low byte first.
+    pub const TCB0_CNT: usize = 0x0A4A;
+    /// TCB0.CCMP, 16-bit, TOP in periodic interrupt mode.
+    pub const TCB0_CCMP: usize = 0x0A4C;
 
     /// SIGROW.TEMPSENSE0: the temperature sensor's gain, unsigned.
     pub const SIGROW_TEMPSENSE0: usize = 0x1120;
@@ -113,6 +129,8 @@ pub mod addr {
     /// GPIO.GPIOR0, a general-purpose byte in the I/O space, which the
     /// tick interrupt uses as its flag.
     pub const GPIO_GPIOR0: usize = 0x001C;
+    /// GPIO.GPIOR1, the same again, for the overdue tick's flag.
+    pub const GPIO_GPIOR1: usize = 0x001D;
     /// SLPCTRL.CTRLA: SEN and SMODE.
     pub const SLPCTRL_CTRLA: usize = 0x0050;
     /// RTC.PITINTCTRL: PI enables the PIT's interrupt.
@@ -192,6 +210,15 @@ pub const TCA_CMP0EN: u8 = 0x10;
 pub const TCA_CMP1EN: u8 = 0x20;
 /// TCA0.CTRLB.WGMODE = SINGLESLOPE (single mode).
 pub const TCA_WGMODE_SINGLESLOPE: u8 = 0x03;
+/// TCA0.INTFLAGS.OVF (single mode).
+pub const TCA_OVF: u8 = 0x01;
+
+/// TCB0.CTRLA.ENABLE.
+pub const TCB_ENABLE: u8 = 0x01;
+/// TCB0.CTRLA.CLKSEL = CLKDIV2, CLK_PER / 2.
+pub const TCB_CLKSEL_CLKDIV2: u8 = 0x01 << 1;
+/// TCB0.INTFLAGS.CAPT, and TCB0.INTCTRL.CAPT, its enable, at the same bit.
+pub const TCB_CAPT: u8 = 0x01;
 
 /// RTC.PITCTRLA.PITEN.
 pub const RTC_PITEN: u8 = 0x01;
@@ -286,3 +313,5 @@ pub const SLPCTRL_SMODE_PDOWN: u8 = 0x2 << 1;
 /// Vector numbers, from the ATDF's `<interrupts>`. RTC.PIT, the periodic
 /// interrupt timer.
 pub const VECTOR_RTC_PIT: usize = 7;
+/// TCB0.INT, which goes off at TOP.
+pub const VECTOR_TCB0_INT: usize = 13;

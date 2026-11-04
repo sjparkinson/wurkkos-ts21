@@ -46,11 +46,15 @@
 //! so the ratio between them holds however far that oscillator is from
 //! 1.024 kHz, and a chip at the edge of table 36-13's spread can't fail for
 //! that alone. A wait on the CPU's clock could, or would need so much margin
-//! it showed nothing. So a dead oscillator hangs the proof, as it would the
-//! loop, with the outputs low. Spotting that is the clock check's job, and
-//! so is §6's T/2 to 3T/2 check against TCA0. The nearest thing here is step
-//! 2, which fails a watchdog that bites sooner than half its period. Right
-//! at half, it's down to whether the second feed or the bite lands first.
+//! it showed nothing. A dead oscillator stops the ticks and the WDT together,
+//! so the one thing that bounds a wait here is TCB0's deadline, off the main
+//! clock: `hw::init` or `hw::wait_for_tick` says the tick isn't coming,
+//! [`Proof::no_tick`] fails the proof with the outputs low, and the boot after
+//! it fails the clock check, which is what turns the light off for good.
+//! §6's T/2 to 3T/2 check against TCA0 is the clock check's job too. The
+//! nearest thing here is step 2, which fails a watchdog that bites sooner than
+//! half its period. Right at half, it's down to whether the second feed or
+//! the bite lands first.
 //!
 //! The marker only says a bite is expected once a step has shown everything
 //! it had to, so a bite before that is the watchdog biting early. A bite that
@@ -380,6 +384,14 @@ impl Proof {
         self.press = self.press || pressed;
     }
 
+    /// The tick the proof was waiting for never came, so the 32 kHz oscillator
+    /// has stopped, and the WDT with it: no bite's coming either. As with any
+    /// bite that doesn't come, the proof's failed. Store the marker first.
+    pub const fn no_tick(&mut self) -> Action {
+        self.step = Step::Failed;
+        Action::GiveUp
+    }
+
     /// One tick of the proof, with the switch as it is. Store the marker
     /// before doing what this says, since it changes when a reset's next.
     pub const fn tick(&mut self, pressed: bool) -> Action {
@@ -690,6 +702,19 @@ mod tests {
         let proof = Proof::after_reset(WDRF, proof.marker());
         assert_eq!(proof.step, Step::Hung);
         assert!(!proof.owed_press(), "a hang's reset isn't a click");
+    }
+
+    #[test]
+    fn a_tick_that_never_comes_fails_the_proof_from_any_step() {
+        for step in Step::ALL.into_iter().filter(|step| step.proving()) {
+            let mut proof = at(step);
+            assert_eq!(proof.no_tick(), Action::GiveUp, "{step:?}");
+            assert_eq!(decode(proof.marker()), Some((Step::Failed, false)));
+            // The software reset that follows leaves that as it stands.
+            let next = Proof::after_reset(regs::RSTCTRL_SWRF, proof.marker());
+            assert_eq!(next.step, Step::Failed, "{step:?}");
+            assert!(!next.proving(), "{step:?}");
+        }
     }
 
     #[test]

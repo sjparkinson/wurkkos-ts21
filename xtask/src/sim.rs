@@ -78,10 +78,22 @@
 //!   three instructions after ENABLE, since the scan only starts three
 //!   cycles later, then BUSY for a couple of reads. Only the whole-flash
 //!   scan with STATUS polled is modelled; NMIEN is an error.
+//! - The world sets how fast the 32 kHz oscillator and the main clock run.
+//!   Time here counts main clocks, so the two only change how many of them
+//!   fit in a PIT period (`Chip::pit_cycles`); a PIT period is always 16 WDT
+//!   clocks. A dead oscillator stops the PIT and the WDT, and leaves their
+//!   sync flags up for good. The time a tick would've ended still counts
+//!   in `Chip::ticks`, or nothing here would ever finish.
+//! - TCA0.INTFLAGS.OVF goes up every `PWM_CYCLE`, unless the world's stopped
+//!   TCA0. It's worked out when it's read, since only the clock check reads
+//!   it. It doesn't follow a write to CNT, which is a phase shift at most.
+//! - TCB0 only runs as the deadline for a tick: periodic interrupt mode at
+//!   CLK_PER / 2 with TOP at its maximum, and it stops in power-down.
 //!
-//! Left to itself, the chip only interrupts while the CPU's asleep, since
-//! that's where the PIT's period ends. `Landings` makes them land everywhere
-//! else: see it for how.
+//! Left to itself, the chip nearly always interrupts while the CPU's asleep,
+//! since that's where the PIT's period ends. The exception is the end of a
+//! counted wait, where TCB0 can be waiting at its `sei`. `Landings` makes them
+//! land everywhere else: see it for how.
 //!
 //! Touching a register it doesn't model is an error too, so new peripheral
 //! code fails here until the model learns about it.
@@ -271,6 +283,8 @@ pub struct Report {
     pub mid_access: u32,
     /// Real ticks that `Landings` put on `hw::wait_for_tick`'s loop.
     pub ticks_landed: u32,
+    /// `tcb0_int`s that `Landings` set off.
+    pub deadlines_landed: u32,
 }
 
 /// Ticks the library can be resting before the firmware has to be powering
@@ -370,6 +384,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         off_instructions: 0,
         mid_access: 0,
         ticks_landed: 0,
+        deadlines_landed: 0,
     };
     watchdog_proof(&power_on, main, &mut report).map_err(|e| format!("watchdog proof: {e}"))?;
     for example in spec::examples(spec::UI_MD)? {
@@ -384,6 +399,15 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     mid_pass(&power_on, &mut report).map_err(|e| format!("with interrupts mid-pass: {e}"))?;
     if report.off_instructions == 0 {
         return Err("never powered down".into());
+    }
+    // The clock check's floor allows for this much of a tick going uncounted.
+    if report.loop_instructions > u64::from(selftest::PASS_INSTRUCTIONS) {
+        return Err(format!(
+            "a pass took {} instructions, and `selftest::PASS_INSTRUCTIONS` is {}, \
+             so the clock check's floor doesn't cover a good chip",
+            report.loop_instructions,
+            selftest::PASS_INSTRUCTIONS
+        ));
     }
     Ok(report)
 }
@@ -572,6 +596,15 @@ fn word(bytes: &[u8], at: usize) -> Option<u16> {
 /// Ticks of random switching to compare against the library: about five
 /// minutes of a torch being clicked and held.
 const RANDOM_TICKS: usize = 20_000;
+
+/// Ticks `hw::init` can take with the 32 kHz oscillator dead. It polls each
+/// sync flag it waits on until it gives up, and that's a few ticks' worth.
+const DEAD_INIT_TICKS: u32 = 8;
+
+/// Ticks the firmware can lag the library by when a tick comes too late to
+/// count. It has to wait for TCB0, over a tick and a half after the last tick,
+/// and the library gives up on the first.
+const OVERDUE_GRACE_TICKS: u32 = 2;
 
 /// Runs one of docs/ui.md's examples on the firmware and the library in
 /// step, then checks where the library ended up against the example.
@@ -1577,7 +1610,8 @@ fn in_step(
         *byte ^= 0x01;
     }
     let proved = sim.prove().map_err(|e| format!("proof: {e}"))?;
-    let verdict = if power_on.wdt.is_some() {
+    // A dead 32 kHz oscillator stops the proof, which fails safe.
+    let verdict = if power_on.wdt.is_some() || power_on.osc32k == 0 {
         Step::Failed
     } else {
         Step::Passed
@@ -1588,7 +1622,14 @@ fn in_step(
             proved.step
         ));
     }
-    sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
+    let init_ticks = if power_on.osc32k == 0 {
+        DEAD_INIT_TICKS
+    } else {
+        1
+    };
+    for _ in 0..init_ticks {
+        sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
+    }
     if verdict == Step::Passed && !sim.chip.watchdog_windowed() {
         return Err("hw::init never enabled the watchdog in window mode".into());
     }
@@ -1604,8 +1645,9 @@ fn in_step(
     let mut rig = Rig::new(&power_on);
     let mut resting = 0;
     let mut hung = false;
+    let mut overdue = 0;
     for (tick, sample) in samples.enumerate() {
-        sim.chip.world = sample.world;
+        sim.chip.set_world(sample.world);
         if sample.world.hang && !hung {
             hung = true;
             sim.hang(verdict).map_err(|e| format!("tick {tick}: {e}"))?;
@@ -1622,14 +1664,36 @@ fn in_step(
         }
         report.loop_instructions = report.loop_instructions.max(took);
         let powered_down = sim.chip.power_downs > power_downs;
-        // Only a pass that started off resting: the one that turns the light
-        // off still does a section of the periodic RAM test, but only once.
+        // Only a pass that started off resting, which is what a torch that's
+        // off spends every tick. The pass that turns the light off started
+        // on, and does a section of the periodic RAM test, but only once.
         if powered_down && resting > 0 {
             report.off_instructions = report.off_instructions.max(took);
         }
         rig.tick(sample.pressed, &sample.world);
         resting = if rig.torch.resting() { resting + 1 } else { 0 };
-        if resting > REST_GRACE_TICKS && !powered_down && !sim.tick_landed() {
+        overdue = if sample.world.overdue() {
+            overdue + 1
+        } else {
+            0
+        };
+        let settling = (1..=OVERDUE_GRACE_TICKS).contains(&overdue);
+        // With no tick to wake it, a chip that's powered down doesn't run
+        // `sleep` again, so look for it asleep instead. Awake there means
+        // it's hung, with no watchdog to rescue it.
+        if sample.world.osc32k == 0 {
+            if !settling && !sim.chip_powered_down() {
+                return Err(format!(
+                    "tick {tick}: the 32 kHz oscillator's dead, but the firmware \
+                     isn't powered down"
+                ));
+            }
+        } else if resting > REST_GRACE_TICKS
+            && !powered_down
+            && !sim.counted
+            && !settling
+            && !sim.tick_landed()
+        {
             return Err(format!(
                 "tick {tick}: the library's been resting for {resting} ticks, \
                  but the firmware didn't power down"
@@ -1638,7 +1702,7 @@ fn in_step(
         let output = ramp::output(rig.level());
         let want = (output.linear.into(), output.fet.into());
         let leds = sim.chip.leds();
-        if leds != want {
+        if leds != want && !settling {
             return Err(format!(
                 "tick {tick}: the firmware's (linear, FET) duty is {leds:?}, \
                  but the library's level {} is {want:?}",
@@ -1649,6 +1713,7 @@ fn in_step(
     report.stack = report.stack.max(sim.stack());
     report.mid_access += sim.mid_access;
     report.ticks_landed += sim.ticks_landed;
+    report.deadlines_landed += sim.deadlines_landed;
     Ok(rig.level())
 }
 
@@ -1674,6 +1739,9 @@ struct Sim {
     mid_access: u32,
     /// Real ticks so far that `Landings` put on `hw::wait_for_tick`'s loop.
     ticks_landed: u32,
+    /// `tcb0_int`s so far that `Landings` set off, and that gave everything
+    /// back.
+    deadlines_landed: u32,
     /// Set to land interrupts on purpose, mid-pass.
     landings: Option<Landings>,
     /// What `testing` goes back to on a reset, since startup runs again.
@@ -1682,6 +1750,8 @@ struct Sim {
     marker: u16,
     /// `executed` at the last reset.
     booted: u64,
+    /// Whether the last pass ended in a counted wait for the tick.
+    counted: bool,
 }
 
 /// Where startup ended up.
@@ -1729,10 +1799,12 @@ impl Sim {
             landed: None,
             mid_access: 0,
             ticks_landed: 0,
+            deadlines_landed: 0,
             landings: None,
             ram_tested: None,
             marker: SRAM.start,
             booted: 0,
+            counted: false,
         })
     }
 
@@ -1767,6 +1839,11 @@ impl Sim {
         Err(format!(
             "reached neither main nor __selftest_failed within {BOOT_BUDGET} instructions"
         ))
+    }
+
+    /// Whether the CPU's asleep in power-down.
+    fn chip_powered_down(&self) -> bool {
+        self.cpu.asleep && self.chip.powering_down()
     }
 
     /// The most stack used so far, in bytes.
@@ -1856,23 +1933,33 @@ impl Sim {
     }
 
     /// One pass of the main loop with the switch as given: runs until the
-    /// firmware picks up the next tick. Returns how many instructions it took.
+    /// firmware picks up the next tick. Returns how many instructions it took,
+    /// which stops at the start of a counted wait: that takes the rest of the
+    /// tick on purpose, and it can't overrun, since the tick's what ends it.
+    /// With the 32 kHz oscillator dead there are no ticks to overrun at all.
     fn tick(&mut self, pressed: bool) -> Result<u64, String> {
         self.chip.set_switch(pressed)?;
         let (start, ticks) = (self.executed, self.chip.ticks);
+        let mut pass_end = None;
+        self.chip.tca_polled = false;
         while self.chip.ticks == ticks {
-            if self.executed - start > TICK_BUDGET {
+            let ran = pass_end.unwrap_or(self.executed) - start;
+            if ran > TICK_BUDGET && self.chip.world.osc32k != 0 {
                 return Err(format!(
                     "a pass of the main loop ran past {TICK_BUDGET} instructions, \
                      so it hangs or misses 64 Hz ticks"
                 ));
             }
             self.step()?;
+            if self.chip.tca_polled {
+                pass_end.get_or_insert(self.executed);
+            }
         }
         if let Some((low, _)) = self.chip.temp {
             return Err(format!("left {} half-written", name(low)));
         }
-        Ok(self.executed - start)
+        self.counted = pass_end.is_some();
+        Ok(pass_end.unwrap_or(self.executed) - start)
     }
 }
 
@@ -1896,6 +1983,10 @@ struct Chip {
     pit_busy: u8,
     /// RTC.PITINTFLAGS.PI.
     pit_flag: bool,
+    /// A landed tick that isn't one: the interrupt's pending, but a read of
+    /// the flag doesn't show it, since nothing but a real tick can end a
+    /// counted wait, and `Landings` mustn't be what fails the clock check.
+    pit_probe: bool,
     /// PORTA.INTFLAGS.
     porta_flags: u8,
     /// When the PIT's current period ends.
@@ -1936,6 +2027,29 @@ struct Chip {
     /// The CPU's stopped dead, standing in for a hang. Time goes on, and a
     /// reset ends it.
     stuck: bool,
+    tcb: Tcb,
+    /// Which `PWM_CYCLE` TCA0.INTFLAGS.OVF was last cleared in.
+    ovf_cleared: u64,
+    /// TCA0.PER, the live period. PERBUF only reaches it at BOTTOM, 13 ms
+    /// away from its reset value, so `hw::init` has to write it as well.
+    tca_per: u16,
+    /// Whether anything's read TCA0.INTFLAGS, which only a counted wait does.
+    tca_polled: bool,
+}
+
+/// TCB0, as the deadline for a tick, beyond the registers in `io`.
+#[derive(Default)]
+struct Tcb {
+    /// TCB0's TEMP byte, and which register's low byte it holds.
+    temp: Option<(usize, u8)>,
+    /// TCB0.CCMP.
+    top: u16,
+    /// When CNT was last 0.
+    zero_at: u64,
+    /// TCB0.INTFLAGS.CAPT.
+    capt: bool,
+    /// A landed deadline that isn't one, like `Chip::pit_probe`.
+    probe: bool,
 }
 
 /// The watchdog, as the firmware can see it. Its settings are in
@@ -2039,6 +2153,7 @@ impl Chip {
             pressed: false,
             pit_busy: PIT_SYNC_READS,
             pit_flag: false,
+            pit_probe: false,
             porta_flags: 0,
             next_pit: PIT_PERIOD,
             ticks: 0,
@@ -2062,6 +2177,10 @@ impl Chip {
             resets: 0,
             bites: false,
             stuck: false,
+            tcb: Tcb::default(),
+            ovf_cleared: 0,
+            tca_per: 0xFFFF,
+            tca_polled: false,
         }
     }
 
@@ -2122,13 +2241,16 @@ impl Chip {
     /// 32 kHz oscillator) is driven from here.
     fn advance_to(&mut self, to: u64) -> Result<(), String> {
         self.now = to;
-        let running = self.io[reg::TCA0_CTRLA] & regs::TCA_ENABLE != 0;
-        if running && self.compare_update.is_some_and(|at| self.now >= at) {
+        if self.tca_counting() && self.compare_update.is_some_and(|at| self.now >= at) {
             self.compare_update = None;
             self.compare = [self.wide(reg::TCA0_CMP0BUF), self.wide(reg::TCA0_CMP1BUF)];
         }
         while self.now >= self.next_pit {
             self.pit_period()?;
+        }
+        while let Some(due) = self.tcb_due().filter(|&due| self.now >= due) {
+            self.tcb.zero_at = due;
+            self.tcb.capt = true;
         }
         Ok(())
     }
@@ -2151,7 +2273,7 @@ impl Chip {
     /// stops, which freezes TCA0 and the ADC where they are, and the chip
     /// stays there until something wakes it.
     fn ready_for_power_down(&self) -> Result<(), String> {
-        if self.pit_busy > 0 {
+        if self.pit_busy > 0 && !self.osc32k_dead() {
             return Err(
                 "powers down with RTC.PITSTATUS.CTRLBUSY still set, and the datasheet \
                         doesn't say the write finishes syncing with CLK_PER stopped"
@@ -2245,26 +2367,40 @@ impl Chip {
             u32::from(on) << vector
         };
         let pit = self.io[reg::RTC_PITINTCTRL] & regs::RTC_PI != 0;
+        let tcb = self.io[reg::TCB0_INTCTRL] & regs::TCB_CAPT != 0;
         port(reg::PORTA_PIN0CTRL, VECTOR_PORTA_PORT)
             | port(reg::PORTB_PIN0CTRL, VECTOR_PORTB_PORT)
             | port(reg::PORTC_PIN0CTRL, VECTOR_PORTC_PORT)
             | u32::from(pit) << regs::VECTOR_RTC_PIT
+            | u32::from(tcb) << regs::VECTOR_TCB0_INT
     }
 
     /// Jumps to the end of the PIT's period, as if the CPU had waited for
-    /// it. The PIT runs in every sleep mode (DS40002204A §23.8), and so does
-    /// the ADC in idle, so a conversion that was running has finished.
+    /// it, or to TCB0's TOP if that's sooner. The PIT runs in every sleep
+    /// mode (DS40002204A §23.8), and so does the ADC in idle, so a conversion
+    /// that was running has finished. TCB0 stops in power-down (§11.3.2.1
+    /// gives it no way to run there).
     fn wait_for_pit(&mut self) -> Result<(), String> {
-        if self.io[reg::RTC_PITCTRLA] & regs::RTC_PITEN == 0 {
+        if self.io[reg::RTC_PITCTRLA] & regs::RTC_PITEN == 0 && !self.osc32k_dead() {
             return Err("waits for the PIT with the PIT off, so it would wait forever".into());
         }
-        self.advance_to(self.next_pit)
+        if self.powering_down() {
+            self.tcb.zero_at += self.next_pit - self.now;
+            return self.advance_to(self.next_pit);
+        }
+        let due = self.tcb_due().unwrap_or(self.next_pit);
+        self.advance_to(self.next_pit.min(due))
     }
 
     /// The PIT's period ends: its flag goes up whether or not the
-    /// interrupt's enabled, and the watchdog counts another 16 clocks.
+    /// interrupt's enabled, and the watchdog counts another 16 clocks. With
+    /// the 32 kHz oscillator dead all that happens is a tick's time passing.
     fn pit_period(&mut self) -> Result<(), String> {
-        self.next_pit += PIT_PERIOD;
+        self.next_pit += self.pit_cycles();
+        if self.osc32k_dead() {
+            self.ticks += 1;
+            return Ok(());
+        }
         if self.io[reg::RTC_PITCTRLA] & regs::RTC_PITEN != 0 {
             self.pit_flag = true;
             self.ticks += 1;
@@ -2466,6 +2602,7 @@ impl Chip {
             && self.io[reg::TCA0_CTRLA] == regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE
             && self.io[reg::TCA0_CTRLB] & TCA_WGMODE == regs::TCA_WGMODE_SINGLESLOPE
             && self.wide(reg::TCA0_PERBUF) == ramp::PWM_TOP - 1
+            && self.tca_per == ramp::PWM_TOP - 1
     }
 
     /// (linear, FET) duty as the pins see it: TCA0 running, the compare
@@ -2483,6 +2620,142 @@ impl Chip {
             channel(regs::TCA_CMP0EN, FET, reg::TCA0_CMP0BUF),
         )
     }
+}
+
+/// The two clocks and what's timed by them, for the clock check.
+impl Chip {
+    fn osc32k_dead(&self) -> bool {
+        self.world.osc32k == 0
+    }
+
+    /// Whether `sleep` means power-down right now.
+    fn powering_down(&self) -> bool {
+        self.io[reg::SLPCTRL_CTRLA] == regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN
+    }
+
+    /// A new world, just after a tick. The period that's started runs at
+    /// the new speeds, so the count the library makes from the same world
+    /// is the one the firmware sees.
+    fn set_world(&mut self, world: World) {
+        let started = self.next_pit - self.pit_cycles();
+        self.world = world;
+        self.next_pit = started + self.pit_cycles();
+    }
+
+    /// Main clocks in a PIT period, with the clocks at the world's speeds. A
+    /// dead oscillator has no period, so this stands in the nominal one.
+    fn pit_cycles(&self) -> u64 {
+        let osc32k = if self.osc32k_dead() {
+            100
+        } else {
+            self.world.osc32k
+        };
+        PIT_PERIOD * u64::from(self.world.main_clock) / u64::from(osc32k)
+    }
+
+    /// Whether TCA0's on and hasn't broken.
+    fn tca_counting(&self) -> bool {
+        self.io[reg::TCA0_CTRLA] & regs::TCA_ENABLE != 0 && !self.world.tca_stopped
+    }
+
+    /// TCA0.INTFLAGS.OVF.
+    fn tca_overflowed(&self) -> bool {
+        self.tca_counting() && self.now / PWM_CYCLE != self.ovf_cleared
+    }
+
+    /// When TCB0 next reaches TOP, if it's running. TOP + 1 of its clocks,
+    /// at two main clocks each.
+    fn tcb_due(&self) -> Option<u64> {
+        let on = self.io[reg::TCB0_CTRLA] & regs::TCB_ENABLE != 0;
+        on.then(|| self.tcb.zero_at + 2 * (u64::from(self.tcb.top) + 1))
+    }
+
+    /// A write to TCB0's registers, all of which only take what `hw::init`
+    /// and `hw::wait_for_tick` write, since this models nothing else.
+    fn write_tcb(&mut self, a: usize, value: u8) -> Result<(), String> {
+        match a {
+            reg::TCB0_CTRLA => {
+                if value != regs::TCB_CLKSEL_CLKDIV2 | regs::TCB_ENABLE {
+                    return Err(format!(
+                        "writes {value:#04x} to TCB0.CTRLA; only CLK_PER / 2 is modelled"
+                    ));
+                }
+                self.io[a] = value;
+                self.tcb.zero_at = self.now;
+            }
+            reg::TCB0_INTCTRL => self.io[a] = value,
+            reg::TCB0_INTFLAGS => {
+                if value & regs::TCB_CAPT != 0 {
+                    self.tcb.capt = false;
+                    self.tcb.probe = false;
+                }
+            }
+            reg::TCB0_CNT | reg::TCB0_CCMP => {
+                if let Some((pending, _)) = self.tcb.temp {
+                    return Err(format!(
+                        "writes the low byte of {} while {}'s is still waiting for its high byte",
+                        name(a),
+                        name(pending)
+                    ));
+                }
+                self.tcb.temp = Some((a, value));
+            }
+            _ => match self.tcb.temp.take() {
+                Some((low, lo)) if low == a - 1 => {
+                    let wide = u16::from_le_bytes([lo, value]);
+                    if low == reg::TCB0_CCMP {
+                        self.tcb.top = wide;
+                    } else if wide == 0 {
+                        self.tcb.zero_at = self.now;
+                    } else {
+                        return Err(format!("sets TCB0.CNT to {wide}, not 0"));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "writes the high byte of {} without its low byte just before, \
+                         so the chip pairs it with whatever TEMP held",
+                        name(a - 1)
+                    ));
+                }
+            },
+        }
+        Ok(())
+    }
+
+    /// A write straight to the high byte of TCA0.PER, CMP0 or CMP1, which `a`
+    /// is, with the low byte in TEMP. It takes effect now, not at BOTTOM.
+    fn write_live(&mut self, a: usize, value: u8) -> Result<(), String> {
+        match self.temp.take() {
+            Some((low, lo)) if low == a - 1 => {
+                let wide = u16::from_le_bytes([lo, value]);
+                if low != reg::TCA0_PER {
+                    self.compare[usize::from(low == reg::TCA0_CMP1)] = wide;
+                } else if wide == ramp::PWM_TOP - 1 {
+                    self.tca_per = wide;
+                } else {
+                    return Err(format!(
+                        "sets TCA0.PER to {wide}: full duty needs it at {}",
+                        ramp::PWM_TOP - 1
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(format!(
+                "writes the high byte of {} without its low byte just before, \
+                 so the chip pairs it with whatever TEMP held",
+                name(a - 1)
+            )),
+        }
+    }
+}
+
+/// TCB0's registers the firmware writes, high bytes included.
+fn tcb0(addr: usize) -> bool {
+    matches!(
+        addr,
+        reg::TCB0_CTRLA | reg::TCB0_INTCTRL | reg::TCB0_INTFLAGS
+    ) || (reg::TCB0_CNT..reg::TCB0_CCMP + 2).contains(&addr)
 }
 
 /// Registers that are plain storage as far as the firmware's concerned.
@@ -2513,6 +2786,7 @@ fn plain(addr: usize) -> bool {
                 | reg::ADC0_SAMPCTRL
                 | reg::ADC0_MUXPOS
                 | reg::GPIO_GPIOR0
+                | reg::GPIO_GPIOR1
                 | reg::SLPCTRL_CTRLA
                 | reg::RTC_PITINTCTRL
         )
@@ -2538,6 +2812,7 @@ fn vector_name(vector: u8) -> String {
         VECTOR_PORTB_PORT => "PORTB_PORT (vector 4)".into(),
         VECTOR_PORTC_PORT => "PORTC_PORT (vector 5)".into(),
         regs::VECTOR_RTC_PIT => "RTC_PIT (vector 7)".into(),
+        regs::VECTOR_TCB0_INT => "TCB0_INT (vector 13)".into(),
         v => format!("vector {v}"),
     }
 }
@@ -2576,6 +2851,13 @@ fn name(addr: usize) -> String {
         (reg::TCA0_PERBUF, "TCA0.PERBUF"),
         (reg::TCA0_CMP0BUF, "TCA0.CMP0BUF"),
         (reg::TCA0_CMP1BUF, "TCA0.CMP1BUF"),
+        (reg::TCA0_PER, "TCA0.PER"),
+        (reg::TCA0_INTFLAGS, "TCA0.INTFLAGS"),
+        (reg::TCB0_CTRLA, "TCB0.CTRLA"),
+        (reg::TCB0_INTCTRL, "TCB0.INTCTRL"),
+        (reg::TCB0_INTFLAGS, "TCB0.INTFLAGS"),
+        (reg::TCB0_CNT, "TCB0.CNT"),
+        (reg::TCB0_CCMP, "TCB0.CCMP"),
         (reg::VREF_CTRLA, "VREF.CTRLA"),
         (reg::VREF_CTRLB, "VREF.CTRLB"),
         (reg::ADC0_CALIB, "ADC0.CALIB"),
@@ -2592,6 +2874,7 @@ fn name(addr: usize) -> String {
         (reg::SIGROW_TEMPSENSE0, "SIGROW.TEMPSENSE0"),
         (reg::SIGROW_TEMPSENSE1, "SIGROW.TEMPSENSE1"),
         (reg::GPIO_GPIOR0, "GPIO.GPIOR0"),
+        (reg::GPIO_GPIOR1, "GPIO.GPIOR1"),
         (reg::SLPCTRL_CTRLA, "SLPCTRL.CTRLA"),
         (reg::RTC_PITINTCTRL, "RTC.PITINTCTRL"),
         (PORTA_INTFLAGS, "PORTA.INTFLAGS"),
@@ -2611,6 +2894,7 @@ struct Landed {
     sreg: u8,
     sp: u16,
     gpior0: u8,
+    gpior1: u8,
 }
 
 /// Lands interrupts where they'd otherwise never arrive, on a firmware that
@@ -2622,7 +2906,12 @@ struct Landed {
 /// did to GPIOR0 is put back. The real tick can't land mid-pass unless a pass
 /// overruns, which `Sim::tick` already fails, and a real one here would add a
 /// pass the library doesn't have. This is there so `rtc_pit` gets looked at
-/// wherever a stretched pass could put it.
+/// wherever a stretched pass could put it. Then the second time, a deadline
+/// that isn't one, for `tcb0_int`, the same way with GPIOR1.
+///
+/// Neither shows up in a read of its flag, since a counted wait polls those
+/// with interrupts off, and a landing that ended a count would fail a good
+/// chip. They just wait out the `cli`.
 ///
 /// A landing with SREG.I clear, or held off, waits as the CPU says, and the
 /// next instruction doesn't get one until it's been taken, so each
@@ -2641,11 +2930,13 @@ struct Landed {
 /// Time stands still while a landed handler runs, so the handlers don't eat
 /// into the pass's budget.
 struct Landings {
-    /// Whether each instruction's had its landing, by word address.
-    visits: Vec<bool>,
+    /// How many landings each instruction's had, by word address.
+    visits: Vec<u8>,
     /// The tick count when a tick that isn't one went up, until its handler
     /// has been and gone.
     probe: Option<u32>,
+    /// A deadline that isn't one is up, until its handler has been and gone.
+    deadline: bool,
     /// The word addresses the CPU's run since the last `cli`, in order. Not
     /// a range, since the compiler can put the loop's `sleep` before its `cli`.
     trail: Vec<u32>,
@@ -2664,8 +2955,9 @@ const CLI_WORD: u16 = 0x94F8;
 impl Landings {
     fn new() -> Self {
         Self {
-            visits: vec![false; FLASH_SIZE / 2],
+            visits: vec![0; FLASH_SIZE / 2],
             probe: None,
+            deadline: false,
             trail: Vec::new(),
             wait_loop: Vec::new(),
             jumped: None,
@@ -2708,7 +3000,8 @@ impl Sim {
             return Ok(());
         }
         let pit_on = chip.io[reg::RTC_PITCTRLA] & regs::RTC_PITEN != 0;
-        if !pit_on || chip.enabled() & 1 << regs::VECTOR_RTC_PIT == 0 {
+        let enabled = chip.enabled();
+        if !pit_on || enabled & 1 << regs::VECTOR_RTC_PIT == 0 {
             return Ok(());
         }
         if self.cpu.asleep {
@@ -2720,33 +3013,57 @@ impl Sim {
         // The loop ends in the `sleep`, so `early` 1 is the instruction before.
         // A tick already waiting to be picked up means a pass is about to run,
         // and going round the loop to find that isn't waiting for the next.
+        // With the oscillator dead there's no tick to land.
         let target = landings.wait_loop.len().checked_sub(landings.early + 1);
         if let Some(at) = target
             && landings.wait_loop[at] == pc
             && chip.io[reg::GPIO_GPIOR0] == 0
+            && chip.world.osc32k != 0
         {
             landings.early = if at == 0 { 1 } else { landings.early + 1 };
             landings.jumped = Some(chip.ticks);
             self.ticks_landed += 1;
-            return chip.advance_to((chip.next_pit - 1).max(chip.now));
+            let to = (chip.next_pit - 1).max(chip.now);
+            // That time would've been asleep, and TCB0's stopped in
+            // power-down, as in `wait_for_pit`.
+            if chip.powering_down() {
+                chip.tcb.zero_at += to - chip.now;
+            }
+            return chip.advance_to(to);
         }
-        if let Some(visited @ false) = landings.visits.get_mut(pc as usize) {
-            *visited = true;
-            chip.pit_flag = true;
-            landings.probe = Some(chip.ticks);
+        // A real deadline's coming in this world, and one landed on top of it
+        // would have its flag put back.
+        let deadlines = enabled & 1 << regs::VECTOR_TCB0_INT != 0 && !chip.world.overdue();
+        match landings.visits.get_mut(pc as usize) {
+            Some(visits @ 0) => {
+                *visits = 1;
+                chip.pit_probe = true;
+                landings.probe = Some(chip.ticks);
+            }
+            Some(visits @ 1) if deadlines => {
+                *visits = 2;
+                chip.tcb.probe = true;
+                landings.deadline = true;
+            }
+            _ => {}
         }
         Ok(())
     }
 
-    /// A handler's finished, having found `landed`. If that was a tick that
-    /// isn't one, puts back what it told the main loop, unless a real tick
-    /// came in under the same flag while it was pending.
+    /// A handler's finished, having found `landed`. If that was a tick or a
+    /// deadline that isn't one, puts back what it told the main loop, unless
+    /// a real tick came in under the same flag while it was pending.
     fn end_probe(&mut self, vector: u8, landed: &Landed) {
-        if usize::from(vector) == regs::VECTOR_RTC_PIT
-            && let Some(landings) = &mut self.landings
-            && landings.probe.take() == Some(self.chip.ticks)
-        {
+        let Some(landings) = &mut self.landings else {
+            return;
+        };
+        let vector = usize::from(vector);
+        if vector == regs::VECTOR_RTC_PIT && landings.probe.take() == Some(self.chip.ticks) {
             self.chip.io[reg::GPIO_GPIOR0] = landed.gpior0;
+        }
+        if vector == regs::VECTOR_TCB0_INT && mem::take(&mut landings.deadline) {
+            self.chip.io[reg::GPIO_GPIOR1] = landed.gpior1;
+            self.deadlines_landed += 1;
         }
     }
 }
@@ -2778,6 +3095,9 @@ fn mid_pass(
     if landed.ticks_landed == 0 {
         return Err("the real tick never landed on `hw::wait_for_tick`'s loop".into());
     }
+    if landed.deadlines_landed == 0 {
+        return Err("`tcb0_int` never landed mid-pass".into());
+    }
     report.stack = report.stack.max(landed.stack);
     report.mid_access = landed.mid_access;
     Ok(())
@@ -2796,6 +3116,7 @@ impl Sim {
                     sreg: self.cpu.sreg,
                     sp: self.cpu.sp,
                     gpior0: self.chip.io[reg::GPIO_GPIOR0],
+                    gpior1: self.chip.io[reg::GPIO_GPIOR1],
                 });
             }
             (Some(vector), None) => {
@@ -2855,8 +3176,10 @@ impl Chip {
         let Some(low) = self.interrupted else {
             return Ok(());
         };
-        let reads = [reg::TCA0_CMP0, reg::TCA0_CMP1];
-        if WIDE.iter().chain(&reads).any(|&w| w == a & !1) {
+        // Beyond `WIDE`: what the firmware only reads or writes directly. CNT
+        // is in `WIDE` for its writes, and a read of it goes through TEMP too.
+        let live = [reg::TCA0_CMP0, reg::TCA0_CMP1, reg::TCA0_PER];
+        if WIDE.iter().chain(&live).any(|&w| w == a & !1) {
             return Err(format!(
                 "a handler touches {} with the main loop halfway through {}, and they \
                  share TCA0's TEMP byte, so one corrupts the other (section 8.5.6)",
@@ -2873,12 +3196,13 @@ impl Bus for Chip {
         word(&self.flash, pc as usize * 2)
     }
 
-    /// PORTA's pin change and the PIT, lowest vector first, the default
+    /// PORTA's pin change, the PIT and TCB0, lowest vector first, the default
     /// static priority (DS40002204A §13.3.2.4). A port's flags only go up
     /// for pins whose ISC enables them, so any flag is a request.
     fn interrupt(&self) -> Option<u8> {
         let pending = u32::from(self.porta_flags != 0) << VECTOR_PORTA_PORT
-            | u32::from(self.pit_flag) << regs::VECTOR_RTC_PIT;
+            | u32::from(self.pit_flag || self.pit_probe) << regs::VECTOR_RTC_PIT
+            | u32::from(self.tcb.capt || self.tcb.probe) << regs::VECTOR_TCB0_INT;
         let requests = pending & self.enabled();
         (requests != 0).then(|| requests.trailing_zeros() as u8)
     }
@@ -2926,7 +3250,13 @@ impl Bus for Chip {
         if pit_off {
             wakes &= !(1 << regs::VECTOR_RTC_PIT);
         }
-        if wakes == 0 {
+        // TCB0 stops in power-down.
+        if self.powering_down() {
+            wakes &= !(1 << regs::VECTOR_TCB0_INT);
+        }
+        // With its oscillator dead the torch is off for good, so powering down
+        // with nothing to wake it is the right thing to do.
+        if wakes == 0 && !self.osc32k_dead() {
             return Err("sleeps with no interrupt enabled that could wake it".into());
         }
         Ok(())
@@ -2962,13 +3292,28 @@ impl Bus for Chip {
             }
             reg::RTC_PITSTATUS => {
                 let busy = self.pit_busy > 0;
-                self.pit_busy = self.pit_busy.saturating_sub(1);
+                if !self.osc32k_dead() {
+                    self.pit_busy = self.pit_busy.saturating_sub(1);
+                }
                 Ok(if busy { regs::RTC_CTRLBUSY } else { 0 })
             }
             reg::WDT_STATUS => {
                 let busy = self.wdt.busy > 0;
-                self.wdt.busy = self.wdt.busy.saturating_sub(1);
+                if !self.osc32k_dead() {
+                    self.wdt.busy = self.wdt.busy.saturating_sub(1);
+                }
                 Ok(if busy { regs::WDT_SYNCBUSY } else { 0 })
+            }
+            reg::TCB0_INTFLAGS => Ok(if self.tcb.capt { regs::TCB_CAPT } else { 0 }),
+            reg::TCA0_INTFLAGS => {
+                // With the PIT's flag up this is a counted wait that's
+                // finishing, not one starting.
+                self.tca_polled |= !self.pit_flag;
+                Ok(if self.tca_overflowed() {
+                    regs::TCA_OVF
+                } else {
+                    0
+                })
             }
             // Reading the flag doesn't move time on: a firmware that went
             // back to busy-waiting on it would run out of instructions.
@@ -3121,6 +3466,7 @@ impl Bus for Chip {
                 // Writing a 1 clears the flag.
                 if value & regs::RTC_PI != 0 {
                     self.pit_flag = false;
+                    self.pit_probe = false;
                 }
             }
             PORTA_INTFLAGS => self.porta_flags &= !value,
@@ -3131,6 +3477,16 @@ impl Bus for Chip {
                     return Err(format!("writes {value:#04x} to RSTCTRL.SWRR"));
                 }
                 self.pending_reset = Some(regs::RSTCTRL_SWRF);
+            }
+            reg::TCA0_INTFLAGS => {
+                if value & regs::TCA_OVF != 0 {
+                    self.ovf_cleared = self.now / PWM_CYCLE;
+                }
+            }
+            _ if tcb0(a) => self.write_tcb(a, value)?,
+            reg::TCA0_PER | reg::TCA0_CMP0 | reg::TCA0_CMP1 => self.temp = Some((a, value)),
+            _ if [reg::TCA0_PER, reg::TCA0_CMP0, reg::TCA0_CMP1].contains(&a.wrapping_sub(1)) => {
+                self.write_live(a, value)?;
             }
             _ if WIDE.contains(&a) => {
                 if let Some((pending, _)) = self.temp {
@@ -3225,7 +3581,9 @@ impl Bus for Chip {
     }
 
     fn wdr(&mut self) -> Result<(), String> {
-        if !self.watchdog_running() {
+        // A dead oscillator takes the WDT's clock with it, so a `wdr` can't
+        // sync, and nothing's counting anyway.
+        if !self.watchdog_running() || self.osc32k_dead() {
             return Ok(());
         }
         if self.wdt.busy > 0 {
@@ -3518,6 +3876,8 @@ fn watchdog_proof(
         ));
     }
 
+    dead_oscillator(power_on).map_err(|e| format!("a dead 32 kHz oscillator: {e}"))?;
+
     for (fault, found_by) in WDT_FAULTS {
         let world = World {
             wdt: Some(fault),
@@ -3563,6 +3923,45 @@ fn watchdog_proof(
         );
         if in_step(sim, samples, report).map_err(press)? == 0 {
             return Err(press("the click never counted".into()));
+        }
+    }
+    Ok(())
+}
+
+/// The 32 kHz oscillator dying at the start of each boot of the proof. No tick
+/// and no bite ever comes, so only the proof's own bounded waits can end it:
+/// it has to fail inside `Sim::prove`'s budget, and the boot after that has to
+/// fail the clock check, powered down with the light off, not hang.
+fn dead_oscillator(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+) -> Result<(), String> {
+    let dead = World {
+        osc32k: 0,
+        ..World::NORMAL
+    };
+    for boot in 0..PROOF_RESETS {
+        let at = |e: String| format!("from boot {boot} of the proof: {e}");
+        let (mut sim, _) = power_on(&World::NORMAL).map_err(at)?;
+        sim.chip.bites = true;
+        for _ in 0..BOOT_BUDGET {
+            if sim.chip.resets == boot {
+                break;
+            }
+            sim.step().map_err(at)?;
+        }
+        sim.chip.set_world(dead);
+        let proved = sim.prove().map_err(at)?;
+        if proved.step != Step::Failed {
+            return Err(at(format!("the proof ended {:?}", proved.step)));
+        }
+        for _ in 0..DEAD_INIT_TICKS {
+            sim.tick(false).map_err(at)?;
+        }
+        if !sim.chip_powered_down() {
+            return Err(at("it isn't powered down, so it hung".into()));
+        }
+        if sim.chip.leds() != (0, 0) {
+            return Err(at(format!("the LEDs are at {:?}", sim.chip.leds())));
         }
     }
     Ok(())
@@ -3620,6 +4019,7 @@ mod tests {
             c.io[reg::TCA0_CTRLA] = regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE;
             c.io[reg::TCA0_CTRLB] = regs::TCA_WGMODE_SINGLESLOPE;
             write_wide(c, reg::TCA0_PERBUF, ramp::PWM_TOP - 1);
+            c.tca_per = ramp::PWM_TOP - 1;
         };
         let mut c = chip();
         assert!(!c.clocked_as_modelled(), "out of reset");
@@ -3635,6 +4035,10 @@ mod tests {
         let mut c = chip();
         set_up(&mut c);
         c.wide[WIDE.iter().position(|&a| a == reg::TCA0_PERBUF).unwrap()] = 0xFFFF;
+        assert!(!c.clocked_as_modelled(), "TCA0.PERBUF at its reset value");
+        let mut c = chip();
+        set_up(&mut c);
+        c.tca_per = 0xFFFF;
         assert!(!c.clocked_as_modelled(), "TCA0.PER at its reset value");
     }
 
@@ -4115,6 +4519,161 @@ mod tests {
         c.idle().unwrap();
         assert_eq!((c.now, c.ticks, c.pit_flag), (2 * PIT_PERIOD, 2, true));
         assert!(!c.converting());
+    }
+
+    #[test]
+    fn the_clocks_set_the_pit_period_in_main_clocks() {
+        let mut c = chip();
+        c.world.osc32k = 50;
+        assert_eq!(c.pit_cycles(), 2 * PIT_PERIOD);
+        c.world.osc32k = 100;
+        c.world.main_clock = 400;
+        assert_eq!(c.pit_cycles(), 4 * PIT_PERIOD);
+        c.world.main_clock = 100;
+        c.world.osc32k = 0;
+        assert_eq!(c.pit_cycles(), PIT_PERIOD, "standing in for a tick's time");
+    }
+
+    #[test]
+    fn a_dead_oscillator_stops_the_pit_the_wdt_and_their_sync_flags() {
+        let mut c = chip();
+        c.world.osc32k = 0;
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        c.io[reg::WDT_CTRLA] = regs::WDT_PERIOD_32CLK;
+        c.wdt.busy = 1;
+        for _ in 0..10 {
+            c.idle().unwrap();
+            assert_eq!(c.read(reg::RTC_PITSTATUS as u16), Ok(regs::RTC_CTRLBUSY));
+            assert_eq!(c.read(reg::WDT_STATUS as u16), Ok(regs::WDT_SYNCBUSY));
+        }
+        assert!(!c.pit_flag, "no flag");
+        assert_eq!(c.ticks, 10, "only the time");
+        assert_eq!(c.wdt.ticks, 0, "and the watchdog never ran out");
+        assert_eq!(c.wdr(), Ok(()));
+    }
+
+    #[test]
+    fn tca0_flags_an_overflow_every_cycle_until_its_cleared() {
+        let mut c = chip();
+        let flags = reg::TCA0_INTFLAGS as u16;
+        c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
+        assert_eq!(c.read(flags), Ok(0));
+        assert!(c.tca_polled);
+        c.now = PWM_CYCLE - 1;
+        assert_eq!(c.read(flags), Ok(0));
+        c.now = PWM_CYCLE;
+        assert_eq!(c.read(flags), Ok(regs::TCA_OVF));
+        c.now = 3 * PWM_CYCLE;
+        assert_eq!(c.read(flags), Ok(regs::TCA_OVF), "one flag for any number");
+        c.write(flags, regs::TCA_OVF).unwrap();
+        assert_eq!(c.read(flags), Ok(0));
+        c.now = 4 * PWM_CYCLE;
+        assert_eq!(c.read(flags), Ok(regs::TCA_OVF));
+        c.world.tca_stopped = true;
+        assert_eq!(c.read(flags), Ok(0));
+    }
+
+    /// TCB0 as `hw::init` sets it up.
+    fn deadline(c: &mut Chip) {
+        let [ccmp, cnt] = [reg::TCB0_CCMP as u16, reg::TCB0_CNT as u16];
+        c.write(ccmp, 0xFF).unwrap();
+        c.write(ccmp + 1, 0xFF).unwrap();
+        c.write(reg::TCB0_INTCTRL as u16, regs::TCB_CAPT).unwrap();
+        c.write(
+            reg::TCB0_CTRLA as u16,
+            regs::TCB_CLKSEL_CLKDIV2 | regs::TCB_ENABLE,
+        )
+        .unwrap();
+        assert!(c.write(cnt + 1, 0).is_err(), "high byte first");
+    }
+
+    #[test]
+    fn tcb0_fires_after_131072_main_clocks_and_wakes_idle() {
+        let mut c = chip();
+        c.world.osc32k = 0;
+        c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN;
+        deadline(&mut c);
+        while !c.tcb.capt {
+            c.idle().unwrap();
+        }
+        assert_eq!(c.now, 131_072);
+        assert_eq!(
+            c.interrupt(),
+            Some(regs::VECTOR_TCB0_INT as u8),
+            "it goes off with no PIT to wake it"
+        );
+        c.write(reg::TCB0_INTFLAGS as u16, regs::TCB_CAPT).unwrap();
+        assert_eq!(c.interrupt(), None);
+    }
+
+    #[test]
+    fn writing_cnt_puts_tcb0s_deadline_back() {
+        let mut c = chip();
+        deadline(&mut c);
+        c.now = 100_000;
+        let cnt = reg::TCB0_CNT as u16;
+        c.write(cnt, 0).unwrap();
+        c.write(cnt + 1, 0).unwrap();
+        c.advance_to(131_072).unwrap();
+        assert!(!c.tcb.capt);
+        c.advance_to(231_072).unwrap();
+        assert!(c.tcb.capt);
+    }
+
+    #[test]
+    fn tcb0_stops_in_power_down() {
+        let mut c = chip();
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN;
+        deadline(&mut c);
+        for _ in 0..4 {
+            c.idle().unwrap();
+        }
+        assert_eq!(c.now, 4 * PIT_PERIOD);
+        assert!(!c.tcb.capt, "over a deadline's time, but it was stopped");
+    }
+
+    #[test]
+    fn a_read_after_the_tick_doesnt_start_a_counted_wait() {
+        let mut c = chip();
+        c.pit_flag = true;
+        c.read(reg::TCA0_INTFLAGS as u16).unwrap();
+        assert!(!c.tca_polled);
+        c.pit_flag = false;
+        c.read(reg::TCA0_INTFLAGS as u16).unwrap();
+        assert!(c.tca_polled);
+    }
+
+    #[test]
+    fn a_new_world_changes_the_period_thats_started() {
+        let mut c = chip();
+        c.set_world(World {
+            osc32k: 50,
+            ..World::NORMAL
+        });
+        assert_eq!(c.next_pit, 2 * PIT_PERIOD);
+        c.set_world(World::NORMAL);
+        assert_eq!(c.next_pit, PIT_PERIOD);
+    }
+
+    #[test]
+    fn tcb0_refuses_what_isnt_modelled() {
+        let mut c = chip();
+        let (ctrla, cnt) = (reg::TCB0_CTRLA as u16, reg::TCB0_CNT as u16);
+        assert!(c.write(ctrla, regs::TCB_ENABLE).is_err(), "no prescaler");
+        c.write(cnt, 1).unwrap();
+        assert!(c.write(cnt + 1, 0).is_err(), "CNT only goes back to 0");
+    }
+
+    #[test]
+    fn a_compare_written_directly_applies_at_once() {
+        let mut c = chip();
+        let cmp1 = reg::TCA0_CMP1 as u16;
+        c.compare = [7, 9];
+        c.write(cmp1, 0).unwrap();
+        c.write(cmp1 + 1, 0).unwrap();
+        assert_eq!(c.compare, [7, 0]);
+        assert!(c.write(cmp1 + 1, 0).is_err(), "no low byte first");
     }
 
     #[test]
@@ -4893,7 +5452,9 @@ mod tests {
             (write(reg::TCA0_CMP0BUF), "TCA0.CMP0BUF"),
             (write(reg::TCA0_CNT), "TCA0.CNT"),
             (write(reg::TCA0_PERBUF), "TCA0.PERBUF"),
+            (write(reg::TCA0_PER), "TCA0.PER"),
             (read(reg::TCA0_CMP1), "TCA0.CMP1"),
+            (read(reg::TCA0_CNT), "TCA0.CNT"),
         ] {
             let err = refused(landing_mid_write(&handler));
             let want = format!("touches {touched} with the main loop halfway through TCA0.CMP0BUF");
@@ -5044,6 +5605,7 @@ mod tests {
             sreg: s.cpu.sreg,
             sp: s.cpu.sp,
             gpior0: 0,
+            gpior1: 0,
         };
         s.end_probe(regs::VECTOR_RTC_PIT as u8, &landed);
         assert_eq!(s.chip.io[reg::GPIO_GPIOR0], 1);
