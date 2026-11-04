@@ -4,5 +4,5 @@
 # nightlies do break it.
 [toolchain]
 channel = "nightly-2026-11-02"
-components = ["rust-src", "rustfmt", "clippy"]
+components = ["rust-src", "rustfmt", "clippy", "llvm-tools"]
 profile = "minimal"

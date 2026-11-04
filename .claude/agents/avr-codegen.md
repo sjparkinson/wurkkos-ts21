@@ -16,7 +16,7 @@ LLVM="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/
 ELF=target/avr-none/release/wurkkos-ts21-0614.elf
 ```
 
-If they're missing, give the user the `rustup component add llvm-tools --toolchain <pinned nightly>` command from that doc rather than installing it yourself.
+`rust-toolchain.toml` pins `llvm-tools`, so rustup installs them with the toolchain. If they're still missing, say so and stop rather than working around it.
 
 Check, in this order:
 

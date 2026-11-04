@@ -63,11 +63,7 @@ Up to nightly-2026-09-23 there was also a `--cfg no_fp_fmt_parse` in `.cargo/con
 
 ## Looking inside the ELF
 
-For reading the generated code, rustup's `llvm-tools` component has an `llvm-objdump`, `llvm-nm` and `llvm-size` built from rustc's own LLVM, AVR backend included. It's optional, since nothing in the build or CI needs it, so it isn't in `rust-toolchain.toml`. Add it once to the pinned nightly:
-
-```sh
-rustup component add llvm-tools --toolchain nightly-2026-11-02
-```
+For reading the generated code, rustup's `llvm-tools` component has an `llvm-objdump`, `llvm-nm` and `llvm-size` built from rustc's own LLVM, AVR backend included. Nothing in the build or CI needs it, but it's in `rust-toolchain.toml` so rustup installs it with the pinned nightly and it's there when you want it.
 
 The binaries aren't on your `PATH`. They live in the toolchain's sysroot, under the host triple. Run this from the repo so rustup picks the pinned nightly:
 
@@ -93,4 +89,4 @@ Then, after `cargo xtask hex`:
 
 ## First build
 
-The first `cargo xtask hex` downloads the pinned nightly with `rust-src`, and then the handful of crates that `core`'s build needs from crates.io. After that it's offline.
+The first `cargo xtask hex` downloads the pinned nightly with the components in `rust-toolchain.toml`, and then the handful of crates that `core`'s build needs from crates.io. After that it's offline.
