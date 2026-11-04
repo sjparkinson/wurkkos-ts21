@@ -24,7 +24,7 @@ mod rt;
 extern "C" fn main() -> ! {
     use ts21::{
         ramp,
-        selftest::Faults,
+        selftest::{Faults, RamSweep},
         torch::{Changes, Torch},
         watchdog::Feeder,
     };
@@ -41,9 +41,17 @@ extern "C" fn main() -> ! {
     let mut torch = Torch::new(hw::temperature_calibration(), faults);
     let mut changes = Changes::new();
     let mut feeder = Feeder::new();
+    let mut sweep = RamSweep::new();
 
     loop {
         hw::wait_for_tick(torch.resting());
+        // First in the pass, so the CPU's quiet again before `adc_start`.
+        // Not while resting: 0.5 ms awake every tick would add more to the
+        // off current than the rest of the pass does, and there's no output
+        // to guard. It picks up where it left off when the torch wakes.
+        if !torch.resting() {
+            rt::test_ram_section(sweep.next_section());
+        }
         torch.tick(hw::switch_pressed(), hw::adc_result());
         if let Some(convert) = torch.convert() {
             hw::adc_start(convert);

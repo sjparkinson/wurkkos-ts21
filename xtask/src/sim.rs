@@ -99,10 +99,12 @@
 //!    (`startup_faults`), then every short between two bits of a register
 //!    (`register_shorts`) and coupling between bytes (`ram_coupling`),
 //!    checking each one stops in `__selftest_failed` with the light dark.
-//! 4. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
+//! 4. The periodic RAM test with the light on: a whole sweep on a good chip
+//!    (`periodic_passes`), then RAM going bad mid-run (`periodic_faults`).
+//! 5. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
 //!    with the cell, temperature, broken ADC, fuses, corrupt flash or
 //!    broken RAM or register the example scripts.
-//! 5. Twenty thousand ticks of random clicks and holds, with a good cell at
+//! 6. Twenty thousand ticks of random clicks and holds, with a good cell at
 //!    room temperature.
 //! 6. Both of those again with `Landings` on, which has to catch a handler
 //!    between a TCA0 low and high byte at least once.
@@ -121,6 +123,7 @@ use std::iter;
 use std::ops::Range;
 
 use ts21::ramp;
+use ts21::selftest::{self, RamSweep};
 use ts21::sensors::Channel;
 
 use crate::avr::{Bus, Cpu, I, VECTOR_WORDS, is_two_words};
@@ -311,6 +314,11 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         .map_err(|e| format!("register shorts: {e}"))?;
     ram_coupling(&power_on, &power_on_image, &signed, &marks)
         .map_err(|e| format!("RAM coupling: {e}"))?;
+
+    let section = symbol("__ram_section")? / 2;
+    periodic_passes(&power_on, section).map_err(|e| format!("periodic RAM test: {e}"))?;
+    periodic_faults(&power_on, section, symbol("__ram_section_failed")? / 2)
+        .map_err(|e| format!("periodic RAM test: {e}"))?;
 
     let mut report = Report {
         stack: 0,
@@ -866,6 +874,240 @@ fn ram_coupling(
     Ok(())
 }
 
+/// Instructions one pass of the periodic RAM test may take: `RAM_SECTION`
+/// bytes at 24 instructions a background, four backgrounds, and the rest for
+/// saving and putting back. It takes 1,656 today, about 0.46 ms of a 15.6 ms
+/// tick by src/rt.rs's count of cycles.
+const SECTION_BUDGET: u64 = 1_800;
+
+/// Long enough for the periodic RAM test to get to any section, wherever
+/// it's up to: a sweep, and a tick or two in hand.
+const SWEEP_TICKS: u32 = selftest::RAM_SECTIONS as u32 + 2;
+
+/// A torch that's powered up in a good world and been switched on.
+fn switched_on(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<Sim, String> {
+    let (mut sim, _) = power_on(&World::NORMAL)?;
+    sim.tick(false)?;
+    for sample in simulate::samples(&simulate::parse(&["1C", "wait:1s"])?) {
+        sim.tick(sample.pressed)?;
+    }
+    if sim.chip.leds() == (0, 0) {
+        return Err("a click didn't turn the light on".into());
+    }
+    Ok(sim)
+}
+
+/// Runs for up to `ticks` ticks, stopping if the CPU reaches `failed`, a
+/// word address. Returns where it jumped from if it did.
+fn run_until(sim: &mut Sim, failed: u32, ticks: u32) -> Result<Option<u32>, String> {
+    let stop = sim.chip.ticks + ticks;
+    let mut from = sim.cpu.pc;
+    while sim.chip.ticks < stop {
+        if sim.cpu.pc == failed {
+            return Ok(Some(from));
+        }
+        from = sim.cpu.pc;
+        sim.step()?;
+    }
+    Ok(None)
+}
+
+/// Checks a chip that's just reached `__ram_section_failed` turns the light
+/// off straight away and stays there, with interrupts off and without
+/// feeding the watchdog, until the watchdog resets it.
+fn held_low_until_reset(sim: &mut Sim) -> Result<(), String> {
+    sim.step()?; // ldi
+    sim.step()?; // sts
+    let stopped = sim.cpu.pc;
+    if sim.chip.leds() != (0, 0) {
+        return Err(format!(
+            "failed the periodic RAM test with the LEDs at {:?}",
+            sim.chip.leds()
+        ));
+    }
+    if sim.chip.io[reg::VPORTB_DIR] & (FET | LINEAR) != FET | LINEAR {
+        return Err("failed the periodic RAM test with the pins floating".into());
+    }
+    if sim.cpu.flag(I) {
+        return Err("failed the periodic RAM test with interrupts on".into());
+    }
+    let timeout = u64::from(WDT_CLOCKS_PER_TICK.div_ceil(2)) * PIT_PERIOD;
+    for _ in 0..timeout {
+        match sim.step() {
+            Ok(()) if sim.cpu.pc == stopped => {}
+            Ok(()) => {
+                return Err(format!(
+                    "left __ram_section_failed for {:#06x}",
+                    sim.cpu.pc * 2
+                ));
+            }
+            Err(e) if e.contains("would have reset") => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Err("failed the periodic RAM test, and the watchdog never reset it".into())
+}
+
+/// Sweeps all of SRAM on a good chip with the light on, a section a tick,
+/// with the sections in the order `RamSweep` gives. Each pass has to leave
+/// its section as it found it, with interrupts off until then, and stay
+/// inside `SECTION_BUDGET`.
+fn periodic_passes(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    section: u32,
+) -> Result<(), String> {
+    let mut sim = switched_on(power_on)?;
+    // Where the firmware's sweep has got to is its own business, so line up
+    // with its next section first.
+    sim.run_to(section, PIT_PERIOD)?;
+    let first = u16::from_le_bytes([sim.cpu.r[24], sim.cpu.r[25]]);
+    let mut sweep = RamSweep::new();
+    while sweep.next_section() != first {}
+    let mut expected = first;
+    for _ in 0..selftest::RAM_SECTIONS {
+        sim.run_to(section, PIT_PERIOD)?;
+        let start = u16::from_le_bytes([sim.cpu.r[24], sim.cpu.r[25]]);
+        if start != expected {
+            return Err(format!(
+                "tested {start:#06x}, but `RamSweep` says {expected:#06x}"
+            ));
+        }
+        expected = sweep.next_section();
+        let bytes = start..start + selftest::RAM_SECTION;
+        let (began, sp) = (sim.executed, sim.cpu.sp);
+        let run_until = |sim: &mut Sim, done: &dyn Fn(&Sim) -> bool| -> Result<(), String> {
+            while !done(sim) {
+                if sim.executed - began > SECTION_BUDGET {
+                    return Err(format!(
+                        "{start:#06x}: past the {SECTION_BUDGET} instruction budget, \
+                         or interrupts never went off and came back"
+                    ));
+                }
+                sim.step()?;
+            }
+            Ok(())
+        };
+        run_until(&mut sim, &|s| !s.cpu.flag(I))?;
+        let before = sim.chip.sram(&bytes).to_vec();
+        run_until(&mut sim, &|s| s.cpu.flag(I))?;
+        if sim.chip.sram(&bytes) != before {
+            return Err(format!("didn't put {start:#06x} back as it was"));
+        }
+        run_until(&mut sim, &|s| s.cpu.sp == sp + 2)?;
+    }
+    Ok(())
+}
+
+/// RAM going bad with the cell in and the light on: a stuck bit, a short
+/// and coupling, at the ends of SRAM and either side of where sections start,
+/// in the live stack too. Each has to be found by `__ram_section` within a
+/// sweep, hold the light off and let the watchdog reset the chip, and then
+/// stop in `__selftest_failed` when the power-on test finds it.
+///
+/// The coupling fault's two bytes straddle a multiple of `RAM_SECTION`,
+/// so only the sections overlapping brings them together.
+///
+/// Then two that shouldn't be found: with `__ram_section` stubbed out, as if
+/// the check were gone, and with the torch resting, where it mustn't run.
+fn periodic_faults(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    section: u32,
+    failed: u32,
+) -> Result<(), String> {
+    let (first, last) = (SRAM.start, SRAM.end - 1);
+    let middle = SRAM.start + (SRAM.end - SRAM.start) / 2;
+    let step = selftest::RAM_STEP;
+    let mut faults = Vec::new();
+    for addr in [first, first + step - 1, first + step, middle, last] {
+        for (bit, high) in [(0, true), (0, false), (7, true), (7, false)] {
+            faults.push(RamFault::Stuck { addr, bit, high });
+        }
+    }
+    for bits in [[0, 1], [0, 2], [3, 7]] {
+        faults.push(RamFault::Bridge { addr: middle, bits });
+    }
+    let straddle = middle + selftest::RAM_SECTION;
+    faults.push(RamFault::Coupling {
+        from: straddle,
+        bit: 7,
+        rising: true,
+        to: straddle - 1,
+        victim: 0,
+        force: None,
+    });
+    for fault in faults {
+        late_fault(power_on, fault, section, failed)?;
+    }
+
+    // A byte the firmware's using: stuck at what it holds, so it's only the
+    // test that can tell.
+    let sim = switched_on(power_on)?;
+    for addr in [sim.cpu.sp + 1, sim.cpu.sp + 8, last - 8, last] {
+        for bit in [0, 7] {
+            let high = sim.chip.sram(&(addr..addr + 1))[0] & 1 << bit != 0;
+            let fault = RamFault::Stuck { addr, bit, high };
+            late_fault(power_on, fault, section, failed)?;
+        }
+    }
+
+    let fault = RamFault::Stuck {
+        addr: middle,
+        bit: 0,
+        high: true,
+    };
+
+    let mut sim = switched_on(power_on)?;
+    let at = section as usize * 2;
+    sim.chip.flash[at..at + 2].copy_from_slice(&0x9508u16.to_le_bytes()); // ret
+    sim.chip.world.ram = Some(fault);
+    if run_until(&mut sim, failed, SWEEP_TICKS)?.is_some() {
+        return Err("found a fault with `__ram_section` stubbed out".into());
+    }
+
+    let (mut sim, _) = power_on(&World::NORMAL)?;
+    for _ in 0..4 {
+        sim.tick(false)?;
+    }
+    sim.chip.world.ram = Some(fault);
+    let power_downs = sim.chip.power_downs;
+    if run_until(&mut sim, section, SWEEP_TICKS)?.is_some() {
+        return Err("ran the periodic RAM test while resting".into());
+    }
+    if sim.chip.power_downs < power_downs + u64::from(SWEEP_TICKS) - 1 {
+        return Err("wasn't powering down while resting".into());
+    }
+    Ok(())
+}
+
+/// Breaks `fault` into a torch that's on, and checks it goes as
+/// `periodic_faults` says.
+fn late_fault(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    fault: RamFault,
+    section: u32,
+    failed: u32,
+) -> Result<(), String> {
+    let at = |e: String| format!("{fault}: {e}");
+    let mut sim = switched_on(power_on).map_err(at)?;
+    sim.chip.world.ram = Some(fault);
+    let Some(from) = run_until(&mut sim, failed, SWEEP_TICKS).map_err(at)? else {
+        return Err(at(format!("not found within {SWEEP_TICKS} ticks")));
+    };
+    if !(section..failed).contains(&from) {
+        return Err(at(format!("found from {:#06x}", from * 2)));
+    }
+    held_low_until_reset(&mut sim).map_err(at)?;
+    let world = World {
+        ram: Some(fault),
+        ..World::NORMAL
+    };
+    let (mut sim, boot) = power_on(&world).map_err(at)?;
+    if !matches!(boot, Boot::Failed { .. }) {
+        return Err(at("gone after the reset".into()));
+    }
+    stays_dark(&mut sim).map_err(at)
+}
+
 /// Word addresses of the labels in src/rt.rs's self-tests.
 struct Marks {
     /// The compare in the March test's ⇓ pass, and the last pass after it.
@@ -955,7 +1197,9 @@ fn in_step(
         }
         report.loop_instructions = report.loop_instructions.max(took);
         let powered_down = sim.chip.power_downs > power_downs;
-        if powered_down {
+        // Only a pass that started off resting: the one that turns the light
+        // off still does a section of the periodic RAM test, but only once.
+        if powered_down && resting > 0 {
             report.off_instructions = report.off_instructions.max(took);
         }
         rig.tick(sample.pressed, &sample.world);

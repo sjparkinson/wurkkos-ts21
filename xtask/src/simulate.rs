@@ -22,9 +22,8 @@
 //! `ram:bridge:0x3800.0.1` and `ram:couple:0x3900.7=1:0x3800.0` break a byte
 //! of SRAM, and `reg:r24.0=1` and
 //! `reg:short:r24.0.2=0` a CPU register, `SREG`, `SPL` and `SPH` included
-//! (`world::RamFault` and `RegisterFault` say how). The firmware
-//! only checks any of those at power-on, so they have to come before
-//! anything that takes time.
+//! (`world::RamFault` and `RegisterFault` say how). A script's are all there
+//! from power-on, so they have to come before anything that takes time.
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
