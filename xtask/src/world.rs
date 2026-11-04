@@ -121,39 +121,61 @@ pub enum Register {
     Sph,
 }
 
-/// A bit in one of the CPU's registers that's stuck. The simulated chip
-/// forces it before every instruction, from reset.
+/// A broken CPU register. The simulated chip forces it before every
+/// instruction, from reset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RegisterFault {
-    pub reg: Register,
-    pub bit: u8,
-    pub high: bool,
+pub enum RegisterFault {
+    /// A bit that's stuck.
+    Stuck { reg: Register, bit: u8, high: bool },
+    /// Two bits shorted together. Unless they hold the same value, both read
+    /// `high`, the winner of the short.
+    Short {
+        reg: Register,
+        bits: [u8; 2],
+        high: bool,
+    },
 }
 
 impl RegisterFault {
     pub fn apply(self, cpu: &mut Cpu) {
-        let force = |v: &mut u8| {
-            if self.high {
-                *v |= 1 << self.bit;
-            } else {
-                *v &= !(1 << self.bit);
+        let reg = match self {
+            Self::Stuck { reg, .. } | Self::Short { reg, .. } => reg,
+        };
+        let force = |v: &mut u8| match self {
+            Self::Stuck { bit, high, .. } => set_bits(v, 1 << bit, high),
+            Self::Short {
+                bits: [a, b], high, ..
+            } => {
+                let both = 1 << a | 1 << b;
+                if *v & both != 0 && *v & both != both {
+                    set_bits(v, both, high);
+                }
             }
         };
-        match self.reg {
+        match reg {
             Register::R(n) => force(&mut cpu.r[usize::from(n)]),
             Register::Sreg => force(&mut cpu.sreg),
             Register::Spl | Register::Sph => {
                 let mut bytes = cpu.sp.to_le_bytes();
-                force(&mut bytes[usize::from(self.reg == Register::Sph)]);
+                force(&mut bytes[usize::from(reg == Register::Sph)]);
                 cpu.sp = u16::from_le_bytes(bytes);
             }
         }
     }
 }
 
+fn set_bits(v: &mut u8, mask: u8, high: bool) {
+    if high {
+        *v |= mask;
+    } else {
+        *v &= !mask;
+    }
+}
+
 /// Scripts write the faults as `ram:stuck:0x3800.3=1` (bit 3 of 0x3800
 /// stuck high), `ram:alias:0x3900=0x3800` (0x3900 reaches 0x3800's byte),
-/// `ram:bridge:0x3800.0.1` (bits 0 and 1 of 0x3800 shorted) and `reg:r24.0=1`.
+/// `ram:bridge:0x3800.0.1` (bits 0 and 1 of 0x3800 shorted), `reg:r24.0=1`
+/// and `reg:short:r24.0.2=0` (bits 0 and 2 of r24 shorted, with 0 winning).
 /// These parse the part after `ram:` or `reg:`, and print the whole word.
 impl FromStr for RamFault {
     type Err = String;
@@ -222,25 +244,55 @@ impl FromStr for RegisterFault {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, String> {
-        let bad = || format!("expected a stuck register bit like reg:r24.0=1, not `reg:{s}`");
+        let bad = || {
+            format!(
+                "expected a broken register like reg:r24.0=1 or reg:short:r24.0.2=0, \
+                 not `reg:{s}`"
+            )
+        };
+        if let Some(short) = s.strip_prefix("short:") {
+            let (at, value) = short.split_once('=').ok_or_else(bad)?;
+            let mut parts = at.split('.');
+            let (Some(reg), Some(a), Some(b), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                return Err(bad());
+            };
+            let bits = [bit_number(a)?, bit_number(b)?];
+            if bits[0] == bits[1] {
+                return Err(format!("bit {} can't short to itself", bits[0]));
+            }
+            return Ok(Self::Short {
+                reg: reg.parse()?,
+                bits,
+                high: level(value)?,
+            });
+        }
         let (at, value) = s.split_once('=').ok_or_else(bad)?;
         let (reg, bit) = at.split_once('.').ok_or_else(bad)?;
-        let reg = match reg {
-            "SREG" => Register::Sreg,
-            "SPL" => Register::Spl,
-            "SPH" => Register::Sph,
+        Ok(Self::Stuck {
+            reg: reg.parse()?,
+            bit: bit_number(bit)?,
+            high: level(value)?,
+        })
+    }
+}
+
+impl FromStr for Register {
+    type Err = String;
+
+    fn from_str(reg: &str) -> Result<Self, String> {
+        match reg {
+            "SREG" => Ok(Self::Sreg),
+            "SPL" => Ok(Self::Spl),
+            "SPH" => Ok(Self::Sph),
             _ => reg
                 .strip_prefix('r')
                 .and_then(|n| n.parse().ok())
                 .filter(|&n| n < 32)
-                .map(Register::R)
-                .ok_or_else(|| format!("no register `{reg}`; try r0 to r31, SREG, SPL or SPH"))?,
-        };
-        Ok(Self {
-            reg,
-            bit: bit_number(bit)?,
-            high: level(value)?,
-        })
+                .map(Self::R)
+                .ok_or_else(|| format!("no register `{reg}`; try r0 to r31, SREG, SPL or SPH")),
+        }
     }
 }
 
@@ -257,7 +309,14 @@ impl fmt::Display for Register {
 
 impl fmt::Display for RegisterFault {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "reg:{}.{}={}", self.reg, self.bit, u8::from(self.high))
+        match *self {
+            Self::Stuck { reg, bit, high } => write!(f, "reg:{reg}.{bit}={}", u8::from(high)),
+            Self::Short {
+                reg,
+                bits: [a, b],
+                high,
+            } => write!(f, "reg:short:{reg}.{a}.{b}={}", u8::from(high)),
+        }
     }
 }
 
@@ -539,6 +598,8 @@ mod tests {
             "reg:SREG.1=1",
             "reg:SPL.0=0",
             "reg:SPH.5=1",
+            "reg:short:r24.0.2=0",
+            "reg:short:SREG.1.3=1",
         ] {
             let fault: RegisterFault = word["reg:".len()..].parse().unwrap();
             assert_eq!(fault.to_string(), word);
@@ -564,7 +625,17 @@ mod tests {
         ] {
             assert!(ram.parse::<RamFault>().is_err(), "ram:{ram} parsed");
         }
-        for register in ["r32.0=1", "r24.0", "x24.0=1", "r24.9=1", "r24.0=x"] {
+        for register in [
+            "r32.0=1",
+            "r24.0",
+            "x24.0=1",
+            "r24.9=1",
+            "r24.0=x",
+            "short:r24.0.2",
+            "short:r24.0=1",
+            "short:r24.2.2=1",
+            "short:r32.0.2=1",
+        ] {
             assert!(
                 register.parse::<RegisterFault>().is_err(),
                 "reg:{register} parsed"
@@ -574,7 +645,7 @@ mod tests {
 
     #[test]
     fn a_stuck_register_bit_is_forced() {
-        let stuck = |reg, bit, high| RegisterFault { reg, bit, high };
+        let stuck = |reg, bit, high| RegisterFault::Stuck { reg, bit, high };
         let mut cpu = Cpu::new(&(0x3800..0x4000));
         stuck(Register::R(24), 7, true).apply(&mut cpu);
         assert_eq!(cpu.r[24], 0x80);
@@ -588,6 +659,29 @@ mod tests {
     }
 
     #[test]
+    fn a_register_short_only_shows_when_its_bits_differ() {
+        let after = |high, value| {
+            let mut cpu = Cpu::new(&(0x3800..0x4000));
+            cpu.r[24] = value;
+            RegisterFault::Short {
+                reg: Register::R(24),
+                bits: [0, 2],
+                high,
+            }
+            .apply(&mut cpu);
+            cpu.r[24]
+        };
+        for same in [0x00, 0x05, 0x55, 0xAA, 0xFF] {
+            assert_eq!(after(false, same), same, "{same:#04x}");
+            assert_eq!(after(true, same), same, "{same:#04x}");
+        }
+        assert_eq!(after(false, 0x33), 0x32);
+        assert_eq!(after(true, 0x33), 0x37);
+        assert_eq!(after(false, 0xCC), 0xC8);
+        assert_eq!(after(true, 0xCC), 0xCD);
+    }
+
+    #[test]
     fn a_broken_ram_or_register_leaves_the_rig_dead() {
         for world in [
             World {
@@ -598,7 +692,7 @@ mod tests {
                 ..World::NORMAL
             },
             World {
-                register: Some(RegisterFault {
+                register: Some(RegisterFault::Stuck {
                     reg: Register::R(0),
                     bit: 0,
                     high: true,

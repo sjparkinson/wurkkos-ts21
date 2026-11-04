@@ -104,9 +104,10 @@ global_asm!(
     // Each register gets 0x55 and then 0xAA, which flips every bit both
     // ways, and is read back after each. That finds a stuck bit, and two
     // neighbouring bits shorted together, since 0x55 and 0xAA always set
-    // them differently. Bits two apart (0 and 2, say) always match, so a
-    // short between those gets through. It doesn't look for faults between
-    // registers either, and neither does AN2632.
+    // them differently. Bits two apart (0 and 2, say) always match, so
+    // `__register_shorts` further down goes round again with 0x33, 0xCC,
+    // 0x0F and 0xF0, the rest of AN2632 §9.2's backgrounds, for those. It
+    // doesn't look for faults between registers, and neither does AN2632.
     //
     // A failure jumps to `__selftest_failed`, which does nothing, forever.
     // Rust code can't run safely on a broken register file, so there's no
@@ -196,6 +197,51 @@ global_asm!(
     "  in r17, {sph}",
     "  cpi r17, {sph_a}",
     "  or_fail",
+    // The same round again for bits a short between which 0x55 and 0xAA
+    // can't see. Number a byte's bits in binary: 0x55 sets two bits apart
+    // when the last digit of their numbers differs, 0x33 the middle digit
+    // and 0x0F the first. Any two bits differ in at least one digit, so
+    // with their complements each pair is seen both ways round. The simulator
+    // checks that shorts between bits an even distance apart do get this
+    // far, and that this is what stops them.
+    ".global __register_shorts",
+    "__register_shorts:",
+    ".irp pat, {c},{d},{e},{f}",
+    ".irp reg, 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
+    "  ldi r\\reg, \\pat",
+    "  cpi r\\reg, \\pat",
+    "  or_fail",
+    ".endr",
+    ".irp reg, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
+    "  ldi r16, \\pat",
+    "  mov r\\reg, r16",
+    "  ldi r16, 255-\\pat",
+    "  mov r16, r\\reg",
+    "  cpi r16, \\pat",
+    "  or_fail",
+    ".endr",
+    // SREG gets cleared before the compare: `cpi` leaves T alone, so a T
+    // shorted to Z and left set would hold Z up, and the compare with it.
+    "  ldi r16, \\pat&{sreg_bits}",
+    "  out {sreg}, r16",
+    "  in r17, {sreg}",
+    "  ldi r16, 0",
+    "  out {sreg}, r16",
+    "  cpi r17, \\pat&{sreg_bits}",
+    "  or_fail",
+    "  ldi r16, \\pat",
+    "  out {spl}, r16",
+    "  ldi r16, \\pat&{sph_bits}",
+    "  out {sph}, r16",
+    "  in r17, {spl}",
+    "  cpi r17, \\pat",
+    "  or_fail",
+    "  in r17, {sph}",
+    "  cpi r17, \\pat&{sph_bits}",
+    "  or_fail",
+    ".endr",
+    ".global __register_shorts_end",
+    "__register_shorts_end:",
     "  ldi r16, lo8({stack_top})",
     "  out {spl}, r16",
     "  ldi r16, hi8({stack_top})",
@@ -385,10 +431,14 @@ global_asm!(
     // the chip into the tests again, which stays just as dark), so nothing
     // happens until the cell comes out. The button LED stays
     // dark too, since only `hw::init` turns its pull-up on, which is how to
-    // tell this from a torch that's merely off.
+    // tell this from a torch that's merely off. The `cli` is there for a
+    // broken r16, which can put SREG's test pattern in with its I bit set.
+    // Nothing's enabled to fire, but off means off.
     ".global __selftest_failed",
     "__selftest_failed:",
-    "  rjmp __selftest_failed",
+    "  cli",
+    "1:",
+    "  rjmp 1b",
     // The unhandled slots: from 1 up to RTC_PIT, and from there to the end.
     // Slot 0 is reset.
     before_pit = const regs::VECTOR_RTC_PIT - 1,
@@ -407,6 +457,12 @@ global_asm!(
     sreg_b = const PATTERN_B & !regs::CPU_SREG_I,
     sph_a = const PATTERN_A & SPH_BITS,
     sph_b = const PATTERN_B & SPH_BITS,
+    c = const PATTERN_C,
+    d = const !PATTERN_C,
+    e = const PATTERN_E,
+    f = const !PATTERN_E,
+    sreg_bits = const !regs::CPU_SREG_I,
+    sph_bits = const SPH_BITS,
     spl = const regs::addr::CPU_SPL,
     sph = const regs::addr::CPU_SPH,
     stack_top = const regs::addr::SRAM_END - 1,
@@ -419,6 +475,10 @@ global_asm!(
 /// so each bit goes both ways.
 const PATTERN_A: u8 = 0x55;
 const PATTERN_B: u8 = !PATTERN_A;
+/// `__register_shorts` adds these and their complements, so every two bits
+/// of a register are set differently by one pattern or another.
+const PATTERN_C: u8 = 0x33;
+const PATTERN_E: u8 = 0x0F;
 
 /// The bits of SPH that must exist for SP to reach the top of SRAM, 0x3F
 /// for 0x3FFF. Any above might read 0 (DS40002204A §8.7.2).
