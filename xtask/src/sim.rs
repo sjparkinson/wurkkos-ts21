@@ -100,7 +100,8 @@
 //!    (`register_shorts`) and coupling between bytes (`ram_coupling`),
 //!    checking each one stops in `__selftest_failed` with the light dark.
 //! 4. The periodic RAM test with the light on: a whole sweep on a good chip
-//!    (`periodic_passes`), then RAM going bad mid-run (`periodic_faults`).
+//!    (`periodic_passes`), what each of its checks is there for
+//!    (`periodic_checks`), then RAM going bad mid-run (`periodic_faults`).
 //! 5. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
 //!    with the cell, temperature, broken ADC, fuses, corrupt flash or
 //!    broken RAM or register the example scripts.
@@ -246,8 +247,9 @@ pub struct Report {
     pub loop_instructions: u64,
     /// What that's measured against.
     pub loop_budget: u64,
-    /// The most instructions one pass took that ended in power-down, which
-    /// is what the chip stays awake for, 64 times a second, when it's off.
+    /// The most instructions one pass took that started off resting and
+    /// ended in power-down, which is what the chip stays awake for, 64 times
+    /// a second, when it's off.
     pub off_instructions: u64,
     /// Handlers that landed with a TCA0 16-bit access half done.
     pub mid_access: u32,
@@ -319,8 +321,17 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         .map_err(|e| format!("RAM coupling: {e}"))?;
 
     let section = symbol("__ram_section")? / 2;
+    let section_failed = symbol("__ram_section_failed")? / 2;
+    let section_marks = SectionMarks {
+        section,
+        up: symbol("__ram_section_up_check")? / 2,
+        down: symbol("__ram_section_down_check")? / 2,
+        last: symbol("__ram_section_last_check")? / 2,
+        failed: section_failed,
+    };
     periodic_passes(&power_on, section).map_err(|e| format!("periodic RAM test: {e}"))?;
-    periodic_faults(&power_on, section, symbol("__ram_section_failed")? / 2)
+    periodic_checks(&power_on, &section_marks).map_err(|e| format!("periodic RAM test: {e}"))?;
+    periodic_faults(&power_on, section, section_failed)
         .map_err(|e| format!("periodic RAM test: {e}"))?;
 
     let mut report = Report {
@@ -855,12 +866,7 @@ fn ram_coupling(
     }
 
     let mut without_down = image.to_vec();
-    // `cp`, `breq`, then or_fail's `rjmp`.
-    let at = marks.march_down_check as usize * 2 + 4;
-    if word(image, at).is_none_or(|w| w >> 12 != 0xC) {
-        return Err("expected an rjmp two words after __march_down_check".into());
-    }
-    without_down[at..at + 2].fill(0); // nop
+    without_check(&mut without_down, marks.march_down_check)?;
 
     let up = marks.registers_tested..marks.march_down_check;
     let down = marks.march_down_check..marks.march_last;
@@ -975,8 +981,9 @@ fn held_low_until_reset(sim: &mut Sim) -> Result<(), String> {
 
 /// Sweeps all of SRAM on a good chip with the light on, a section a tick,
 /// with the sections in the order `RamSweep` gives. Each pass has to leave
-/// its section as it found it, with interrupts off until then, and stay
-/// inside `SECTION_BUDGET`.
+/// its section as it found it, with interrupts off until then, leave r1,
+/// SREG and the registers the calling convention keeps as they were, and
+/// stay inside `SECTION_BUDGET`.
 fn periodic_passes(
     power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
     section: u32,
@@ -987,7 +994,11 @@ fn periodic_passes(
     sim.run_to(section, PIT_PERIOD)?;
     let first = u16::from_le_bytes([sim.cpu.r[24], sim.cpu.r[25]]);
     let mut sweep = RamSweep::new();
-    while sweep.next_section() != first {}
+    if !(0..selftest::RAM_SECTIONS).any(|_| sweep.next_section() == first) {
+        return Err(format!(
+            "tested {first:#06x}, which isn't a section's start"
+        ));
+    }
     let mut expected = first;
     for _ in 0..selftest::RAM_SECTIONS {
         sim.run_to(section, PIT_PERIOD)?;
@@ -1000,6 +1011,21 @@ fn periodic_passes(
         expected = sweep.next_section();
         let bytes = start..start + selftest::RAM_SECTION;
         let (began, sp) = (sim.executed, sim.cpu.sp);
+        // SP points at the next free byte. Below that nothing's live, and
+        // the last march leaves its background everywhere, which a pass
+        // that forgot to put anything back would match.
+        if bytes.end - 1 <= sp {
+            sim.chip.write_section(start);
+        }
+        // What the caller's registers hold could happen to match what a
+        // pass leaves in them, so give them values that can't, and put the
+        // real ones back after.
+        let real = (sim.cpu.r, sim.cpu.sreg);
+        for n in SAVED_REGISTERS {
+            sim.cpu.r[n] = 0xC0 | n as u8;
+        }
+        sim.cpu.sreg = 1 << I | 0x55;
+        let expected_registers = (sim.cpu.r, sim.cpu.sreg);
         let run_until = |sim: &mut Sim, done: &dyn Fn(&Sim) -> bool| -> Result<(), String> {
             while !done(sim) {
                 if sim.executed - began > SECTION_BUDGET {
@@ -1019,8 +1045,154 @@ fn periodic_passes(
             return Err(format!("didn't put {start:#06x} back as it was"));
         }
         run_until(&mut sim, &|s| s.cpu.sp == sp + 2)?;
+        for n in iter::once(1).chain(SAVED_REGISTERS) {
+            if sim.cpu.r[n] != expected_registers.0[n] {
+                return Err(format!(
+                    "{start:#06x}: r{n} went from {:#04x} to {:#04x}",
+                    expected_registers.0[n], sim.cpu.r[n]
+                ));
+            }
+        }
+        if sim.cpu.sreg != expected_registers.1 {
+            return Err(format!(
+                "{start:#06x}: SREG went from {:#04x} to {:#04x}",
+                expected_registers.1, sim.cpu.sreg
+            ));
+        }
+        for n in SAVED_REGISTERS {
+            sim.cpu.r[n] = real.0[n];
+        }
+        sim.cpu.sreg = real.1;
     }
     Ok(())
+}
+
+/// What `__ram_section` has to leave as it found them, r1 aside: the
+/// registers the calling convention says a function keeps.
+const SAVED_REGISTERS: [usize; 18] = [
+    2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 28, 29,
+];
+
+/// Each check in `__ram_section`'s march, with a fault between two bytes of
+/// a section that only that check can find: it has to stop there, and with
+/// the check patched out it has to get through the pass. The faults came
+/// from a search through every coupling between two neighbours.
+fn periodic_checks(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    marks: &SectionMarks,
+) -> Result<(), String> {
+    let couple = |from: u16, bit: u8, to: u16, force: Option<bool>| RamFault::Coupling {
+        from,
+        bit,
+        rising: true,
+        to,
+        victim: if force.is_some() { 0 } else { 3 },
+        force,
+    };
+    // Offsets into the section, the culprit first.
+    let (low, high) = (8, 9);
+    let checks = [
+        (marks.up..marks.down, couple(low, 0, high, Some(true))),
+        (marks.down..marks.last, couple(high, 0, low, Some(true))),
+        // Rising from bit 7 high in the section's starting contents, so the
+        // first ⇕(wD) doesn't set it off where ⇑ can see.
+        (marks.down..marks.last, couple(high, 7, low, None)),
+        (marks.last..marks.failed, couple(low, 0, high, Some(false))),
+    ];
+    for (found_in, fault) in checks {
+        match one_pass(power_on, marks, fault, None)? {
+            Some(from) if found_in.contains(&from) => {}
+            Some(from) => {
+                return Err(format!(
+                    "{fault}, as offsets: found by the wrong check, at {:#06x}",
+                    from * 2
+                ));
+            }
+            None => return Err(format!("{fault}, as offsets: not found")),
+        }
+        if let Some(from) = one_pass(power_on, marks, fault, Some(found_in.start))? {
+            return Err(format!(
+                "{fault}, as offsets: found at {:#06x} with that check gone, \
+                 so it isn't the only one that finds it",
+                from * 2
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Runs one pass of `__ram_section` on a torch that's on, in free RAM, with
+/// `fault`'s addresses as offsets into the section it's about to test, and
+/// the check at `without` patched out. Returns where it failed, if it did.
+fn one_pass(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    marks: &SectionMarks,
+    fault: RamFault,
+    without: Option<u32>,
+) -> Result<Option<u32>, String> {
+    let mut sim = switched_on(power_on)?;
+    if let Some(check) = without {
+        without_check(&mut sim.chip.flash, check)?;
+    }
+    sim.run_to(marks.section, PIT_PERIOD)?;
+    let start = u16::from_le_bytes([sim.cpu.r[24], sim.cpu.r[25]]);
+    if start + selftest::RAM_SECTION > sim.cpu.sp {
+        return Err(format!("{start:#06x} isn't in free RAM"));
+    }
+    sim.chip.write_section(start);
+    let RamFault::Coupling {
+        from,
+        bit,
+        rising,
+        to,
+        victim,
+        force,
+    } = fault
+    else {
+        return Err(format!("{fault} isn't a coupling fault"));
+    };
+    sim.chip.world.ram = Some(RamFault::Coupling {
+        from: start + from,
+        bit,
+        rising,
+        to: start + to,
+        victim,
+        force,
+    });
+    let (sp, began) = (sim.cpu.sp, sim.executed);
+    let mut last = sim.cpu.pc;
+    while sim.cpu.sp != sp + 2 {
+        if sim.cpu.pc == marks.failed {
+            return Ok(Some(last));
+        }
+        if sim.executed - began > SECTION_BUDGET {
+            return Err("a pass never finished".into());
+        }
+        last = sim.cpu.pc;
+        sim.step()?;
+    }
+    Ok(None)
+}
+
+/// Turns a check off: `at` is its `cp`, and after that come its `breq` and
+/// the `rjmp` to wherever failures go, which becomes a `nop`.
+fn without_check(flash: &mut [u8], at: u32) -> Result<(), String> {
+    let at = at as usize * 2 + 4;
+    if word(flash, at).is_none_or(|w| w >> 12 != 0xC) {
+        return Err(format!("expected an rjmp at {at:#06x}"));
+    }
+    flash[at..at + 2].fill(0);
+    Ok(())
+}
+
+/// Word addresses of the labels in `__ram_section`.
+struct SectionMarks {
+    section: u32,
+    /// The compares in the ⇑, ⇓ and last passes.
+    up: u32,
+    down: u32,
+    last: u32,
+    failed: u32,
 }
 
 /// RAM going bad with the cell in and the light on: a stuck bit, a short
@@ -1032,8 +1204,10 @@ fn periodic_passes(
 /// The coupling fault's two bytes straddle a multiple of `RAM_SECTION`,
 /// so only the sections overlapping brings them together.
 ///
-/// Then two that shouldn't be found: with `__ram_section` stubbed out, as if
-/// the check were gone, and with the torch resting, where it mustn't run.
+/// Then two that shouldn't be found. With `__ram_section` stubbed out, as if
+/// the test were gone, the torch has to carry on with the light on for a
+/// whole sweep: nothing else notices. And with the torch resting, where it
+/// mustn't run.
 fn periodic_faults(
     power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
     section: u32,
@@ -1064,8 +1238,10 @@ fn periodic_faults(
         late_fault(power_on, fault, section, failed)?;
     }
 
-    // A byte the firmware's using: stuck at what it holds, so it's only the
-    // test that can tell.
+    // A byte the firmware's using, stuck at what it holds now. That's only
+    // invisible to the firmware while the byte doesn't change, and one that
+    // does could send it wrong before the test gets there, which this would
+    // report as an error rather than a find.
     let sim = switched_on(power_on)?;
     for addr in [sim.cpu.sp + 1, sim.cpu.sp + 8, last - 8, last] {
         for bit in [0, 7] {
@@ -1085,8 +1261,12 @@ fn periodic_faults(
     let at = section as usize * 2;
     sim.chip.flash[at..at + 2].copy_from_slice(&0x9508u16.to_le_bytes()); // ret
     sim.chip.world.ram = Some(fault);
-    if run_until(&mut sim, failed, SWEEP_TICKS)?.is_some() {
-        return Err("found a fault with `__ram_section` stubbed out".into());
+    let leds = sim.chip.leds();
+    for _ in 0..SWEEP_TICKS {
+        sim.tick(false)?;
+    }
+    if sim.chip.leds() != leds {
+        return Err("a fault changed the light with `__ram_section` stubbed out".into());
     }
 
     let (mut sim, _) = power_on(&World::NORMAL)?;
@@ -1995,6 +2175,18 @@ impl Chip {
         self.adc.last_setup = setup;
         self.adc.ready_at = Some(self.now + CONVERSION_INSTRUCTIONS);
         Ok(())
+    }
+
+    /// Fills a section of the periodic RAM test with bytes that differ from
+    /// each other and every background, with bit 7 high.
+    fn write_section(&mut self, start: u16) {
+        let from = usize::from(start - SRAM.start);
+        for (i, byte) in self.sram[from..from + usize::from(selftest::RAM_SECTION)]
+            .iter_mut()
+            .enumerate()
+        {
+            *byte = 0x80 | i as u8;
+        }
     }
 
     fn sram(&self, range: &Range<u16>) -> &[u8] {
