@@ -32,7 +32,7 @@ impl Fuses {
     /// - `WDTCFG` is 0. Anything else starts the watchdog from the fuse and
     ///   locks its settings (DS §19.3.3.3), so the firmware can't set it up.
     /// - `OSCCFG.FREQSEL` is 20 MHz and `OSCLOCK` clear. Every timing assumes
-    ///   a calibrated 20 MHz divided by two, and OSCLOCK stops the
+    ///   a calibrated 20 MHz divided by four, and OSCLOCK stops the
     ///   calibration loading (errata 2.2.1).
     /// - `SYSCFG0.RSTPINCFG` is UPDI, so the light can still be reflashed.
     /// - `APPEND` and `BOOTEND` are 0: the vector table is linked at 0, and

@@ -53,6 +53,9 @@
 //!   a result that's invalid), the ADC off, the reference not forced on,
 //!   TCA0's channels off the pins with both compares at 0, and PA5 able to
 //!   wake it.
+//! - The clock has to be 5 MHz, and TCA0 single-slope with a PER of 254 and
+//!   no prescaler: writes of anything else are refused, and after `hw::init`
+//!   a write that never happened fails too.
 //! - TCA0's CMP0 and CMP1 pick up their BUF registers a PWM cycle after a
 //!   write, standing in for the next BOTTOM. The datasheet doesn't say
 //!   whether writing CNT counts as one, so this guesses that it doesn't and
@@ -151,8 +154,8 @@ const LINEAR: u8 = 1 << 1; // PB1, TCA0 WO1
 /// Instructions startup may take before reaching `main`. Nearly all of it
 /// is src/rt.rs's RAM test, about 200,000.
 const BOOT_BUDGET: u64 = 400_000;
-/// CPU cycles in a 64 Hz tick at 10 MHz.
-const TICK_CYCLES: u64 = 10_000_000 / 64;
+/// CPU cycles in a 64 Hz tick at 5 MHz.
+const TICK_CYCLES: u64 = 5_000_000 / 64;
 /// Instructions one pass of the main loop may take. No AVRxt instruction
 /// takes more than 4 cycles, so this many always fit in a tick.
 const TICK_BUDGET: u64 = TICK_CYCLES / 4;
@@ -198,9 +201,11 @@ pub const ISC_FALLING: u8 = 0x3;
 pub const ISC_INPUT_DISABLE: u8 = regs::PORT_ISC_INPUT_DISABLE;
 pub const ISC_LEVEL: u8 = 0x5;
 /// Instructions from a write to a CMPnBUF to the BOTTOM that applies it: a
-/// dual-slope cycle is two PERs of CPU clocks, and no instruction is quicker
+/// single-slope cycle is PER + 1 CPU clocks, and no instruction is quicker
 /// than a clock, so it's never less than this on the real chip's time.
-const PWM_CYCLE: u64 = 2 * ramp::PWM_TOP as u64;
+const PWM_CYCLE: u64 = ramp::PWM_TOP as u64;
+/// TCA0.CTRLB.WGMODE's mask. atdf.rs checks it.
+pub(crate) const TCA_WGMODE: u8 = 0x07;
 /// PORTx.PINnCTRL.INVEN, which the simulator refuses on PA5.
 pub const PORT_INVEN: u8 = 0x80;
 /// PORTB's and PORTC's pin-change vectors, which the firmware has no
@@ -698,6 +703,9 @@ fn in_step(
     if !sim.chip.button_led_lit() {
         return Err("hw::init left PB5 without its pull-up, so the button LED is out".into());
     }
+    if !sim.chip.clocked_as_modelled() {
+        return Err("hw::init didn't set up the 5 MHz clock and TCA0's PWM".into());
+    }
     let mut rig = Rig::new(&power_on);
     let mut resting = 0;
     for (tick, sample) in samples.enumerate() {
@@ -1043,10 +1051,11 @@ struct Adc {
 }
 
 /// Instructions a conversion takes on the simulated chip. Four accumulated
-/// conversions with the delays `hw::init` sets are about 2,600 CPU cycles,
-/// so this is roughly that, and well inside a tick, so a firmware that reads
-/// the result straight after starting a conversion finds it isn't ready.
-const CONVERSION_INSTRUCTIONS: u64 = 2_640;
+/// conversions with the delays `hw::init` sets are about 165 ADC clocks, 1,320
+/// CPU cycles, so this is roughly that, and well inside a tick, so a firmware
+/// that reads the result straight after starting a conversion finds it isn't
+/// ready.
+const CONVERSION_INSTRUCTIONS: u64 = 165 * (CLK_PER / 625_000) as u64;
 
 /// What the first conversion after a change of reference or input reads.
 /// The datasheet doesn't promise it's wrong, but Anduril finds it unstable,
@@ -1056,7 +1065,7 @@ const CONVERSION_INSTRUCTIONS: u64 = 2_640;
 const UNSETTLED: u16 = 0;
 
 /// CPU cycles a second, from `hw::init`'s clock setup.
-const CLK_PER: u32 = 10_000_000;
+const CLK_PER: u32 = 5_000_000;
 
 impl Chip {
     fn new(flash: Vec<u8>) -> Self {
@@ -1463,6 +1472,17 @@ impl Chip {
             .map_or(0, |i| self.wide[i])
     }
 
+    /// Whether the clock and TCA0 are what `CLK_PER` and `PWM_CYCLE` say.
+    /// Writes of anything else are refused, but this is what catches a write
+    /// that never happened: the reset values are a 3.3 MHz clock and a PER
+    /// of 0xFFFF, which leaves full duty nearly dark.
+    fn clocked_as_modelled(&self) -> bool {
+        self.io[reg::CLKCTRL_MCLKCTRLB] == regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN
+            && self.io[reg::TCA0_CTRLA] == regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE
+            && self.io[reg::TCA0_CTRLB] & TCA_WGMODE == regs::TCA_WGMODE_SINGLESLOPE
+            && self.wide(reg::TCA0_PERBUF) == ramp::PWM_TOP - 1
+    }
+
     /// (linear, FET) duty as the pins see it: TCA0 running, the compare
     /// channel enabled and the pin set as an output.
     fn leds(&self) -> (u16, u16) {
@@ -1750,6 +1770,21 @@ impl Bus for Chip {
             }
             reg::CLKCTRL_MCLKCTRLB => {
                 self.take_protected_write(a)?;
+                if value != regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN {
+                    return Err(format!(
+                        "writes {value:#04x} to CLKCTRL.MCLKCTRLB: the firmware runs at \
+                         5 MHz, since 10 MHz is out of spec under 2.7 V (table 36-3)"
+                    ));
+                }
+                self.io[a] = value;
+            }
+            reg::TCA0_CTRLB => {
+                if value & TCA_WGMODE != regs::TCA_WGMODE_SINGLESLOPE {
+                    return Err(format!(
+                        "writes {value:#04x} to TCA0.CTRLB: PWM_CYCLE and the duty \
+                         cycles assume single-slope"
+                    ));
+                }
                 self.io[a] = value;
             }
             reg::WDT_CTRLA => {
@@ -1823,6 +1858,15 @@ impl Bus for Chip {
                     self.wide[i] = u16::from_le_bytes([lo, value]);
                     let bottom = self.now + PWM_CYCLE;
                     match low {
+                        // Full duty has to be over PER to hold the pin high,
+                        // and the cycle has to be what PWM_CYCLE says.
+                        reg::TCA0_PERBUF if self.wide[i] != ramp::PWM_TOP - 1 => {
+                            return Err(format!(
+                                "sets TCA0.PER to {}: full duty needs it at {}",
+                                self.wide[i],
+                                ramp::PWM_TOP - 1
+                            ));
+                        }
                         reg::TCA0_CMP0BUF | reg::TCA0_CMP1BUF => {
                             self.compare_update.get_or_insert(bottom);
                         }
@@ -1925,19 +1969,81 @@ mod tests {
     fn takes_a_protected_write_only_just_after_the_key() {
         let mut c = chip();
         let clk = reg::CLKCTRL_MCLKCTRLB as u16;
-        assert!(c.write(clk, 1).is_err(), "no key");
+        let five_mhz = regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN;
+        assert!(c.write(clk, five_mhz).is_err(), "no key");
 
         c.now = 10;
         c.write(reg::CPU_CCP as u16, regs::CPU_CCP_IOREG).unwrap();
         c.now = 14;
-        assert_eq!(c.write(clk, 1), Ok(()), "fourth instruction after");
-        assert_eq!(c.io[reg::CLKCTRL_MCLKCTRLB], 1);
-        assert!(c.write(clk, 2).is_err(), "the key only covers one write");
+        assert_eq!(c.write(clk, five_mhz), Ok(()), "fourth instruction after");
+        assert_eq!(c.io[reg::CLKCTRL_MCLKCTRLB], five_mhz);
+        assert!(
+            c.write(clk, five_mhz).is_err(),
+            "the key only covers one write"
+        );
 
         c.write(reg::CPU_CCP as u16, regs::CPU_CCP_IOREG).unwrap();
         c.now = 19;
-        assert!(c.write(clk, 3).unwrap_err().contains("ignores"), "too late");
+        assert!(
+            c.write(clk, five_mhz).unwrap_err().contains("ignores"),
+            "too late"
+        );
         assert!(c.write(reg::CPU_CCP as u16, 0x9D).is_err(), "SPM key");
+    }
+
+    #[test]
+    fn refuses_any_clock_but_5_mhz() {
+        let mut c = chip();
+        // Undivided, 10 MHz, and the reset value's 3.3 MHz.
+        for value in [0x00, regs::CLKCTRL_PEN, 0x11] {
+            c.write(reg::CPU_CCP as u16, regs::CPU_CCP_IOREG).unwrap();
+            let err = c.write(reg::CLKCTRL_MCLKCTRLB as u16, value).unwrap_err();
+            assert!(err.contains("5 MHz"), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_clock_and_pwm_have_to_have_been_set_up() {
+        let set_up = |c: &mut Chip| {
+            c.io[reg::CLKCTRL_MCLKCTRLB] = regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN;
+            c.io[reg::TCA0_CTRLA] = regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE;
+            c.io[reg::TCA0_CTRLB] = regs::TCA_WGMODE_SINGLESLOPE;
+            write_wide(c, reg::TCA0_PERBUF, ramp::PWM_TOP - 1);
+        };
+        let mut c = chip();
+        assert!(!c.clocked_as_modelled(), "out of reset");
+        set_up(&mut c);
+        assert!(c.clocked_as_modelled());
+
+        for missed in [reg::CLKCTRL_MCLKCTRLB, reg::TCA0_CTRLA, reg::TCA0_CTRLB] {
+            let mut c = chip();
+            set_up(&mut c);
+            c.io[missed] = 0;
+            assert!(!c.clocked_as_modelled(), "{}", name(missed));
+        }
+        let mut c = chip();
+        set_up(&mut c);
+        c.wide[WIDE.iter().position(|&a| a == reg::TCA0_PERBUF).unwrap()] = 0xFFFF;
+        assert!(!c.clocked_as_modelled(), "TCA0.PER at its reset value");
+    }
+
+    #[test]
+    fn refuses_pwm_that_isnt_single_slope() {
+        let mut c = chip();
+        let ctrlb = reg::TCA0_CTRLB as u16;
+        let err = c.write(ctrlb, 0x07).unwrap_err();
+        assert!(err.contains("single-slope"), "DSBOTTOM: {err}");
+        assert_eq!(c.write(ctrlb, regs::TCA_WGMODE_SINGLESLOPE), Ok(()));
+    }
+
+    #[test]
+    fn refuses_a_period_that_keeps_full_duty_from_holding_the_pin_high() {
+        let mut c = chip();
+        let [lo, hi] = ramp::PWM_TOP.to_le_bytes();
+        c.write(reg::TCA0_PERBUF as u16, lo).unwrap();
+        let err = c.write(reg::TCA0_PERBUF as u16 + 1, hi).unwrap_err();
+        assert!(err.contains("full duty"), "{err}");
+        write_wide(&mut c, reg::TCA0_PERBUF, ramp::PWM_TOP - 1);
     }
 
     #[test]
@@ -2714,7 +2820,7 @@ mod tests {
         w(
             c,
             reg::ADC0_CTRLC,
-            regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV16 | refsel,
+            regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV8 | refsel,
         );
         w(c, reg::ADC0_MUXPOS, muxpos);
         w(c, reg::ADC0_CTRLB, sampnum);
@@ -2816,7 +2922,7 @@ mod tests {
                 regs::VREF_ADC0REFSEL_1V1,
             ),
             ("one conversion", reg::ADC0_CTRLB, regs::ADC_SAMPNUM_ACC1),
-            ("against INTREF", reg::ADC0_CTRLC, regs::ADC_PRESC_DIV16),
+            ("against INTREF", reg::ADC0_CTRLC, regs::ADC_PRESC_DIV8),
             ("ADC too fast", reg::ADC0_CTRLC, regs::ADC_REFSEL_VDDREF),
             ("ADC off", reg::ADC0_CTRLA, 0),
             ("reference left to start", reg::VREF_CTRLB, 0),
@@ -2834,7 +2940,7 @@ mod tests {
             (reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US - 1),
             (
                 reg::ADC0_CTRLC,
-                regs::ADC_PRESC_DIV16 | regs::ADC_REFSEL_INTREF,
+                regs::ADC_PRESC_DIV8 | regs::ADC_REFSEL_INTREF,
             ),
         ] {
             let mut c = chip();
