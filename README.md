@@ -3,7 +3,7 @@
 Rust firmware for the Wurkkos TS21 torch (model 0614).
 
 > [!WARNING]
-> This isn't ready to carry yet. It only idles when off, at around a milliamp rather than the microamp or so power-down would manage, so it'll still flatten a cell in months, and its thermal regulation and low-voltage protection have only run on a simulator, not a real light. On a light with a direct-drive FET and a 21700, that matters. See the [roadmap](docs/roadmap.md).
+> This isn't ready to carry yet. Its power-down when off, thermal regulation and low-voltage protection have only run on a simulator, not a real light. On a light with a direct-drive FET and a 21700, that matters. See the [roadmap](docs/roadmap.md).
 
 ## Using it
 

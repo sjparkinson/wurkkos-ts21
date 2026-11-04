@@ -23,6 +23,7 @@ use ts21::temp::Calibration;
 
 use crate::regs::{self, addr as reg};
 
+const UPDI: u8 = 0; // PA0
 const SWITCH: u8 = 5; // PA5
 // src/rt.rs drives these two low before its self-tests.
 pub(crate) const FET: u8 = 0; // PB0
@@ -38,6 +39,13 @@ const PORTB_PINS: u8 = 6;
 // the pull-up's trickle through the LED is enough to see it. That's
 // Anduril's low aux setting. Driving the pin high would cost milliamps.
 const _: () = assert!(PORTB_OUTPUTS & 1 << AUX == 0);
+
+/// PORTx.PINnCTRL for a pin nothing reads. The pull-up doesn't need the input
+/// buffer, so this still lights the button LED on PB5.
+const UNUSED_PIN: u8 = regs::PORT_PULLUPEN | regs::PORT_ISC_INPUT_DISABLE;
+
+/// TCA0.CTRLB with both PWM channels on their pins.
+const TCA_DRIVING: u8 = regs::TCA_CMP0EN | regs::TCA_CMP1EN | regs::TCA_WGMODE_DSBOTTOM;
 
 /// WDT clocks in a WDT.CTRLA WINDOW or PERIOD setting `n`, 1 to 11.
 const fn wdt_clocks(n: u8) -> u16 {
@@ -152,9 +160,9 @@ pub fn init() {
     // Until the first feed there's no closed window, only the 32-clock
     // timeout, and the first pass of the loop feeds it. Wait for the write
     // to sync before going on, so that feed can't land while it's still
-    // syncing. It keeps counting in every sleep mode, so the off tick
-    // (roadmap stage 2) has to feed it too. Never set WDT.STATUS.LOCK and
-    // never touch the WDTCFG fuse.
+    // syncing. It keeps counting in every sleep mode, which is fine, since
+    // the PIT does too and the loop runs every tick, on or off. Never set
+    // WDT.STATUS.LOCK and never touch the WDTCFG fuse.
     while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
     protected_write(
         reg::WDT_CTRLA,
@@ -163,21 +171,24 @@ pub fn init() {
     while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
 
     // Pull every pin we don't drive up, so nothing floats and leaks current,
-    // and so the button LED on PB5 lights.
+    // and so the button LED on PB5 lights. Turn off the input buffers we
+    // don't read too, which saves a little more (AN2515C section 9). PA0 only
+    // gets the pull-up: it's UPDI, and nothing's worth risking that for.
     for pin in 0..8 {
         let ctrl = match pin {
             SWITCH => regs::PORT_PULLUPEN | regs::PORT_ISC_BOTHEDGES,
-            _ => regs::PORT_PULLUPEN,
+            UPDI => regs::PORT_PULLUPEN,
+            _ => UNUSED_PIN,
         };
         write(reg::PORTA_PIN0CTRL + pin as usize, ctrl);
     }
     for pin in 0..PORTB_PINS {
         if PORTB_OUTPUTS & 1 << pin == 0 {
-            write(reg::PORTB_PIN0CTRL + pin as usize, regs::PORT_PULLUPEN);
+            write(reg::PORTB_PIN0CTRL + pin as usize, UNUSED_PIN);
         }
     }
     for pin in 0..4u8 {
-        write(reg::PORTC_PIN0CTRL + pin as usize, regs::PORT_PULLUPEN);
+        write(reg::PORTC_PIN0CTRL + pin as usize, UNUSED_PIN);
     }
 
     write(reg::VPORTB_DIR, PORTB_OUTPUTS);
@@ -188,39 +199,20 @@ pub fn init() {
     write16(reg::TCA0_PERBUF, PWM_TOP);
     write16(reg::TCA0_CMP0BUF, 0);
     write16(reg::TCA0_CMP1BUF, 0);
-    write(
-        reg::TCA0_CTRLB,
-        regs::TCA_CMP0EN | regs::TCA_CMP1EN | regs::TCA_WGMODE_DSBOTTOM,
-    );
+    write(reg::TCA0_CTRLB, TCA_DRIVING);
     write(reg::TCA0_CTRLA, regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE);
 
     // ADC0 in single-conversion mode at 625 kHz, with the delays the
     // temperature sensor needs (DS40002204A, section 30.3.2.6). Both
     // channels use the same timing, so only the reference, the input and the
     // accumulation change between them (`adc_start`).
-    // ADC0's reference stays on, rather than starting when each single
-    // conversion asks for it. The datasheet doesn't say how long a request
-    // lasts, and a 1.5 V reference caught starting up reads low, which
-    // reads as a fuller cell than it is. It costs a little current, which
-    // matters once the torch sleeps (roadmap stage 2), not before. If sleep
-    // turns this or the ADC off, `sensors::Schedule` has to forget the
-    // channel it last set up, so the next turn sets the ADC up again.
-    write(reg::VREF_CTRLB, regs::VREF_ADC0REFEN);
+    // Turning it and the reference on waits for `adc_start`.
     // The ATDF says CALIB resets to 50% duty, the datasheet says 25%, and
     // 25% is what it wants at this clock (section 30.5.17), so say so.
     write(reg::ADC0_CALIB, regs::ADC_DUTYCYC_DUTY25);
     write(reg::ADC0_CTRLC, regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV16);
     write(reg::ADC0_CTRLD, regs::ADC_INITDLY_DLY32);
     write(reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US);
-    write(reg::ADC0_CTRLA, regs::ADC_ENABLE);
-
-    // `sleep` puts the CPU in idle, which stops only the CPU and flash, so
-    // TCA0 keeps the PWM going and the ADC keeps converting. Standby would
-    // stop TCA0, which has no RUNSTDBY (section 11.3.2.1).
-    write(
-        reg::SLPCTRL_CTRLA,
-        regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN,
-    );
 
     // The RTC's periodic interrupt timer, off the internal 32.768 kHz
     // oscillator (RTC.CLKSEL's reset value) divided by 512: 64 Hz, with its
@@ -230,6 +222,10 @@ pub fn init() {
     write(reg::RTC_PITINTCTRL, regs::RTC_PI);
     while read(reg::RTC_PITSTATUS) & regs::RTC_CTRLBUSY != 0 {}
     write(reg::RTC_PITCTRLA, regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN);
+    // The first sleep is power-down, and the datasheet doesn't say this
+    // write finishes syncing with the peripheral clock stopped. If it didn't,
+    // there'd be no ticks, so see it through.
+    while read(reg::RTC_PITSTATUS) & regs::RTC_CTRLBUSY != 0 {}
 }
 
 /// The bit in GPIOR0 that [`rtc_pit`] sets each tick. AN2515C section 4.5
@@ -241,7 +237,55 @@ pub fn init() {
 /// of RAM.
 const TICK: u8 = 1 << 0;
 
-/// Sleeps until the next 64 Hz tick.
+/// Whether both PWM channels are really at 0, not only their BUF registers,
+/// which reach CMPn at the next BOTTOM. The datasheet doesn't say whether
+/// `set_output` writing CNT counts as one, so this reads the real thing.
+fn output_settled() -> bool {
+    read16(reg::TCA0_CMP0) == 0 && read16(reg::TCA0_CMP1) == 0
+}
+
+/// Sets up the sleep that [`wait_for_tick`] goes on to do. `rest` is
+/// `Torch::resting`.
+///
+/// Power-down stops TCA0 where it is, so it waits until the compares have
+/// settled at 0, a tick after the output went off. The datasheet doesn't say
+/// what level a waveform output holds in sleep, so CMPnEN goes off too,
+/// handing the pins to PORT, whose OUT is 0: the FET can't freeze on. They
+/// come back only while the compares are 0, or they'd glitch the old duty.
+/// It also turns the ADC and its forced reference off. The datasheet gives
+/// no current for either left on in power-down, and Anduril's
+/// `sleep_until_eswitch_pressed` does the same. `adc_start` turns them back
+/// on, and a rest always makes `sensors::Schedule` ask it to.
+///
+/// Otherwise it's idle, which stops only the CPU and flash, so TCA0 keeps the
+/// PWM going and the ADC keeps converting. Standby would stop TCA0, which has
+/// no RUNSTDBY (section 11.3.2.1). CTRLB only gets written if it has to be,
+/// since the datasheet doesn't promise that rewriting it with the PWM running
+/// does nothing.
+fn prepare_sleep(rest: bool) {
+    if rest && output_settled() {
+        write(reg::ADC0_CTRLA, 0);
+        write(reg::VREF_CTRLB, 0);
+        write(reg::TCA0_CTRLB, regs::TCA_WGMODE_DSBOTTOM);
+        write(
+            reg::SLPCTRL_CTRLA,
+            regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN,
+        );
+    } else {
+        if read(reg::TCA0_CTRLB) != TCA_DRIVING {
+            write(reg::TCA0_CTRLB, TCA_DRIVING);
+        }
+        write(
+            reg::SLPCTRL_CTRLA,
+            regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN,
+        );
+    }
+}
+
+/// Sleeps until the next 64 Hz tick, in power-down if `rest` allows it. The
+/// PIT and the watchdog carry on in there (sections 23.8 and 19.3.4), so the
+/// loop runs every tick, on or off, and samples the switch whether or not
+/// the pin-change interrupt fired.
 ///
 /// The PIT interrupt sets [`TICK`]; this checks and clears it with
 /// interrupts off, so a tick can't land between the check and the clear.
@@ -251,7 +295,8 @@ const TICK: u8 = 1 << 0;
 /// once rather than being slept through. Anything else that wakes it, such
 /// as the switch's pin-change interrupt, goes round the loop and back to
 /// sleep.
-pub fn wait_for_tick() {
+pub fn wait_for_tick(rest: bool) {
+    prepare_sleep(rest);
     loop {
         // SAFETY: `cli` only clears SREG.I. With no `nomem`, it's also a
         // compiler barrier, so the GPIOR0 read can't move above it.
@@ -279,8 +324,9 @@ pub extern "avr-interrupt" fn rtc_pit() {
 }
 
 /// PORTA_PORT, vector 3: the switch changed. `hw::init` sets PA5 to
-/// interrupt on both edges, which is for waking from power-down when
-/// that's done (roadmap stage 2). For now waking is all it's for: the main
+/// interrupt on both edges, since only that and LEVEL wake a partially
+/// asynchronous pin from power-down (table 16-3). Waking is all it's for,
+/// and with the PIT running that's no sooner than the next tick: the main
 /// loop samples the switch every tick anyway. It clears every PORTA flag,
 /// since one left up would fire again the moment this returned.
 pub extern "avr-interrupt" fn porta_port() {
@@ -353,8 +399,15 @@ pub fn fuses() -> Fuses {
 /// Starts an ADC conversion, setting the ADC up for its channel first if
 /// asked. The setups are Anduril's (`arch/attiny1616.c`) for the voltage and
 /// the datasheet's (section 30.3.2.6) for the temperature.
-/// `sensors::Schedule` only asks when the channel changes, so with the light
-/// off the registers are written once and left alone.
+/// `sensors::Schedule` only asks when the channel changes, or after a rest.
+///
+/// Setting up also turns the ADC on, and forces its reference on, rather
+/// than leaving it to start when each single conversion asks for it. The
+/// datasheet doesn't say how long a request lasts, and a 1.5 V reference
+/// caught starting up reads low, which reads as a fuller cell than it is.
+/// After a rest it's back well before it counts: `Schedule` throws this
+/// conversion away, and the next is a tick later, against 60 µs at most to
+/// start (section 29.3.1).
 ///
 /// It never clears RESRDY. That works because [`adc_result`] runs every
 /// tick and reading the result clears it, so a stale one is never read
@@ -377,6 +430,7 @@ pub fn adc_start(convert: Convert) {
                 regs::ADC_SAMPNUM_ACC1,
             ),
         };
+        write(reg::VREF_CTRLB, regs::VREF_ADC0REFEN);
         // Nothing else uses VREF, so DAC0REFSEL's bits can stay zero.
         write(reg::VREF_CTRLA, vref);
         write(
@@ -385,6 +439,7 @@ pub fn adc_start(convert: Convert) {
         );
         write(reg::ADC0_MUXPOS, muxpos);
         write(reg::ADC0_CTRLB, sampnum);
+        write(reg::ADC0_CTRLA, regs::ADC_ENABLE);
     }
     write(reg::ADC0_COMMAND, regs::ADC_STCONV);
 }

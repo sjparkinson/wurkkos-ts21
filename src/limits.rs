@@ -92,6 +92,20 @@ impl Limits {
         (self.battery.level(), self.thermal.ceiling())
     }
 
+    /// A tick in place of [`Limits::tick`] while the torch rests: the light's
+    /// off, and nothing's measured, since the ADC can't run in power-down. A
+    /// conversion started now would come back on waking with an invalid
+    /// result (DS40002204A §30.3.5). So a battery ceiling only climbs once
+    /// readings start again, and a long rest forgets the last ones
+    /// (`battery::FORGET_TICKS`).
+    pub fn rest(&mut self) {
+        self.schedule.rest();
+        self.protection.rest();
+        self.convert = None;
+        self.on = false;
+        self.level = 0;
+    }
+
     /// One tick: `ui` is the level the UI wants (`0` for off) and `result`
     /// the ADC's result, if it has one ready.
     pub fn tick(&mut self, ui: u8, result: Option<u16>) -> Step {
@@ -427,6 +441,51 @@ mod tests {
         run.ui = LEVELS;
         // Straight back to the top: last time's heat doesn't carry over.
         assert_eq!(run.ticks(1), LEVELS);
+    }
+
+    #[test]
+    fn a_rest_starts_no_conversions_and_stays_dark() {
+        let mut run = Run::new();
+        // A tick of the round that starts a conversion.
+        run.ticks(1);
+        assert!(run.limits.convert().is_some());
+        run.limits.rest();
+        assert_eq!(run.limits.convert(), None);
+        assert_eq!(run.limits.level(), 0);
+    }
+
+    #[test]
+    fn heat_doesnt_carry_over_a_rest() {
+        let mut run = Run::new();
+        run.ui = LEVELS;
+        run.adc.temperature = celsius(70);
+        run.secs(120);
+        assert_eq!(run.limits.ceilings().1, LINEAR_MAX);
+        run.ui = 0;
+        run.ticks(1);
+        run.limits.rest();
+        run.adc.temperature = celsius(25);
+        run.ui = LEVELS;
+        assert_eq!(run.ticks(1), LEVELS);
+    }
+
+    #[test]
+    fn a_rest_keeps_the_battery_ceiling_until_the_cell_proves_itself() {
+        let mut run = Run::new();
+        run.ui = LEVELS;
+        run.adc.voltage = voltage_reading(305);
+        run.secs(6);
+        let ceiling = run.limits.ceilings().0;
+        assert!(ceiling < LEVELS);
+        run.ui = 0;
+        run.ticks(1);
+        run.limits.rest();
+        run.adc.voltage = voltage_reading(380);
+        assert_eq!(run.limits.ceilings().0, ceiling);
+        run.ui = LEVELS;
+        assert_eq!(run.ticks(1), ceiling);
+        run.secs(30);
+        assert_eq!(run.limits.ceilings().0, LEVELS);
     }
 
     #[test]

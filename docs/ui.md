@@ -41,7 +41,9 @@ The light runs at the lowest of the UI's level, the thermal ceiling, the battery
 | Cell back at 3.30 V for 4 s | The battery ceiling climbs 15 levels, and again every 4 s | `cell:3.05V 1C wait:6s cell:3.4V wait:10s` → level 50 | Done |
 | MCU over 45 °C, on | Fades down towards level 75, never below it, and back up as it cools. At level 50 that's nothing yet, since 50 is under the floor; it shows once the full UI's back | `temp:70C 1C wait:60s` → level 50 | Done |
 | Garbage readings, on | Ceiling at level 75, so nothing changes at level 50 | `adc:0 1C wait:10s` → level 50 | Done |
-| Garbage readings, off | Nothing. The light never lights on its own | `adc:0 wait:3s` → off | Done |
+| Garbage readings, off | Nothing. The light never lights on its own | `adc:0 1H:3s wait:1s` → off | Done |
+
+The cell's only read with the light on or the switch in use, since the ADC can't run while the torch [sleeps](#always-on-in-the-background). After five minutes off it forgets the last readings, so a cell that ran down in a drawer is judged on what it reads now, while clicking off and on can't buy a sagging cell more time. It also means a battery ceiling only climbs while the cell's being read: after stepping down, the light can come back dimmer than it should, then fade up.
 
 The thresholds and the 0614 voltage calibration are a starting point, not measured on this firmware yet; see [hardware.md](hardware.md#the-driver).
 
@@ -69,6 +71,6 @@ The examples break a byte of flash with `flash:corrupt`, and set a fuse byte wit
 | What | Does | Status |
 |---|---|---|
 | Button LED | The amber LED under the switch glows dimly whenever there's a cell in, on or off, so you can find the torch in the dark. It's lit by the pin's pull-up, so it costs microamps. The blue one is the charger's | Done |
-| Sleep when off | Powers down and wakes on the switch, so the light can sit in a drawer for a year | Planned |
+| Sleep when off | Powers down and wakes on the switch, so the light can sit in a drawer for a year | Done |
 
-Until it powers down when off, this isn't firmware to carry. It idle-sleeps between ticks, on or off, which the datasheet puts at 1.1 mA typical at 10 MHz and 3 V against 3.1 mA awake (DS40002204A table 36-4), before the timer, the ADC's reference and the rest of the driver, so it still drains the cell in months. See the [roadmap](roadmap.md).
+It powers down whenever the light's off and no click is being counted, and wakes 64 times a second to look at the switch and feed the watchdog. That should cost the chip around 10 µA, but it's sums from the datasheet and the simulator, not measured on a light. The button LED takes more than that, 50 to 64 µA going by the [teardown's measurements](hardware.md#the-button-led), so with it the torch should use about 600 mAh a year, before whatever the rest of the driver draws. See the [roadmap](roadmap.md).

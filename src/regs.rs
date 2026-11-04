@@ -156,6 +156,8 @@ pub const WDT_SYNCBUSY: u8 = 0x01;
 pub const PORT_PULLUPEN: u8 = 0x08;
 /// PORTx.PINnCTRL.ISC = BOTHEDGES.
 pub const PORT_ISC_BOTHEDGES: u8 = 0x01;
+/// PORTx.PINnCTRL.ISC = INPUT_DISABLE: no interrupt and no input buffer.
+pub const PORT_ISC_INPUT_DISABLE: u8 = 0x04;
 
 /// TCA0.CTRLA.ENABLE (single mode).
 pub const TCA_ENABLE: u8 = 0x01;

@@ -128,6 +128,12 @@ pub const RECOVER_SAMPLES: u16 = SAMPLES_PER_SECOND * 4;
 /// ramp.
 pub const STEP: u8 = 15;
 
+/// Ticks of rest before the filter forgets the cell, five minutes. Any
+/// sooner and clicking off and on would restart it from the unloaded voltage
+/// each time, which keeps a nearly flat cell running. Any later and a cell
+/// that's sat for days gets judged on what it read before.
+pub const FORGET_TICKS: u16 = TICKS_PER_SECOND * 60 * 5;
+
 /// Voltages a real cell can give, in centivolts. A lithium-ion cell sits
 /// between about 2.5 and 4.2 V, and this allows for the calibration being
 /// off by a few tenths either way. Outside it, the ADC's set up wrong or the
@@ -175,7 +181,8 @@ pub enum Verdict {
 ///   back up by [`STEP`].
 ///
 /// It never steps down or turns off while the torch is off, since there's no
-/// load to sag under, but it does recover then.
+/// load to sag under. It can recover then, but only while the switch keeps
+/// the readings coming, since nothing's read during a [`Protection::rest`].
 ///
 /// A sample that isn't [`plausible`] never reaches the filter. It can't
 /// count towards stepping back up, and it doesn't restart the holds, so a
@@ -196,6 +203,8 @@ pub struct Protection {
     /// Implausible samples in a row.
     implausible: u8,
     ceiling: u8,
+    /// Ticks of rest since the last sample, up to [`FORGET_TICKS`].
+    rested: u16,
 }
 
 impl Default for Protection {
@@ -213,6 +222,20 @@ impl Protection {
             high_samples: 0,
             implausible: 0,
             ceiling: LEVELS,
+            rested: 0,
+        }
+    }
+
+    /// One tick with nothing measuring the cell. The holds start again, as
+    /// they do for any time off, and the ceiling stays, since only good
+    /// readings raise it. The filter stays too, until [`FORGET_TICKS`] have
+    /// gone by.
+    pub fn rest(&mut self) {
+        (self.low_samples, self.flat_samples, self.high_samples) = (0, 0, 0);
+        self.implausible = 0;
+        self.rested = self.rested.saturating_add(1);
+        if self.rested >= FORGET_TICKS {
+            self.filtered = 0;
         }
     }
 
@@ -227,6 +250,7 @@ impl Protection {
     /// One voltage sample: `centivolts` from [`centivolts`] and the level the
     /// torch is at (`0` for off).
     pub fn sample(&mut self, centivolts: u16, level: u8) -> Verdict {
+        self.rested = 0;
         if !plausible(centivolts) {
             self.high_samples = 0;
             self.implausible = self.implausible.saturating_add(1);
@@ -553,6 +577,50 @@ mod tests {
         assert_eq!(last(&mut lvp, 305, 60, secs(5)), Verdict::Ceiling(45));
         assert!(run(&mut lvp, 250, 45, secs(5)).contains(&Verdict::Off));
         assert_eq!(last(&mut lvp, 290, 0, secs(1)), Verdict::Ceiling(45));
+    }
+
+    #[test]
+    fn a_long_rest_keeps_the_ceiling_and_forgets_the_filter() {
+        let mut lvp = Protection::new();
+        assert_eq!(last(&mut lvp, 305, 60, secs(5)), Verdict::Ceiling(45));
+        for _ in 0..FORGET_TICKS {
+            lvp.rest();
+        }
+        assert_eq!(lvp.centivolts(), None);
+        // The next sample stands alone, rather than filtering into 3.05 V.
+        assert_eq!(lvp.sample(380, 0), Verdict::Ceiling(45));
+        assert_eq!(lvp.centivolts(), Some(380));
+    }
+
+    #[test]
+    fn a_short_rest_keeps_the_filter() {
+        let mut lvp = Protection::new();
+        run(&mut lvp, 290, 50, secs(1) - 1);
+        for _ in 0..FORGET_TICKS - 1 {
+            lvp.rest();
+        }
+        assert_eq!(lvp.centivolts(), Some(290));
+    }
+
+    #[test]
+    fn a_sample_starts_the_wait_to_forget_again() {
+        let mut lvp = Protection::new();
+        for _ in 0..3 {
+            for _ in 0..FORGET_TICKS - 1 {
+                lvp.rest();
+            }
+            lvp.sample(380, 0);
+        }
+        assert_eq!(lvp.centivolts(), Some(380));
+    }
+
+    #[test]
+    fn a_rest_starts_the_hold_afresh() {
+        let mut lvp = Protection::new();
+        run(&mut lvp, 250, 50, secs(1) - 1);
+        lvp.rest();
+        assert_eq!(last(&mut lvp, 250, 50, secs(1) - 1), NONE);
+        assert_eq!(lvp.sample(250, 50), Verdict::Off);
     }
 
     #[test]
