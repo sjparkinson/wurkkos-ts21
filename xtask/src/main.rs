@@ -50,6 +50,8 @@ or /dev/ttyUSB0 on Linux.
 const ELF: &str = "target/avr-none/release/wurkkos-ts21-0614.elf";
 /// src/bin/link_probe.rs, which `build` builds alongside the firmware.
 const PROBE: &str = "target/avr-none/release/link-probe.elf";
+/// src/bin/pwm_probe.rs, built the same way.
+const PWM_PROBE: &str = "target/avr-none/release/pwm-probe.elf";
 const HEX: &str = "target/wurkkos-ts21-0614.hex";
 
 fn main() -> ExitCode {
@@ -114,6 +116,11 @@ fn build() -> Result<(elf::Elf, sim::Report), String> {
     let probe_elf = elf::Elf::parse(&bytes).map_err(at(&probe))?;
     layout::memory(&probe_elf).map_err(at(&probe))?;
     sim::probe(&probe_elf).map_err(|e| format!("{}: simulator: {e}", probe.display()))?;
+
+    let probe = root().join(PWM_PROBE);
+    let bytes = fs::read(&probe).map_err(at(&probe))?;
+    let probe_elf = elf::Elf::parse(&bytes).map_err(at(&probe))?;
+    sim::pwm_probe(&probe_elf).map_err(|e| format!("{}: simulator: {e}", probe.display()))?;
     Ok((elf, report))
 }
 

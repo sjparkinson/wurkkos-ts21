@@ -147,7 +147,8 @@
 //!    between a TCA0 low and high byte at least once.
 //!
 //! `probe` separately runs src/bin/link_probe.rs, which has real statics,
-//! and checks it reads them from where link.x put them.
+//! and checks it reads them from where link.x put them. `pwm_probe` runs
+//! src/bin/pwm_probe.rs, the real `hw::set_output` through every level.
 //!
 //! The last three drive `ts21::torch` alongside the firmware and check the
 //! LEDs show the library's level on every tick; the examples then check
@@ -486,6 +487,60 @@ pub fn probe(elf: &Elf) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Runs src/bin/pwm_probe.rs, the real `hw::init` and `hw::set_output` going
+/// through every level. At each stop in `pwm_probe_landed` it brings on a
+/// BOTTOM, without moving time on so the watchdog doesn't need feeding, and
+/// checks the pins show that level whole. The firmware's own runs only reach
+/// the UI's level 50, so this is the only run where the FET's compare moves.
+pub fn pwm_probe(elf: &Elf) -> Result<(), String> {
+    let symbol = |name| {
+        elf.symbol(name)
+            .ok_or_else(|| format!("no `{name}` symbol"))
+    };
+    let sram = |name| -> Result<u16, String> { Ok((symbol(name)? - DATA_SPACE) as u16) };
+    let (landed, done) = (
+        symbol("pwm_probe_landed")? / 2,
+        symbol("pwm_probe_done")? / 2,
+    );
+    let level_at = sram("PWM_PROBE_LEVEL")?;
+    let mut sim = Sim::new(
+        elf.flash_image(),
+        sram("__bss_end")?,
+        symbol("__unhandled_interrupt")?,
+    )?
+    .testing_until(symbol("__ram_tested")?);
+    sim.run_to(symbol("main")? / 2, BOOT_BUDGET)
+        .map_err(|e| format!("startup: {e}"))?;
+
+    let mut seen = [false; ramp::LEVELS as usize + 1];
+    for _ in 0..BOOT_BUDGET {
+        if sim.cpu.pc == done {
+            return match seen.iter().position(|&seen| !seen) {
+                Some(level) => Err(format!("never set level {level}")),
+                None => Ok(()),
+            };
+        }
+        if sim.cpu.pc == landed {
+            sim.chip.next_bottom = sim.chip.now;
+            sim.chip.tca_advance()?;
+            let level = sim.chip.sram(&(level_at..level_at + 1))[0];
+            let out = ramp::output(level);
+            let leds = sim.chip.leds();
+            let got = (leds.0, leds.1, sim.chip.tca_cycle());
+            if got != (out.linear, out.fet, out.top.into()) {
+                return Err(format!(
+                    "level {level} is {out:?}, but (linear, FET, top) went live as {got:?}"
+                ));
+            }
+            seen[usize::from(level)] = true;
+        }
+        sim.step()?;
+    }
+    Err(format!(
+        "didn't reach pwm_probe_done within {BOOT_BUDGET} instructions"
+    ))
 }
 
 /// Where src/rt.rs's startup copies and zeroes, as data-space addresses.

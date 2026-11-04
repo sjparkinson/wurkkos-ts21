@@ -9,7 +9,7 @@ license = "MIT"
 
 [workspace.lints.rust]
 # Only src/hw.rs, src/rt.rs, the #[unsafe(no_mangle)] on main and the no_mangle
-# items in src/bin/link_probe.rs may opt back in.
+# items in src/bin/link_probe.rs and src/bin/pwm_probe.rs may opt back in.
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 
@@ -45,6 +45,13 @@ bench = false
 [[bin]]
 name = "link-probe"
 path = "src/bin/link_probe.rs"
+test = false
+bench = false
+
+# Runs the real hw::set_output through every level. Never flashed.
+[[bin]]
+name = "pwm-probe"
+path = "src/bin/pwm_probe.rs"
 test = false
 bench = false
 
