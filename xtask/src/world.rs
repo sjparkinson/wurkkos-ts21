@@ -60,8 +60,9 @@ pub fn unmodelled_fuse(offset: usize, value: u8) -> Option<&'static str> {
 /// is why the firmware only checks fields.
 pub const FACTORY_FUSES: [u8; FUSE_BYTES] = [0x00, 0x00, 0x02, 0xFF, 0x00, 0xC4, 0x07, 0x00, 0x00];
 
-/// A fault in SRAM for src/rt.rs's March test to find. The simulated chip
-/// has it from reset, on every load and store.
+/// A fault in SRAM for src/rt.rs's March tests to find, on every load and
+/// store. A script's is there from reset; sim.rs's `late_fault` also breaks
+/// a chip that's already running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RamFault {
     /// One bit of one byte always reads `high`, whatever was written.

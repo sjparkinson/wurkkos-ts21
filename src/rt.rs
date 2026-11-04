@@ -514,6 +514,8 @@ global_asm!(
     "  movw r26, r30",
     "2:",
     "  ld r0, X",
+    ".global __ram_section_up_check",
+    "__ram_section_up_check:",
     "  cp r0, r18",
     "  or_stop",
     "  st X+, r19",
@@ -523,6 +525,8 @@ global_asm!(
     // ⇓(r~D, wD).
     "3:",
     "  ld r0, -X",
+    ".global __ram_section_down_check",
+    "__ram_section_down_check:",
     "  cp r0, r19",
     "  or_stop",
     "  st X, r18",
@@ -532,6 +536,8 @@ global_asm!(
     // ⇕(rD).
     "4:",
     "  ld r0, X+",
+    ".global __ram_section_last_check",
+    "__ram_section_last_check:",
     "  cp r0, r18",
     "  or_stop",
     "  cp r26, r24",
