@@ -45,9 +45,20 @@
 //!   set and its vector going to `__unhandled_interrupt` is an error, and
 //!   so is taking one: the real chip would return with the flag still up
 //!   and take it again, forever.
-//! - `sleep` needs SLPCTRL.SEN (the chip treats it as a nop otherwise),
-//!   idle mode, the only one modelled, and an enabled interrupt that could
-//!   wake it. `avr.rs` adds that SREG.I is set and no handler's running.
+//! - `sleep` needs SLPCTRL.SEN (the chip treats it as a nop otherwise), idle
+//!   or power-down, the only modes modelled, and an enabled interrupt that
+//!   could wake it. `avr.rs` adds that SREG.I is set and no handler's
+//!   running. Power-down also wants nothing left that it would freeze or
+//!   keep burning: no conversion running (§30.3.5 resumes it on waking, with
+//!   a result that's invalid), the ADC off, the reference not forced on,
+//!   TCA0's channels off the pins with both compares at 0, and PA5 able to
+//!   wake it.
+//! - TCA0's CMP0 and CMP1 pick up their BUF registers a PWM cycle after a
+//!   write, standing in for the next BOTTOM. The datasheet doesn't say
+//!   whether writing CNT counts as one, so this guesses that it doesn't and
+//!   pushes BOTTOM a full cycle away. The real wait can be far shorter, so
+//!   the firmware mustn't lean on a pass that writes the output staying in
+//!   idle: `Torch::tick` rests in that same pass.
 //! - CRCSCAN runs CRC-16-CCITT over all of flash and sets STATUS.OK if it
 //!   comes to 0, which is what a correct checksum in the last two bytes
 //!   does (`crc.rs`). The firmware runs on the image `cargo xtask hex`
@@ -186,6 +197,10 @@ pub const ISC_RISING: u8 = 0x2;
 pub const ISC_FALLING: u8 = 0x3;
 pub const ISC_INPUT_DISABLE: u8 = 0x4;
 pub const ISC_LEVEL: u8 = 0x5;
+/// Instructions from a write to a CMPnBUF to the BOTTOM that applies it: a
+/// dual-slope cycle is two PERs of CPU clocks, and no instruction is quicker
+/// than a clock, so it's never less than this on the real chip's time.
+const PWM_CYCLE: u64 = 2 * ramp::PWM_TOP as u64;
 /// PORTx.PINnCTRL.INVEN, which the simulator refuses on PA5.
 pub const PORT_INVEN: u8 = 0x80;
 /// PORTB's and PORTC's pin-change vectors, which the firmware has no
@@ -916,6 +931,15 @@ struct Chip {
     wide: [u16; 4],
     /// TCA0's TEMP byte, and which register's low byte it holds.
     temp: Option<(usize, u8)>,
+    /// TCA0.CMP0 and CMP1, the live values.
+    compare: [u16; 2],
+    /// When the BUF registers next reach `compare`, if they've changed.
+    compare_update: Option<u64>,
+    /// The high byte of a CMPn, latched into TEMP by reading its low byte,
+    /// and which register that was.
+    compare_temp: Option<(usize, u8)>,
+    /// Times `sleep` has run in power-down.
+    power_downs: u64,
     /// What the ADC measures.
     world: World,
     adc: Adc,
@@ -997,7 +1021,7 @@ struct Adc {
 /// conversions with the delays `hw::init` sets are about 2,600 CPU cycles,
 /// so this is roughly that, and well inside a tick, so a firmware that reads
 /// the result straight after starting a conversion finds it isn't ready.
-const CONVERSION_INSTRUCTIONS: u64 = 1_000;
+const CONVERSION_INSTRUCTIONS: u64 = 2_640;
 
 /// What the first conversion after a change of reference or input reads.
 /// The datasheet doesn't promise it's wrong, but Anduril finds it unstable,
@@ -1025,6 +1049,10 @@ impl Chip {
             ticks: 0,
             wide: [0; 4],
             temp: None,
+            compare: [0; 2],
+            compare_update: None,
+            compare_temp: None,
+            power_downs: 0,
             world: World::NORMAL,
             adc: Adc::default(),
             wdt: Wdt::default(),
@@ -1093,6 +1121,11 @@ impl Chip {
     /// 32 kHz oscillator) is driven from here.
     fn advance_to(&mut self, to: u64) -> Result<(), String> {
         self.now = to;
+        let running = self.io[reg::TCA0_CTRLA] & regs::TCA_ENABLE != 0;
+        if running && self.compare_update.is_some_and(|at| self.now >= at) {
+            self.compare_update = None;
+            self.compare = [self.wide(reg::TCA0_CMP0BUF), self.wide(reg::TCA0_CMP1BUF)];
+        }
         while self.now >= self.next_pit {
             self.pit_period()?;
         }
@@ -1109,6 +1142,59 @@ impl Chip {
     fn switch_not_inverted(&self) -> Result<(), String> {
         if self.io[reg::PORTA_PIN0CTRL + 5] & PORT_INVEN != 0 {
             return Err("sets INVEN on PA5, which the simulator doesn't model".into());
+        }
+        Ok(())
+    }
+
+    /// What has to be true before `sleep` in power-down. The main clock
+    /// stops, which freezes TCA0 and the ADC where they are, and the chip
+    /// stays there until something wakes it.
+    fn ready_for_power_down(&self) -> Result<(), String> {
+        if self.pit_busy > 0 {
+            return Err(
+                "powers down with RTC.PITSTATUS.CTRLBUSY still set, and the datasheet \
+                        doesn't say the write finishes syncing with CLK_PER stopped"
+                    .into(),
+            );
+        }
+        if self.converting() {
+            return Err(
+                "powers down mid-conversion, which resumes on waking with an \
+                        invalid result (section 30.3.5)"
+                    .into(),
+            );
+        }
+        if self.io[reg::ADC0_CTRLA] & regs::ADC_ENABLE != 0 {
+            return Err("powers down with ADC0 still enabled".into());
+        }
+        if self.io[reg::VREF_CTRLB] & regs::VREF_ADC0REFEN != 0 {
+            return Err(
+                "powers down with VREF.CTRLB.ADC0REFEN set, forcing the reference on \
+                        for as long as it sleeps"
+                    .into(),
+            );
+        }
+        if self.io[reg::TCA0_CTRLB] & (regs::TCA_CMP0EN | regs::TCA_CMP1EN) != 0 {
+            return Err(
+                "powers down with a TCA0 channel still driving its pin, which the \
+                        datasheet doesn't promise a level for"
+                    .into(),
+            );
+        }
+        let bufs = [self.wide(reg::TCA0_CMP0BUF), self.wide(reg::TCA0_CMP1BUF)];
+        if self.compare != [0; 2] || bufs != [0; 2] {
+            return Err(format!(
+                "powers down with TCA0's compares at {:?} and their BUFs at {bufs:?}, \
+                 so the light's on or could come back on at that duty",
+                self.compare
+            ));
+        }
+        let isc = self.io[reg::PORTA_PIN0CTRL + 5] & ISC;
+        if isc != ISC_BOTHEDGES && isc != ISC_LEVEL {
+            return Err(format!(
+                "powers down with PA5's ISC at {isc:#x}: it's a partially asynchronous pin, \
+                 so only BOTHEDGES or LEVEL wakes the chip (table 16-3)"
+            ));
         }
         Ok(())
     }
@@ -1453,6 +1539,8 @@ fn name(addr: usize) -> String {
         (reg::TCA0_CTRLA, "TCA0.CTRLA"),
         (reg::TCA0_CTRLB, "TCA0.CTRLB"),
         (reg::TCA0_CNT, "TCA0.CNT"),
+        (reg::TCA0_CMP0, "TCA0.CMP0"),
+        (reg::TCA0_CMP1, "TCA0.CMP1"),
         (reg::TCA0_PERBUF, "TCA0.PERBUF"),
         (reg::TCA0_CMP0BUF, "TCA0.CMP0BUF"),
         (reg::TCA0_CMP1BUF, "TCA0.CMP1BUF"),
@@ -1500,7 +1588,8 @@ impl Bus for Chip {
         (requests != 0).then(|| requests.trailing_zeros() as u8)
     }
 
-    /// Only idle is modelled, where every interrupt wakes the chip.
+    /// Idle and power-down are modelled. Every interrupt the firmware uses
+    /// wakes the chip from either.
     fn sleep(&mut self) -> Result<(), String> {
         let ctrla = self.io[reg::SLPCTRL_CTRLA];
         if ctrla & regs::SLPCTRL_SEN == 0 {
@@ -1510,9 +1599,16 @@ impl Bus for Chip {
                     .into(),
             );
         }
-        if ctrla != regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN {
+        if ctrla == regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN {
+            self.ready_for_power_down()?;
+            self.power_downs += 1;
+            // The ADC and its reference are off, so the next conversion
+            // catches them starting, whatever it's set up for.
+            self.adc.last_setup = None;
+        } else if ctrla != regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN {
             return Err(format!(
-                "sleeps with SLPCTRL.CTRLA {ctrla:#04x}, but the simulator only models idle"
+                "sleeps with SLPCTRL.CTRLA {ctrla:#04x}, but the simulator only models \
+                 idle and power-down"
             ));
         }
         // The PIT's interrupt can only wake the chip if the PIT's running.
@@ -1583,6 +1679,22 @@ impl Bus for Chip {
                  so it gets whatever ADC0.TEMP held"
                     .into()
             }),
+            reg::TCA0_CMP0 | reg::TCA0_CMP1 => {
+                let i = usize::from(a == reg::TCA0_CMP1);
+                let [lo, hi] = self.compare[i].to_le_bytes();
+                self.compare_temp = Some((a, hi));
+                Ok(lo)
+            }
+            _ if a == reg::TCA0_CMP0 + 1 || a == reg::TCA0_CMP1 + 1 => {
+                match self.compare_temp.take() {
+                    Some((low, hi)) if low == a - 1 => Ok(hi),
+                    _ => Err(format!(
+                        "reads the high byte of {} without its low byte just before, \
+                         so it gets whatever TEMP held",
+                        name(a - 1)
+                    )),
+                }
+            }
             reg::SIGROW_TEMPSENSE0 => Ok(CALIBRATION.gain),
             reg::SIGROW_TEMPSENSE1 => Ok(CALIBRATION.offset as u8),
             reg::CRCSCAN_STATUS => Ok(self.crc_status()),
@@ -1684,6 +1796,16 @@ impl Bus for Chip {
                 Some((low, lo)) if low == a - 1 => {
                     let i = WIDE.iter().position(|&w| w == low).unwrap_or_default();
                     self.wide[i] = u16::from_le_bytes([lo, value]);
+                    let bottom = self.now + PWM_CYCLE;
+                    match low {
+                        reg::TCA0_CMP0BUF | reg::TCA0_CMP1BUF => {
+                            self.compare_update.get_or_insert(bottom);
+                        }
+                        reg::TCA0_CNT if self.compare_update.is_some() => {
+                            self.compare_update = Some(bottom);
+                        }
+                        _ => {}
+                    }
                 }
                 _ => {
                     return Err(format!(
@@ -2166,12 +2288,12 @@ mod tests {
     }
 
     #[test]
-    fn sleeps_only_in_idle_with_something_to_wake_it() {
+    fn sleeps_only_in_idle_or_power_down_with_something_to_wake_it() {
         let mut c = chip();
         assert!(c.sleep().unwrap_err().contains("SEN clear"));
         let ctrla = reg::SLPCTRL_CTRLA as u16;
-        c.write(ctrla, regs::SLPCTRL_SEN | 2 << 1).unwrap();
-        assert!(c.sleep().unwrap_err().contains("only models idle"), "PDOWN");
+        c.write(ctrla, regs::SLPCTRL_SEN | 1 << 1).unwrap();
+        assert!(c.sleep().unwrap_err().contains("only models"), "STDBY");
         c.write(ctrla, regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_IDLE)
             .unwrap();
         assert!(c.sleep().unwrap_err().contains("no interrupt enabled"));
@@ -2183,6 +2305,154 @@ mod tests {
         c.io[reg::RTC_PITINTCTRL] = 0;
         c.io[reg::PORTA_PIN0CTRL + 5] = regs::PORT_ISC_BOTHEDGES;
         assert_eq!(c.sleep(), Ok(()));
+    }
+
+    /// A chip that's ready to power down, with the PIT to wake it.
+    fn ready_to_power_down() -> Chip {
+        let mut c = chip();
+        c.pit_busy = 0;
+        c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_PDOWN;
+        c.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
+        c.io[reg::PORTA_PIN0CTRL + 5] = regs::PORT_ISC_BOTHEDGES;
+        c
+    }
+
+    #[test]
+    fn powers_down_when_ready_and_counts_it() {
+        let mut c = ready_to_power_down();
+        assert_eq!(c.sleep(), Ok(()));
+        assert_eq!(c.power_downs, 1);
+        c.io[reg::PORTA_PIN0CTRL + 5] = ISC_LEVEL;
+        assert_eq!(c.sleep(), Ok(()), "LEVEL wakes it too");
+    }
+
+    #[test]
+    fn idling_doesnt_count_as_powering_down() {
+        let mut c = ready_to_power_down();
+        c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_IDLE;
+        assert_eq!(c.sleep(), Ok(()));
+        assert_eq!(c.power_downs, 0);
+    }
+
+    #[test]
+    fn wont_power_down_mid_conversion() {
+        let mut c = ready_to_power_down();
+        c.adc.ready_at = Some(c.now + 1);
+        assert!(c.sleep().unwrap_err().contains("mid-conversion"));
+    }
+
+    #[test]
+    fn wont_power_down_with_the_pit_still_syncing() {
+        let mut c = ready_to_power_down();
+        c.pit_busy = 1;
+        assert!(c.sleep().unwrap_err().contains("CTRLBUSY"));
+    }
+
+    #[test]
+    fn powering_down_leaves_the_next_conversion_unsettled() {
+        let mut c = ready_to_power_down();
+        c.adc.last_setup = Some((0, 0, 0));
+        assert_eq!(c.sleep(), Ok(()));
+        assert_eq!(c.adc.last_setup, None);
+    }
+
+    #[test]
+    fn wont_power_down_with_the_adc_enabled() {
+        let mut c = ready_to_power_down();
+        c.io[reg::ADC0_CTRLA] = regs::ADC_ENABLE;
+        assert!(c.sleep().unwrap_err().contains("ADC0 still enabled"));
+    }
+
+    #[test]
+    fn wont_power_down_with_the_reference_forced_on() {
+        let mut c = ready_to_power_down();
+        c.io[reg::VREF_CTRLB] = regs::VREF_ADC0REFEN;
+        assert!(c.sleep().unwrap_err().contains("ADC0REFEN"));
+    }
+
+    #[test]
+    fn wont_power_down_with_a_channel_on_its_pin() {
+        for channel in [regs::TCA_CMP0EN, regs::TCA_CMP1EN] {
+            let mut c = ready_to_power_down();
+            c.io[reg::TCA0_CTRLB] = channel;
+            assert!(c.sleep().unwrap_err().contains("still driving"));
+        }
+    }
+
+    #[test]
+    fn wont_power_down_with_a_compare_or_buf_set() {
+        let mut c = ready_to_power_down();
+        c.compare[0] = 1;
+        assert!(c.sleep().unwrap_err().contains("compares"), "live");
+        let mut c = ready_to_power_down();
+        c.wide[3] = 1;
+        assert!(c.sleep().unwrap_err().contains("compares"), "BUF");
+    }
+
+    #[test]
+    fn wont_power_down_unless_pa5_can_wake_it() {
+        for isc in [ISC_INTDISABLE, ISC_RISING, ISC_FALLING, ISC_INPUT_DISABLE] {
+            let mut c = ready_to_power_down();
+            c.io[reg::PORTA_PIN0CTRL + 5] = isc;
+            assert!(c.sleep().unwrap_err().contains("PA5"), "{isc}");
+        }
+    }
+
+    /// Writes `value` to a 16-bit TCA0 register, low byte first.
+    fn write_wide(c: &mut Chip, addr: usize, value: u16) {
+        let [lo, hi] = value.to_le_bytes();
+        c.write(addr as u16, lo).unwrap();
+        c.write(addr as u16 + 1, hi).unwrap();
+    }
+
+    fn read_wide(c: &mut Chip, addr: usize) -> u16 {
+        let lo = c.read(addr as u16).unwrap();
+        let hi = c.read(addr as u16 + 1).unwrap();
+        u16::from_le_bytes([lo, hi])
+    }
+
+    #[test]
+    fn a_compare_takes_its_buf_a_pwm_cycle_after_the_write() {
+        let mut c = chip();
+        c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
+        write_wide(&mut c, reg::TCA0_CMP1BUF, 300);
+        c.advance_to(c.now + PWM_CYCLE - 1).unwrap();
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP1), 0);
+        c.elapse().unwrap();
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP1), 300);
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0);
+    }
+
+    #[test]
+    fn writing_cnt_puts_the_update_off_rather_than_forcing_it() {
+        let mut c = chip();
+        c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
+        write_wide(&mut c, reg::TCA0_CMP0BUF, 7);
+        c.advance_to(c.now + PWM_CYCLE - 1).unwrap();
+        write_wide(&mut c, reg::TCA0_CNT, 0);
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0, "not forced");
+        c.advance_to(c.now + PWM_CYCLE - 1).unwrap();
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0, "a full cycle away");
+        c.elapse().unwrap();
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 7);
+    }
+
+    #[test]
+    fn a_stopped_timer_never_updates_its_compares() {
+        let mut c = chip();
+        write_wide(&mut c, reg::TCA0_CMP0BUF, 7);
+        c.advance_to(c.now + 2 * PWM_CYCLE).unwrap();
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0);
+    }
+
+    #[test]
+    fn a_compares_high_byte_needs_its_low_byte_first() {
+        let mut c = chip();
+        let high = reg::TCA0_CMP0 as u16 + 1;
+        assert!(c.read(high).unwrap_err().contains("TCA0.CMP0"));
+        c.read(reg::TCA0_CMP1 as u16).unwrap();
+        assert!(c.read(high).is_err(), "the other register's low byte");
     }
 
     #[test]

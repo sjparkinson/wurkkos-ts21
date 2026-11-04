@@ -86,6 +86,11 @@ pub mod addr {
     pub const TCA0_CTRLB: usize = 0x0A01;
     /// 16-bit: write through `write16`, low byte first.
     pub const TCA0_CNT: usize = 0x0A20;
+    /// 16-bit, the live compare value, which CMP0BUF only reaches at BOTTOM.
+    /// Read through `read16`, low byte first.
+    pub const TCA0_CMP0: usize = 0x0A28;
+    /// 16-bit, as for CMP0.
+    pub const TCA0_CMP1: usize = 0x0A2A;
     /// 16-bit.
     pub const TCA0_PERBUF: usize = 0x0A36;
     /// 16-bit.
@@ -251,6 +256,9 @@ pub const PORT_INT_ALL: u8 = 0xFF;
 pub const SLPCTRL_SEN: u8 = 0x01;
 /// SLPCTRL.CTRLA.SMODE = IDLE: only the CPU and flash stop.
 pub const SLPCTRL_SMODE_IDLE: u8 = 0x0 << 1;
+/// SLPCTRL.CTRLA.SMODE = PDOWN: everything stops but the PIT, the WDT and
+/// the pin-change wake-ups.
+pub const SLPCTRL_SMODE_PDOWN: u8 = 0x2 << 1;
 
 /// Vector numbers, from the ATDF's `<interrupts>`. PORTA.PORT, PORTA's
 /// pin-change interrupt.
