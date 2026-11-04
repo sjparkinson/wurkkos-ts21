@@ -47,7 +47,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo clippy --package ts21 --release --target avr-none -Zbuild-std=core -- -D warnings
-      - run: cargo xtask hex
+
+      # An explicit shell turns on pipefail, so tee can't hide a failed build.
+      - run: cargo xtask hex | tee target/size.txt
+        shell: bash
 
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -55,6 +58,7 @@ jobs:
           path: |
             target/wurkkos-ts21-0614.hex
             target/avr-none/release/wurkkos-ts21-0614.elf
+            target/size.txt
 
   release:
     needs: test
@@ -83,13 +87,48 @@ jobs:
           mv dist/avr-none/release/wurkkos-ts21-0614.elf "dist/wurkkos-ts21-0614-$version.elf"
 
       - uses: actions/attest@v4.2.2
+        id: attest
         with:
           subject-path: dist/wurkkos-ts21-0614-*
 
-      - run: |
+      - name: release notes
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ## Flash
+
+          Download the \`.hex\`, then from a checkout of this repo:
+
+          \`\`\`sh
+          cargo xtask flash /dev/cu.usbserial-XXXX wurkkos-ts21-0614-$VERSION.hex
+          \`\`\`
+
+          [docs/flashing.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/flashing.md) covers programmers, pad order and getting back to Anduril.
+
+          ## Verify
+
+          Both files have a [build provenance attestation]($ATTESTATION_URL). To check a download came from this repo's CI:
+
+          \`\`\`sh
+          gh attestation verify wurkkos-ts21-0614-$VERSION.hex -R $GITHUB_REPOSITORY
+          \`\`\`
+
+          ## Size
+
+          \`\`\`
+          $(cat dist/size.txt)
+          \`\`\`
+
+          EOF
+        env:
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+
+      # --generate-notes appends GitHub's changelog to the notes file.
+      - name: gh release
+        run: |
           gh release create "v$VERSION" dist/wurkkos-ts21-0614-* \
             --target "$GITHUB_SHA" \
             --title "$VERSION+$(git rev-parse --short HEAD)" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             --generate-notes
         env:
           GITHUB_TOKEN: ${{ github.token }}
