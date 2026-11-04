@@ -47,7 +47,8 @@
 //! it showed nothing. So a dead oscillator hangs the proof, as it would the
 //! loop, with the outputs low. Spotting that is the clock check's job, and
 //! so is §6's T/2 to 3T/2 check against TCA0. The nearest thing here is step
-//! 2, which fails a watchdog that bites at half its period or sooner.
+//! 2, which fails a watchdog that bites sooner than half its period. Right
+//! at half, it's down to whether the second feed or the bite lands first.
 //!
 //! The marker only says a bite is expected once a step has shown everything
 //! it had to, so a bite before that is the watchdog biting early. A bite that
@@ -116,11 +117,15 @@ const WINDOWED: u8 = regs::WDT_WINDOW_32CLK | regs::WDT_PERIOD_32CLK;
 /// `WDT.CTRLA` after a failed proof. The light still has to run, and a
 /// watchdog that bites early would keep resetting it on [`WINDOWED`] with
 /// every feed on time. No window and the longest timeout keeps a hang
-/// covered on any watchdog that bites at all, after about 8 s.
+/// covered on any watchdog that bites at all, after about 8 s. A watchdog
+/// that can't be fed times out then too, feeds or no feeds, so that chip
+/// turns itself off every 8 s or so.
 const FAILED: u8 = regs::WDT_PERIOD_8KCLK;
 
-/// The tick step 1 gives up on. The timeout's 8 clocks after 2 to 3 for the
-/// write to sync (§19.3.6), which is under a tick, however the ticks fall.
+/// The tick step 1 gives up on. The timeout's 8 clocks, after `hw::init` has
+/// waited out the write's sync, which is under a tick, however the ticks
+/// fall. The datasheet gives no time for that sync, only for a `wdr`'s, so
+/// 2 to 3 clocks is a guess, with 13 or so to spare.
 const TIMEOUT_GIVES_UP: u8 = 3;
 /// The ticks step 2 feeds on, half of the 32-clock period apart. The first
 /// comes up to a tick after the PIT starts (§23.5.2.2).
@@ -129,7 +134,11 @@ const LAST_FEED: u8 = 2;
 /// The tick that shows the feeds worked, when step 2 starts expecting the
 /// bite. The PIT only starts after the WDT write has synced, so this is past
 /// the 32 clocks an unfed watchdog would have had, and the last feed gave it
-/// 32 more.
+/// 32 more. The margin on the first of those is thin if the first tick comes
+/// straight away (§23.5.2.2), since §19 doesn't say when the count starts, so
+/// a `wdr` that does nothing could get past this on an unlucky boot. It
+/// can't hurt a good chip, and a chip like that can't feed the loop either,
+/// so it's a hang a moment later.
 const OUTLIVED: u8 = 3;
 /// The tick step 2 gives up on. The bite's due just after the fourth.
 const FED_GIVES_UP: u8 = 6;
@@ -137,9 +146,11 @@ const FED_GIVES_UP: u8 = 6;
 const WINDOW_STARTED: u8 = 1;
 /// The tick step 3 feeds early on, 16 clocks into the closed window.
 const FED_EARLY: u8 = 2;
-/// The tick step 3 gives up on. The reset's due 2 to 3 clocks after the feed
-/// (§19.3.6). This has to come before any timeout could, or a window that
-/// lets the feed through would pass for one that doesn't.
+/// The tick step 3 gives up on. The reset most likely comes once the feed has
+/// synced, 2 to 3 clocks on (§19.3.6 gives the sync, not when the reset
+/// fires), so there's 16 clocks here. This has to come before a timeout
+/// counted from that feed could, or a window that lets the feed through
+/// would pass for one that doesn't.
 const EARLY_GIVES_UP: u8 = 3;
 
 const _: () = {
@@ -204,7 +215,7 @@ impl Step {
     ];
 
     /// Whether the proof's still going.
-    const fn proving(self) -> bool {
+    pub const fn proving(self) -> bool {
         matches!(
             self,
             Self::Timeout | Self::Feed | Self::Fed | Self::Window | Self::Early

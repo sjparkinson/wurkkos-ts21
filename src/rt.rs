@@ -254,6 +254,16 @@ global_asm!(
     // a broken byte of RAM after.
     ".global __registers_tested",
     "__registers_tested:",
+    // The RAM test runs on a power-on or UPDI reset, and on nothing else. It
+    // overwrites all of SRAM, `.noinit` included, and the watchdog's proof
+    // needs the marker there to get through its deliberate resets
+    // (src/watchdog.rs). It would also put 85 ms on each of them. RSTFR is
+    // still as the reset left it, since only `main` clears it.
+    "  lds r16, {rstfr}",
+    "  andi r16, {new_start}",
+    "  brne 9f",
+    "  rjmp __ram_tested",
+    "9:",
     //
     // # The RAM test (AN2632 §9.2)
     //
@@ -613,6 +623,9 @@ global_asm!(
     spl = const regs::addr::CPU_SPL,
     sph = const regs::addr::CPU_SPH,
     stack_top = const regs::addr::SRAM_END - 1,
+    // Which resets run the RAM test.
+    rstfr = const regs::addr::RSTCTRL_RSTFR,
+    new_start = const regs::RSTCTRL_PORF | regs::RSTCTRL_UPDIRF,
     // What the RAM test walks.
     sram_start = const regs::addr::SRAM_START,
     sram_end = const regs::addr::SRAM_END,

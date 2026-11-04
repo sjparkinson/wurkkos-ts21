@@ -7,6 +7,7 @@
 //! exactly the same numbers and can be compared tick by tick.
 
 use std::fmt;
+use std::mem;
 use std::str::FromStr;
 
 use ts21::selftest::{Faults, Fuses};
@@ -420,16 +421,20 @@ pub enum WdtFault {
     Open,
     /// The window never opens: any `wdr` with a window set resets the chip.
     Shut,
+    /// The watchdog's fine, but SRAM doesn't survive its reset, so the marker
+    /// comes back as junk. The datasheet doesn't rule that out.
+    Wipes,
 }
 
 impl WdtFault {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Never,
         Self::Early,
         Self::Deaf,
         Self::Stops,
         Self::Open,
         Self::Shut,
+        Self::Wipes,
     ];
 
     fn word(self) -> &'static str {
@@ -440,6 +445,7 @@ impl WdtFault {
             Self::Stops => "stops",
             Self::Open => "open",
             Self::Shut => "shut",
+            Self::Wipes => "wipes",
         }
     }
 }
@@ -516,6 +522,12 @@ pub struct World {
     pub register: Option<RegisterFault>,
     /// A broken watchdog, from reset too.
     pub wdt: Option<WdtFault>,
+    /// The switch is down for one boot of the watchdog's proof, counted from
+    /// 0, and up again before it ends. Only the first tick's counts.
+    pub proof_press: Option<u32>,
+    /// The firmware's stuck, and stays stuck until the watchdog resets it.
+    /// It's up to whoever's running the firmware to see that happens once.
+    pub hang: bool,
 }
 
 impl Default for World {
@@ -535,6 +547,8 @@ impl World {
         ram: None,
         register: None,
         wdt: None,
+        proof_press: None,
+        hang: false,
     };
 
     /// Whether src/rt.rs's startup tests find a broken register or byte of
@@ -578,7 +592,7 @@ impl World {
         Faults {
             fuses: !fuses.ok(),
             flash: self.corrupt_flash,
-            watchdog: false,
+            watchdog: self.wdt.is_some(),
         }
     }
 }
@@ -593,6 +607,10 @@ pub struct Rig {
     adc: Adc,
     /// The startup tests failed, so nothing runs (`World::dead`).
     dead: bool,
+    /// A press from the watchdog's proof, for the first tick to count.
+    owed_press: bool,
+    /// It's hung and been reset, which only happens the once.
+    hung: bool,
 }
 
 impl Default for Rig {
@@ -609,6 +627,8 @@ impl Rig {
             torch: Torch::new(CALIBRATION, world.faults()),
             adc: Adc::new(),
             dead: world.dead(),
+            owed_press: world.proof_press.is_some(),
+            hung: false,
         }
     }
 
@@ -616,6 +636,19 @@ impl Rig {
         if self.dead {
             return None;
         }
+        if world.hang && !self.hung {
+            // The watchdog's reset, which takes the torch back to off with
+            // the FET refused. The library has no ticks to lose, so this is
+            // at once; `sim.rs` waits for the bite and starts here from it.
+            self.hung = true;
+            self.adc = Adc::new();
+            let faults = Faults {
+                watchdog: true,
+                ..world.faults()
+            };
+            self.torch = Torch::new(CALIBRATION, faults);
+        }
+        let pressed = pressed || mem::take(&mut self.owed_press);
         let event = self.torch.tick(pressed, self.adc.result());
         self.adc
             .start_with(self.torch.convert(), |channel| world.reading(channel));
@@ -685,6 +718,53 @@ mod tests {
             None,
             "reserved"
         );
+    }
+
+    #[test]
+    fn a_broken_watchdog_is_a_fault() {
+        let world = World {
+            wdt: Some(WdtFault::Early),
+            ..World::NORMAL
+        };
+        assert!(world.faults().watchdog && world.faults().any());
+    }
+
+    #[test]
+    fn a_hang_restarts_the_rig_off_with_the_fet_refused_and_only_once() {
+        let mut rig = Rig::default();
+        for pressed in [true, true, false] {
+            rig.tick(pressed, &World::NORMAL);
+        }
+        for _ in 0..64 {
+            rig.tick(false, &World::NORMAL);
+        }
+        assert!(rig.level() > 0);
+        let hung = World {
+            hang: true,
+            ..World::NORMAL
+        };
+        rig.tick(false, &hung);
+        assert_eq!(rig.level(), 0);
+        for pressed in [true, true, false] {
+            rig.tick(pressed, &hung);
+        }
+        for _ in 0..64 {
+            rig.tick(false, &hung);
+        }
+        assert!(rig.level() > 0, "one hang, not one every tick");
+    }
+
+    #[test]
+    fn a_press_from_the_proof_counts_on_the_first_tick() {
+        let world = World {
+            proof_press: Some(1),
+            ..World::NORMAL
+        };
+        let mut rig = Rig::new(&world);
+        for _ in 0..64 {
+            rig.tick(false, &world);
+        }
+        assert!(rig.level() > 0);
     }
 
     #[test]

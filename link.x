@@ -34,6 +34,18 @@ SECTIONS {
   /* Where src/rt.rs copies .data from, as a mapped-flash data address. */
   __data_load = LOADADDR(.data) + 0x8000;
 
+  /*
+   * What has to survive a reset. src/rt.rs doesn't touch it, and only runs
+   * its RAM test on a power-on or UPDI reset, so nothing else does either.
+   * It goes before .bss so the stack checks still see .bss's end as the top
+   * of everything that isn't stack.
+   */
+  .noinit (NOLOAD) : {
+    __noinit_start = .;
+    *(.noinit .noinit.*)
+    __noinit_end = .;
+  } > RAM
+
   .bss (NOLOAD) : {
     __bss_start = .;
     *(.bss .bss.*)

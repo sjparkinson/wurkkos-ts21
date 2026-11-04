@@ -93,7 +93,10 @@
 //! byte (`world::RamFault`). The stack checks wait until those tests are
 //! done, since they point SP all over SRAM.
 //!
-//! With that in place it runs six things:
+//! And it can break the watchdog for the proof in `ts21::watchdog` to find
+//! (`world::WdtFault`), or stop the CPU dead, for a hang to be reset from.
+//!
+//! With that in place it runs eight things:
 //!
 //! 1. Reset to `main`, with SRAM full of junk, checking the self-tests pass
 //!    and .data and .bss come out right.
@@ -107,12 +110,17 @@
 //! 4. The periodic RAM test with the light on: a whole sweep on a good chip
 //!    (`periodic_passes`), what each of its checks is there for
 //!    (`periodic_checks`), then RAM going bad mid-run (`periodic_faults`).
-//! 5. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
+//! 5. The watchdog's proof (`watchdog_proof`): on a good chip, after a UPDI
+//!    reset, with every broken watchdog and with a press on each of its
+//!    boots, checking the pins on every instruction and that the right
+//!    step found each fault. Every example and the random switching run
+//!    the proof again first.
+//! 6. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
 //!    with the cell, temperature, broken ADC, fuses, corrupt flash or
-//!    broken RAM or register the example scripts.
-//! 6. Twenty thousand ticks of random clicks and holds, with a good cell at
+//!    broken RAM, register or watchdog the example scripts.
+//! 7. Twenty thousand ticks of random clicks and holds, with a good cell at
 //!    room temperature.
-//! 6. Both of those again with `Landings` on, which has to catch a handler
+//! 8. Both of those again with `Landings` on, which has to catch a handler
 //!    between a TCA0 low and high byte at least once.
 //!
 //! `probe` separately runs src/bin/link_probe.rs, which has real statics,
@@ -129,9 +137,11 @@ use std::iter;
 use std::mem;
 use std::ops::Range;
 
+use ts21::button::RELEASE_TICKS;
 use ts21::ramp;
 use ts21::selftest::{self, RamSweep};
 use ts21::sensors::Channel;
+use ts21::watchdog::{self, Step};
 
 use crate::avr::{Bus, Cpu, I, VECTOR_WORDS, is_two_words};
 use crate::crc;
@@ -287,11 +297,16 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         bss: sram("__bss_start")?..sram("__bss_end")?,
         load: symbol("__data_load")? as u16,
     };
+    let marker = sram("__noinit_start")?;
+    if sram("__noinit_end")? - marker != 2 {
+        return Err("`.noinit` isn't the watchdog's two-byte marker".into());
+    }
 
     // A chip that's just had its cell put in, in `world`, run to the end of
     // startup.
     let power_on_image = |image: Vec<u8>, world: &World| -> Result<(Sim, Boot), String> {
         let mut sim = Sim::new(image, linked.bss.end, unhandled)?.testing_until(ram_tested);
+        sim.marker = marker;
         sim.chip.world = *world;
         let boot = sim.boot(main, failed)?;
         Ok((sim, boot))
@@ -348,6 +363,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         mid_access: 0,
         ticks_landed: 0,
     };
+    watchdog_proof(&power_on, main, &mut report).map_err(|e| format!("watchdog proof: {e}"))?;
     for example in spec::examples(spec::UI_MD)? {
         let samples = simulate::samples(&example.actions);
         let world = samples.first().map_or(World::NORMAL, |s| s.world);
@@ -912,6 +928,7 @@ const SWEEP_TICKS: u32 = selftest::RAM_SECTIONS as u32 + 2;
 /// A torch that's powered up in a good world and been switched on.
 fn switched_on(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<Sim, String> {
     let (mut sim, _) = power_on(&World::NORMAL)?;
+    sim.prove()?;
     sim.tick(false)?;
     for sample in simulate::samples(&simulate::parse(&["1C", "wait:1s"])?) {
         sim.tick(sample.pressed)?;
@@ -1247,9 +1264,14 @@ fn periodic_faults(
     // A byte the firmware's using, stuck at what it holds now. That's only
     // invisible to the firmware while the byte doesn't change, and one that
     // does could send it wrong before the test gets there, which this would
-    // report as an error rather than a find.
+    // report as an error rather than a find. So these are bytes of the live
+    // stack that a sweep's worth of passes leaves alone.
     let sim = switched_on(power_on)?;
-    for addr in [sim.cpu.sp + 1, sim.cpu.sp + 8, last - 8, last] {
+    let steady = steady_stack(power_on, section)?;
+    let &[.., deepest] = steady.as_slice() else {
+        return Err("every byte of the live stack changes".into());
+    };
+    for addr in [steady[0], steady[steady.len() / 2], deepest, last] {
         for bit in [0, 7] {
             let high = sim.chip.sram(&(addr..addr + 1))[0] & 1 << bit != 0;
             let fault = RamFault::Stuck { addr, bit, high };
@@ -1276,6 +1298,7 @@ fn periodic_faults(
     }
 
     let (mut sim, _) = power_on(&World::NORMAL)?;
+    sim.prove()?;
     for _ in 0..4 {
         sim.tick(false)?;
     }
@@ -1288,6 +1311,33 @@ fn periodic_faults(
         return Err("wasn't powering down while resting".into());
     }
     Ok(())
+}
+
+/// The bytes of the live stack, top of stack first, that hold still for a
+/// whole sweep of a torch that's on. `__ram_section` is stubbed out, since it
+/// writes to all of them and puts them back.
+fn steady_stack(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    section: u32,
+) -> Result<Vec<u16>, String> {
+    let mut sim = switched_on(power_on)?;
+    let at = section as usize * 2;
+    sim.chip.flash[at..at + 2].copy_from_slice(&0x9508u16.to_le_bytes()); // ret
+    let live = sim.cpu.sp + 1..SRAM.end;
+    let held = sim.chip.sram(&live).to_vec();
+    let mut steady = vec![true; held.len()];
+    let stop = sim.chip.ticks + SWEEP_TICKS;
+    while sim.chip.ticks < stop {
+        sim.step()?;
+        let now = sim.chip.sram(&live);
+        for (still, (now, then)) in steady.iter_mut().zip(now.iter().zip(&held)) {
+            *still &= now == then;
+        }
+    }
+    Ok(live
+        .zip(steady)
+        .filter_map(|(addr, still)| still.then_some(addr))
+        .collect())
 }
 
 /// Breaks `fault` into a torch that's on, and checks it goes as
@@ -1371,7 +1421,10 @@ fn in_step(
     // powers up in is the first sample's.
     let mut samples = samples.into_iter().peekable();
     let power_on = samples.peek().map_or(World::NORMAL, |s| s.world);
-    sim.chip.world = power_on;
+    sim.chip.world = World {
+        hang: false,
+        ..power_on
+    };
     if power_on.corrupt_flash {
         // The checksum's high byte, which is never code, so the firmware
         // still runs however big it gets.
@@ -1382,9 +1435,24 @@ fn in_step(
             .ok_or("can't corrupt flash: the image isn't padded to all of flash")?;
         *byte ^= 0x01;
     }
+    let proved = sim.prove().map_err(|e| format!("proof: {e}"))?;
+    let verdict = if power_on.wdt.is_some() {
+        Step::Failed
+    } else {
+        Step::Passed
+    };
+    if proved.step != verdict {
+        return Err(format!(
+            "the proof ended {:?}, not {verdict:?}",
+            proved.step
+        ));
+    }
     sim.tick(false).map_err(|e| format!("hw::init: {e}"))?;
-    if !sim.chip.watchdog_windowed() {
+    if verdict == Step::Passed && !sim.chip.watchdog_windowed() {
         return Err("hw::init never enabled the watchdog in window mode".into());
+    }
+    if !sim.chip.watchdog_running() {
+        return Err("hw::init never enabled the watchdog".into());
     }
     if !sim.chip.button_led_lit() {
         return Err("hw::init left PB5 without its pull-up, so the button LED is out".into());
@@ -1394,8 +1462,13 @@ fn in_step(
     }
     let mut rig = Rig::new(&power_on);
     let mut resting = 0;
+    let mut hung = false;
     for (tick, sample) in samples.enumerate() {
         sim.chip.world = sample.world;
+        if sample.world.hang && !hung {
+            hung = true;
+            sim.hang(verdict).map_err(|e| format!("tick {tick}: {e}"))?;
+        }
         let power_downs = sim.chip.power_downs;
         let took = sim
             .tick(sample.pressed)
@@ -1464,6 +1537,10 @@ struct Sim {
     landings: Option<Landings>,
     /// What `testing` goes back to on a reset, since startup runs again.
     ram_tested: Option<u32>,
+    /// The watchdog's marker in `.noinit`, as a data-space address.
+    marker: u16,
+    /// `executed` at the last reset.
+    booted: u64,
 }
 
 /// Where startup ended up.
@@ -1513,6 +1590,8 @@ impl Sim {
             ticks_landed: 0,
             landings: None,
             ram_tested: None,
+            marker: SRAM.start,
+            booted: 0,
         })
     }
 
@@ -1563,11 +1642,15 @@ impl Sim {
         let pc = self.cpu.pc;
         let awake = !self.cpu.asleep;
         let handling = self.cpu.handling;
-        self.cpu.step(&mut self.chip)?;
-        self.watch_handler(handling)?;
-        if awake && !self.landing_stops_time(handling) {
-            self.executed += 1;
+        if self.chip.stuck {
             self.chip.elapse()?;
+        } else {
+            self.cpu.step(&mut self.chip)?;
+            self.watch_handler(handling)?;
+            if awake && !self.landing_stops_time(handling) {
+                self.executed += 1;
+                self.chip.elapse()?;
+            }
         }
         if let Some(flag) = self.chip.pending_reset.take() {
             self.reset(flag);
@@ -1709,6 +1792,9 @@ struct Chip {
     /// Whether a bite resets the chip, as on the real thing, or fails the
     /// firmware, which is what it's for in normal use.
     bites: bool,
+    /// The CPU's stopped dead, standing in for a hang. Time goes on, and a
+    /// reset ends it.
+    stuck: bool,
 }
 
 /// The watchdog, as the firmware can see it. Its settings are in
@@ -1834,6 +1920,7 @@ impl Chip {
             pending_reset: None,
             resets: 0,
             bites: false,
+            stuck: false,
         }
     }
 
@@ -3057,13 +3144,17 @@ impl Chip {
     }
 
     /// Everything back to its reset value but the things a reset doesn't
-    /// reach: flash, SRAM, the flags in RSTFR and the world outside. The
-    /// PIT starts from nothing, and comes up to a period later, which is
+    /// reach: flash, the flags in RSTFR, the world outside and, most likely,
+    /// SRAM. AN2632 §6 counts on that, the datasheet doesn't promise it, and
+    /// `WdtFault::Wipes` is the chip where it's wrong. The PIT starts from
+    /// nothing, and comes up to a period later, which is
     /// the slow end of "anytime between enabling and a full period"
     /// (DS40002204A §23.5.2.2).
     fn reset(&mut self, flag: u8) {
         let mut chip = Self::new(mem::take(&mut self.flash));
-        chip.sram = mem::take(&mut self.sram);
+        if self.world.wdt != Some(WdtFault::Wipes) {
+            chip.sram = mem::take(&mut self.sram);
+        }
         chip.now = self.now;
         chip.next_pit = self.now + PIT_PERIOD;
         chip.pressed = self.pressed;
@@ -3085,7 +3176,245 @@ impl Sim {
         self.cpu = Cpu::new(&SRAM);
         self.chip.reset(flag);
         self.testing = self.ram_tested;
+        self.booted = self.executed;
     }
+
+    /// What's in the marker right now, if it's a marker at all.
+    fn marker(&self) -> Option<Step> {
+        let bytes = self.chip.sram(&(self.marker..self.marker + 2));
+        watchdog::decode([bytes[0], bytes[1]]).map(|(step, _)| step)
+    }
+
+    /// Whether the firmware's got as far as the setup it means to run on:
+    /// the marker has a verdict and `hw::init` has acted on it. The marker
+    /// alone isn't enough, since a proof that gives up stores its verdict
+    /// and then resets from the WDT setting it had for that step.
+    fn proved(&self) -> Option<Step> {
+        let step = self.marker()?;
+        let want = match step {
+            Step::Failed => regs::WDT_PERIOD_8KCLK,
+            Step::Passed | Step::Hung => regs::WDT_WINDOW_32CLK | regs::WDT_PERIOD_32CLK,
+            _ => return None,
+        };
+        (self.chip.io[reg::WDT_CTRLA] == want).then_some(step)
+    }
+
+    /// Runs the watchdog's proof, from `main` to the real setup, with bites
+    /// resetting the chip. Checks the FET and linear pins on every
+    /// instruction: both held low and both compares at 0, but for the
+    /// instructions between a reset and src/rt.rs's `sbi`s, which is as
+    /// soon as the CPU can do anything about it.
+    fn prove(&mut self) -> Result<Proved, String> {
+        let (ticks, resets) = (self.chip.ticks, self.chip.resets);
+        let mut last = None;
+        self.chip.bites = true;
+        for _ in 0..BOOT_BUDGET {
+            if let Some(step) = self.proved() {
+                self.chip.bites = false;
+                return Ok(Proved {
+                    step,
+                    last,
+                    resets: self.chip.resets - resets,
+                    ticks: self.chip.ticks - ticks,
+                });
+            }
+            let press = self.chip.world.proof_press;
+            let boot = self.chip.resets - resets;
+            self.chip.set_switch(press == Some(boot))?;
+            self.step()?;
+            if let Some(step) = self.marker().filter(|step| step.proving()) {
+                last = Some(step);
+            }
+            self.outputs_held_low()?;
+        }
+        Err(format!(
+            "didn't reach the real setup within {BOOT_BUDGET} instructions"
+        ))
+    }
+
+    fn outputs_held_low(&self) -> Result<(), String> {
+        let chip = &self.chip;
+        let buf = [chip.wide(reg::TCA0_CMP0BUF), chip.wide(reg::TCA0_CMP1BUF)];
+        if chip.compare != [0; 2] || buf != [0; 2] {
+            return Err(format!(
+                "TCA0's compares are {:?} and their BUFs {buf:?} during the proof",
+                chip.compare
+            ));
+        }
+        if self.executed - self.booted > SBI_INSTRUCTIONS
+            && chip.io[reg::VPORTB_DIR] & (FET | LINEAR) != FET | LINEAR
+        {
+            return Err("the FET and linear pins are floating during the proof".into());
+        }
+        Ok(())
+    }
+
+    /// Sticks the CPU where it is and lets the watchdog deal with it, then
+    /// runs the boot that follows up to its first tick, as `in_step` does at
+    /// power-on. `verdict` is how the proof came out.
+    fn hang(&mut self, verdict: Step) -> Result<(), String> {
+        let resets = self.chip.resets;
+        self.chip.bites = true;
+        self.chip.stuck = true;
+        for _ in 0..HANG_TICKS {
+            self.tick(false)?;
+            if self.chip.resets > resets {
+                break;
+            }
+        }
+        if self.chip.resets == resets {
+            return Err(format!(
+                "the watchdog hadn't reset a hung chip after {HANG_TICKS} ticks"
+            ));
+        }
+        self.chip.bites = false;
+        self.tick(false).map_err(|e| format!("after a hang: {e}"))?;
+        let want = if verdict == Step::Passed {
+            Step::Hung
+        } else {
+            verdict
+        };
+        if self.proved() != Some(want) {
+            return Err(format!(
+                "after a hang the marker says {:?} and WDT.CTRLA {:#04x}, not {want:?} \
+                 and the watchdog back on",
+                self.marker(),
+                self.chip.io[reg::WDT_CTRLA]
+            ));
+        }
+        if self.chip.leds() != (0, 0) {
+            return Err(format!(
+                "a hang's reset came back up at {:?}, not off",
+                self.chip.leds()
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// How `Sim::prove` went.
+struct Proved {
+    /// The verdict: `Step::Passed` or `Step::Failed`.
+    step: Step,
+    /// The last step it was on before that, which is what found a fault.
+    last: Option<Step>,
+    /// Resets it took, the software one after a give-up included.
+    resets: u32,
+    /// Ticks it took.
+    ticks: u32,
+}
+
+/// `jmp __reset` and src/rt.rs's two `sbi`s: the instructions after a reset
+/// that the pins can still be floating for.
+const SBI_INSTRUCTIONS: u64 = 3;
+/// Deliberate resets on a good chip: steps 1, 2 and 3 each end in one.
+const PROOF_RESETS: u32 = 3;
+/// Ticks the proof takes on a good chip, in simulated whole ticks: step 1
+/// bites on its first, step 2 on its fourth and step 3 on its second.
+const PROOF_TICKS: u32 = 7;
+/// Ticks a hung chip gets. The 64-clock window is four, and a failed proof's
+/// 8 s timeout is 512.
+const HANG_TICKS: u32 = 600;
+
+/// Every way the watchdog can be broken, and the step that has to find it.
+/// A fault found anywhere else means the step meant to find it isn't doing
+/// its job, even if the fault was caught.
+const WDT_FAULTS: [(WdtFault, Step); WdtFault::ALL.len()] = [
+    (WdtFault::Never, Step::Timeout),
+    (WdtFault::Early, Step::Feed),
+    (WdtFault::Deaf, Step::Feed),
+    (WdtFault::Stops, Step::Fed),
+    (WdtFault::Open, Step::Early),
+    (WdtFault::Shut, Step::Window),
+    (WdtFault::Wipes, Step::Timeout),
+];
+
+/// The proof on a chip that's fine, one that's just been flashed, one with
+/// each fault in `WDT_FAULTS`, and with a press during each of its steps.
+fn watchdog_proof(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    main: u32,
+    report: &mut Report,
+) -> Result<(), String> {
+    let (mut sim, _) = power_on(&World::NORMAL)?;
+    let proved = sim.prove()?;
+    if proved.step != Step::Passed {
+        return Err(format!(
+            "failed a good chip, at {:?}, after {} resets",
+            proved.last, proved.resets
+        ));
+    }
+    if (proved.resets, proved.ticks) != (PROOF_RESETS, PROOF_TICKS) {
+        return Err(format!(
+            "took {} resets and {} ticks, not {PROOF_RESETS} and {PROOF_TICKS}",
+            proved.resets, proved.ticks
+        ));
+    }
+
+    // A flash: the marker says the watchdog's fine, and the proof runs anyway.
+    sim.tick(false)?;
+    sim.reset(regs::RSTCTRL_UPDIRF);
+    sim.run_to(main, BOOT_BUDGET)
+        .map_err(|e| format!("a UPDI reset: {e}"))?;
+    if sim.marker().is_some() {
+        return Err("a UPDI reset left the marker, so it skipped the RAM test".into());
+    }
+    let proved = sim.prove().map_err(|e| format!("a UPDI reset: {e}"))?;
+    if (proved.step, proved.resets) != (Step::Passed, PROOF_RESETS) {
+        return Err(format!(
+            "a UPDI reset ended {:?} after {} resets, so it didn't run the proof again",
+            proved.step, proved.resets
+        ));
+    }
+
+    for (fault, found_by) in WDT_FAULTS {
+        let world = World {
+            wdt: Some(fault),
+            ..World::NORMAL
+        };
+        let fault = |e: String| format!("{fault}: {e}");
+        let (mut sim, _) = power_on(&world).map_err(fault)?;
+        let proved = sim.prove().map_err(fault)?;
+        if proved.step != Step::Failed {
+            return Err(fault(format!("not found, it ended {:?}", proved.step)));
+        }
+        if proved.last != Some(found_by) {
+            return Err(fault(format!(
+                "found at {:?}, not {found_by:?}",
+                proved.last
+            )));
+        }
+        // And the light runs, as the rows in docs/ui.md say it does.
+        let (sim, _) = power_on(&world).map_err(fault)?;
+        let samples = iter::repeat_n(
+            Sample {
+                pressed: false,
+                world,
+            },
+            64,
+        );
+        in_step(sim, samples, report).map_err(fault)?;
+    }
+
+    for boot in 0..PROOF_RESETS {
+        let world = World {
+            proof_press: Some(boot),
+            ..World::NORMAL
+        };
+        let press = |e: String| format!("a press on boot {boot}: {e}");
+        let (sim, _) = power_on(&world).map_err(press)?;
+        let samples = iter::repeat_n(
+            Sample {
+                pressed: false,
+                world,
+            },
+            usize::from(RELEASE_TICKS) + 2,
+        );
+        if in_step(sim, samples, report).map_err(press)? == 0 {
+            return Err(press("the click never counted".into()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3542,6 +3871,30 @@ mod tests {
         assert!(!c.watchdog_running(), "WDTCFG is 0");
         assert_eq!(c.io[reg::VPORTB_DIR], 0, "the pins float until startup");
         assert_eq!(c.pending_reset, None);
+    }
+
+    #[test]
+    fn a_reset_can_lose_sram_if_the_world_says_so() {
+        let mut c = chip();
+        c.world.wdt = Some(WdtFault::Wipes);
+        c.write(SRAM.start, 0x42).unwrap();
+        c.reset(regs::RSTCTRL_WDRF);
+        assert_eq!(c.read(SRAM.start), Ok(JUNK));
+    }
+
+    #[test]
+    fn a_stuck_cpu_runs_nothing_until_the_watchdog_resets_it() {
+        let mut s = sim(&[SPIN]);
+        s.chip.bites = true;
+        s.chip.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        s.chip.io[reg::WDT_CTRLA] = regs::WDT_PERIOD_32CLK;
+        s.chip.stuck = true;
+        while s.chip.resets == 0 {
+            s.step().unwrap();
+        }
+        assert_eq!(s.executed, 0);
+        assert_eq!(s.chip.ticks, 2);
+        assert!(!s.chip.stuck, "the reset ends it");
     }
 
     #[test]

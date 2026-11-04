@@ -26,23 +26,32 @@ extern "C" fn main() -> ! {
         ramp,
         selftest::{Faults, RamSweep},
         torch::{Changes, Torch},
-        watchdog::Feeder,
+        watchdog::{Feeder, Proof},
     };
+
+    // What this reset means comes first, so the flags are clear and the
+    // marker's right before anything can reset the chip again.
+    let proof = Proof::after_reset(hw::take_reset_flags(), hw::marker());
+    hw::set_marker(proof.marker());
+    if proof.proving() {
+        prove(proof);
+    }
 
     // The self-tests come before anything's turned on. A failure doesn't
     // stop the torch, it quietly refuses the FET (src/selftest.rs).
     let faults = Faults {
         flash: !hw::flash_ok(),
         fuses: !hw::fuses().ok(),
-        watchdog: false,
+        watchdog: proof.refused(),
     };
 
-    hw::init();
+    hw::init(proof.watchdog());
 
     let mut torch = Torch::new(hw::temperature_calibration(), faults);
     let mut changes = Changes::new();
     let mut feeder = Feeder::new();
     let mut sweep = RamSweep::new();
+    let mut owed_press = proof.owed_press();
 
     loop {
         hw::wait_for_tick(torch.resting());
@@ -53,23 +62,51 @@ extern "C" fn main() -> ! {
         if !torch.resting() {
             rt::test_ram_section(sweep.next_section());
         }
-        torch.tick(hw::switch_pressed(), hw::adc_result());
+        torch.tick(hw::switch_pressed() || owed_press, hw::adc_result());
+        owed_press = false;
         if let Some(convert) = torch.convert() {
             hw::adc_start(convert);
         }
         if let Some(output) = changes.update(ramp::output(torch.level())) {
             hw::set_output(output);
         }
-        // The only place the watchdog's fed.
+        // The only place the running torch feeds the watchdog.
         if feeder.tick() {
             hw::feed_watchdog();
         }
     }
 }
 
+/// One step of the watchdog's proof (src/watchdog.rs). It never returns: every
+/// step ends in a reset, on purpose or not, and the marker tells the next boot
+/// which it was. The torch isn't running, so until that reset the outputs stay
+/// at the 0 that `hw::init` leaves them.
+#[cfg(target_arch = "avr")]
+fn prove(mut proof: ts21::watchdog::Proof) -> ! {
+    use ts21::watchdog::Action;
+
+    hw::init(proof.watchdog());
+    // Step 1 can be over before its first tick.
+    proof.sample(hw::switch_pressed());
+    hw::set_marker(proof.marker());
+    loop {
+        // Not `rest`: nobody knows yet that a `wdr` survives power-down.
+        hw::wait_for_tick(false);
+        let action = proof.tick(hw::switch_pressed());
+        hw::set_marker(proof.marker());
+        match action {
+            Action::Wait => {}
+            Action::Feed => hw::feed_watchdog(),
+            Action::GiveUp => hw::software_reset(),
+        }
+    }
+}
+
 // Turns the light off and spins. The watchdog isn't fed here, so it resets
-// the chip (to off, as it boots) 64 WDT clocks after the last feed, about
-// 63 ms nominal, 48 to 89 ms over the oscillator's full spread.
+// the chip 64 WDT clocks after the last feed, about 63 ms nominal, 48 to
+// 89 ms over the oscillator's full spread, or about 8 s on a chip that failed
+// its proof. It boots to off, and the next boot takes that as a hang and
+// refuses the FET.
 #[cfg(target_arch = "avr")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {

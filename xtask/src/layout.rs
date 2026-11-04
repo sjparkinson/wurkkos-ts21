@@ -57,6 +57,8 @@ pub fn memory(elf: &Elf) -> Result<(), String> {
     let ram_layout = Ram {
         data_start: symbol("__data_start")?,
         data_end: symbol("__data_end")?,
+        noinit_start: symbol("__noinit_start")?,
+        noinit_end: symbol("__noinit_end")?,
         bss_start: symbol("__bss_start")?,
         bss_end: symbol("__bss_end")?,
         data_load: symbol("__data_load")?,
@@ -95,13 +97,17 @@ fn vectors(image: &[u8], reset: u32, unhandled: u32) -> Result<(), String> {
 struct Ram {
     data_start: u32,
     data_end: u32,
+    /// What src/rt.rs's startup loops have to stay out of.
+    noinit_start: u32,
+    noinit_end: u32,
     bss_start: u32,
     bss_end: u32,
     /// A data-space address in the mapped-flash window, not an ELF one.
     data_load: u32,
 }
 
-/// .data then .bss, in order, inside SRAM. The loops in src/rt.rs stop when
+/// .data, .noinit then .bss, in order, inside SRAM, so startup's loops can't
+/// reach what has to survive a reset. The loops in src/rt.rs stop when
 /// the pointer equals the end, so an end below its start would run through
 /// all of data space. And .data's initial values have to sit where
 /// `__data_load` says, or the copy fills SRAM with the wrong bytes.
@@ -110,6 +116,8 @@ fn ram(r: &Ram, segments: &[Segment]) -> Result<(), String> {
         (RAM.start, "the start of SRAM"),
         (r.data_start, "__data_start"),
         (r.data_end, "__data_end"),
+        (r.noinit_start, "__noinit_start"),
+        (r.noinit_end, "__noinit_end"),
         (r.bss_start, "__bss_start"),
         (r.bss_end, "__bss_end"),
         (RAM.end, "the end of SRAM"),
@@ -305,6 +313,8 @@ mod tests {
         Ram {
             data_start: data,
             data_end: data + data_len,
+            noinit_start: data + data_len,
+            noinit_end: data + data_len,
             bss_start: data + data_len,
             bss_end: data + data_len + bss_len,
             data_load,
@@ -322,6 +332,21 @@ mod tests {
     #[test]
     fn accepts_empty_data_and_bss() {
         assert_eq!(ram(&ram_at(RAM.start, 0, 0, 0x8252), &[]), Ok(()));
+    }
+
+    #[test]
+    fn noinit_stays_out_of_what_startup_writes() {
+        let inside = Ram {
+            noinit_start: RAM.start - 1,
+            noinit_end: RAM.start + 1,
+            ..ram_at(RAM.start, 0, 0, 0x8252)
+        };
+        assert!(ram(&inside, &[]).unwrap_err().contains("__noinit_start"));
+        let into_bss = Ram {
+            noinit_end: RAM.start + 3,
+            ..ram_at(RAM.start, 0, 8, 0x8252)
+        };
+        assert!(ram(&into_bss, &[]).unwrap_err().contains("__noinit_end"));
     }
 
     #[test]
