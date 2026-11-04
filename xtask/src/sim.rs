@@ -62,15 +62,25 @@
 //!   keep burning: no conversion running (§30.3.5 resumes it on waking, with
 //!   a result that's invalid), the ADC off, the reference not forced on, and
 //!   TCA0's channels off the pins with both compares at 0.
-//! - The clock has to be 5 MHz, and TCA0 single-slope with a PER of 254 and
-//!   no prescaler: writes of anything else are refused, and after `hw::init`
-//!   a write that never happened fails too.
-//! - TCA0's CMP0 and CMP1 pick up their BUF registers a PWM cycle after a
-//!   write, standing in for the next BOTTOM. The datasheet doesn't say
-//!   whether writing CNT counts as one, so this guesses that it doesn't and
-//!   pushes BOTTOM a full cycle away. The real wait can be far shorter, so
-//!   the firmware mustn't lean on a pass that writes the output staying in
-//!   idle: `Torch::tick` rests in that same pass.
+//! - The clock has to be 5 MHz, and TCA0 single-slope with no prescaler:
+//!   writes of anything else are refused, and after `hw::init` a write that
+//!   never happened fails too. PER has to have left its reset value by then.
+//! - TCA0 counts to the live PER, one count per step of simulated time, and
+//!   at each BOTTOM PER, CMP0 and CMP1 take whichever of their
+//!   BUF registers have been written, unless CTRLE.LUPD is set
+//!   (DS40002204A §20.3.3.2 and table 20-6). Whatever goes live has to be a
+//!   whole row of `ramp::output`: a compare from one level run against
+//!   another's period is an error, and above all a compare over PER, which
+//!   holds the pin high for the cycle, the FET fully on. A BOTTOM only lands
+//!   between two instructions now and then, so writing PERBUF or a CMPnBUF
+//!   with the timer running and LUPD clear is checked as if one landed
+//!   straight after that write. `check` shows that catches firmware with the
+//!   lock taken out. The datasheet doesn't say whether writing CNT counts as
+//!   a BOTTOM, so this guesses that it doesn't and pushes BOTTOM a full cycle
+//!   away. The real wait can be far shorter, so the firmware mustn't lean on
+//!   a pass that writes the output staying in idle: `Torch::tick` rests in
+//!   that same pass. Sleeping with LUPD set is an error, and the phase isn't
+//!   frozen in power-down, since nothing's left pending for it to matter.
 //! - CRCSCAN runs CRC-16-CCITT over all of flash and sets STATUS.OK if it
 //!   comes to 0, which is what a correct checksum in the last two bytes
 //!   does (`crc.rs`). The firmware runs on the image `cargo xtask hex`
@@ -84,9 +94,8 @@
 //!   clocks. A dead oscillator stops the PIT and the WDT, and leaves their
 //!   sync flags up for good. The time a tick would've ended still counts
 //!   in `Chip::ticks`, or nothing here would ever finish.
-//! - TCA0.INTFLAGS.OVF goes up every `PWM_CYCLE`, unless the world's stopped
-//!   TCA0. It's worked out when it's read, since only the clock check reads
-//!   it. It doesn't follow a write to CNT, which is a phase shift at most.
+//! - TCA0.INTFLAGS.OVF goes up at each BOTTOM, a whole cycle of the live PER
+//!   apart, unless the world's stopped TCA0.
 //! - TCB0 only runs as the deadline for a tick: periodic interrupt mode at
 //!   CLK_PER / 2 with TOP at its maximum, and it stops in power-down.
 //!
@@ -242,10 +251,6 @@ pub const ISC_RISING: u8 = 0x2;
 pub const ISC_FALLING: u8 = 0x3;
 pub const ISC_INPUT_DISABLE: u8 = regs::PORT_ISC_INPUT_DISABLE;
 pub const ISC_LEVEL: u8 = 0x5;
-/// Instructions from a write to a CMPnBUF to the BOTTOM that applies it: a
-/// single-slope cycle is PER + 1 CPU clocks, and no instruction is quicker
-/// than a clock, so it's never less than this on the real chip's time.
-const PWM_CYCLE: u64 = ramp::PWM_TOP as u64;
 /// TCA0.CTRLB.WGMODE's mask. atdf.rs checks it.
 pub(crate) const TCA_WGMODE: u8 = 0x07;
 /// PORTx.PINnCTRL.INVEN, which the simulator refuses on PA5.
@@ -260,8 +265,9 @@ pub const VECTOR_PORTB_PORT: usize = 4;
 pub const VECTOR_PORTC_PORT: usize = 5;
 
 /// TCA0's 16-bit registers the firmware writes, by the low byte's address.
-const WIDE: [usize; 4] = [
+const WIDE: [usize; 5] = [
     reg::TCA0_CNT,
+    reg::TCA0_PER,
     reg::TCA0_PERBUF,
     reg::TCA0_CMP0BUF,
     reg::TCA0_CMP1BUF,
@@ -409,7 +415,30 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
             selftest::PASS_INSTRUCTIONS
         ));
     }
+    lock_taken_out(&power_on)?;
     Ok(report)
+}
+
+/// Runs the same random switching on a chip that drops every write to set
+/// LUPD, which is firmware with the lock taken out, and fails unless that's
+/// caught. It's here so the check can't quietly stop checking anything.
+fn lock_taken_out(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<(), String> {
+    let (mut sim, _) = power_on(&World::NORMAL).map_err(|e| format!("startup: {e}"))?;
+    sim.chip.lupd_broken = true;
+    let mut report = Report {
+        stack: 0,
+        loop_instructions: 0,
+        loop_budget: TICK_BUDGET,
+        off_instructions: 0,
+        mid_access: 0,
+        ticks_landed: 0,
+        deadlines_landed: 0,
+    };
+    match against_the_library(sim, &mut report) {
+        Err(e) if e.contains("LUPD") => Ok(()),
+        Err(e) => Err(format!("with LUPD taken out, it failed the wrong way: {e}")),
+        Ok(()) => Err("with LUPD taken out, nothing noticed".into()),
+    }
 }
 
 /// What src/bin/link_probe.rs's `main` leaves in `LINK_PROBE_COPY`: its
@@ -1700,11 +1729,12 @@ fn in_step(
             ));
         }
         let output = ramp::output(rig.level());
-        let want = (output.linear.into(), output.fet.into());
+        let want = (output.linear, output.fet, output.top);
         let leds = sim.chip.leds();
+        let leds = (leds.0, leds.1, sim.chip.wide(reg::TCA0_PER).wrapping_add(1));
         if leds != want && !settling {
             return Err(format!(
-                "tick {tick}: the firmware's (linear, FET) duty is {leds:?}, \
+                "tick {tick}: the firmware's (linear, FET, top) is {leds:?}, \
                  but the library's level {} is {want:?}",
                 rig.level()
             ));
@@ -1994,13 +2024,20 @@ struct Chip {
     /// PIT periods so far with the PIT on.
     ticks: u32,
     /// TCA0's 16-bit registers, in `WIDE`'s order.
-    wide: [u16; 4],
+    wide: [u16; 5],
     /// TCA0's TEMP byte, and which register's low byte it holds.
     temp: Option<(usize, u8)>,
     /// TCA0.CMP0 and CMP1, the live values.
     compare: [u16; 2],
-    /// When the BUF registers next reach `compare`, if they've changed.
-    compare_update: Option<u64>,
+    /// When the counter next reaches BOTTOM.
+    next_bottom: u64,
+    /// TCA0.CTRLF's PERBV, CMP0BV and CMP1BV: which of `BUFFERED` hold a value
+    /// the next UPDATE takes.
+    buffer_valid: [bool; 3],
+    /// TCA0.CTRLE.LUPD.
+    lupd: bool,
+    /// Drops writes that set LUPD, for `lock_taken_out`.
+    lupd_broken: bool,
     /// The high byte of a CMPn, latched into TEMP by reading its low byte,
     /// and which register that was.
     compare_temp: Option<(usize, u8)>,
@@ -2028,11 +2065,8 @@ struct Chip {
     /// reset ends it.
     stuck: bool,
     tcb: Tcb,
-    /// Which `PWM_CYCLE` TCA0.INTFLAGS.OVF was last cleared in.
-    ovf_cleared: u64,
-    /// TCA0.PER, the live period. PERBUF only reaches it at BOTTOM, 13 ms
-    /// away from its reset value, so `hw::init` has to write it as well.
-    tca_per: u16,
+    /// TCA0.INTFLAGS.OVF.
+    tca_ovf: bool,
     /// Whether anything's read TCA0.INTFLAGS, which only a counted wait does.
     tca_polled: bool,
 }
@@ -2157,10 +2191,14 @@ impl Chip {
             porta_flags: 0,
             next_pit: PIT_PERIOD,
             ticks: 0,
-            wide: [0; 4],
+            // PER and PERBUF reset to 0xFFFF, the rest to 0.
+            wide: [0, 0xFFFF, 0xFFFF, 0, 0],
             temp: None,
             compare: [0; 2],
-            compare_update: None,
+            next_bottom: 0,
+            buffer_valid: [false; 3],
+            lupd: false,
+            lupd_broken: false,
             compare_temp: None,
             interrupted: None,
             power_downs: 0,
@@ -2178,8 +2216,7 @@ impl Chip {
             bites: false,
             stuck: false,
             tcb: Tcb::default(),
-            ovf_cleared: 0,
-            tca_per: 0xFFFF,
+            tca_ovf: false,
             tca_polled: false,
         }
     }
@@ -2241,10 +2278,7 @@ impl Chip {
     /// 32 kHz oscillator) is driven from here.
     fn advance_to(&mut self, to: u64) -> Result<(), String> {
         self.now = to;
-        if self.tca_counting() && self.compare_update.is_some_and(|at| self.now >= at) {
-            self.compare_update = None;
-            self.compare = [self.wide(reg::TCA0_CMP0BUF), self.wide(reg::TCA0_CMP1BUF)];
-        }
+        self.tca_advance()?;
         while self.now >= self.next_pit {
             self.pit_period()?;
         }
@@ -2593,7 +2627,7 @@ impl Chip {
             .map_or(0, |i| self.wide[i])
     }
 
-    /// Whether the clock and TCA0 are what `CLK_PER` and `PWM_CYCLE` say.
+    /// Whether the clock and TCA0 are what `CLK_PER` and the off output say.
     /// Writes of anything else are refused, but this is what catches a write
     /// that never happened: the reset values are a 3.3 MHz clock and a PER
     /// of 0xFFFF, which leaves full duty nearly dark.
@@ -2601,23 +2635,23 @@ impl Chip {
         self.io[reg::CLKCTRL_MCLKCTRLB] == regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN
             && self.io[reg::TCA0_CTRLA] == regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE
             && self.io[reg::TCA0_CTRLB] & TCA_WGMODE == regs::TCA_WGMODE_SINGLESLOPE
-            && self.wide(reg::TCA0_PERBUF) == ramp::PWM_TOP - 1
-            && self.tca_per == ramp::PWM_TOP - 1
+            && self.wide(reg::TCA0_PER) == ramp::Output::OFF.top - 1
     }
 
-    /// (linear, FET) duty as the pins see it: TCA0 running, the compare
-    /// channel enabled and the pin set as an output.
+    /// (linear, FET) compares as the pins see them: TCA0 running, the compare
+    /// channel enabled and the pin set as an output. These are the live
+    /// values, so an update that never landed shows.
     fn leds(&self) -> (u16, u16) {
         let running = self.io[reg::TCA0_CTRLA] & regs::TCA_ENABLE != 0;
-        let channel = |enable: u8, pin: u8, cmp: usize| {
+        let channel = |enable: u8, pin: u8, compare: u16| {
             let on = running
                 && self.io[reg::TCA0_CTRLB] & enable != 0
                 && self.io[reg::VPORTB_DIR] & pin != 0;
-            if on { self.wide(cmp) } else { 0 }
+            if on { compare } else { 0 }
         };
         (
-            channel(regs::TCA_CMP1EN, LINEAR, reg::TCA0_CMP1BUF),
-            channel(regs::TCA_CMP0EN, FET, reg::TCA0_CMP0BUF),
+            channel(regs::TCA_CMP1EN, LINEAR, self.compare[1]),
+            channel(regs::TCA_CMP0EN, FET, self.compare[0]),
         )
     }
 }
@@ -2651,16 +2685,6 @@ impl Chip {
             self.world.osc32k
         };
         PIT_PERIOD * u64::from(self.world.main_clock) / u64::from(osc32k)
-    }
-
-    /// Whether TCA0's on and hasn't broken.
-    fn tca_counting(&self) -> bool {
-        self.io[reg::TCA0_CTRLA] & regs::TCA_ENABLE != 0 && !self.world.tca_stopped
-    }
-
-    /// TCA0.INTFLAGS.OVF.
-    fn tca_overflowed(&self) -> bool {
-        self.tca_counting() && self.now / PWM_CYCLE != self.ovf_cleared
     }
 
     /// When TCB0 next reaches TOP, if it's running. TOP + 1 of its clocks,
@@ -2723,22 +2747,23 @@ impl Chip {
         Ok(())
     }
 
-    /// A write straight to the high byte of TCA0.PER, CMP0 or CMP1, which `a`
-    /// is, with the low byte in TEMP. It takes effect now, not at BOTTOM.
+    /// A write straight to the high byte of TCA0.CMP0 or CMP1, which `a` is,
+    /// with the low byte in TEMP. It takes effect now, not at BOTTOM, so with
+    /// the timer running only 0 is safe: anything else could go over a PER
+    /// that's waiting for its UPDATE, and hold the pin high for the cycle.
     fn write_live(&mut self, a: usize, value: u8) -> Result<(), String> {
         match self.temp.take() {
             Some((low, lo)) if low == a - 1 => {
                 let wide = u16::from_le_bytes([lo, value]);
-                if low != reg::TCA0_PER {
-                    self.compare[usize::from(low == reg::TCA0_CMP1)] = wide;
-                } else if wide == ramp::PWM_TOP - 1 {
-                    self.tca_per = wide;
-                } else {
+                if wide != 0 && self.tca_running() {
                     return Err(format!(
-                        "sets TCA0.PER to {wide}: full duty needs it at {}",
-                        ramp::PWM_TOP - 1
+                        "writes {wide} straight to {} with the timer running, which \
+                         lands at once against whatever PER is, so a compare over it \
+                         holds the pin high for the cycle: use its BUF",
+                        name(low)
                     ));
                 }
+                self.compare[usize::from(low == reg::TCA0_CMP1)] = wide;
                 Ok(())
             }
             _ => Err(format!(
@@ -2756,6 +2781,145 @@ fn tcb0(addr: usize) -> bool {
         addr,
         reg::TCB0_CTRLA | reg::TCB0_INTCTRL | reg::TCB0_INTFLAGS
     ) || (reg::TCB0_CNT..reg::TCB0_CCMP + 2).contains(&addr)
+}
+
+/// TCA0's buffer registers, in `Chip::buffer_valid`'s order.
+const BUFFERED: [usize; 3] = [reg::TCA0_PERBUF, reg::TCA0_CMP0BUF, reg::TCA0_CMP1BUF];
+
+/// TCA0's counter and its UPDATE, in single-slope mode.
+impl Chip {
+    /// Whether TCA0's on and hasn't broken.
+    fn tca_running(&self) -> bool {
+        self.io[reg::TCA0_CTRLA] & regs::TCA_ENABLE != 0 && !self.world.tca_stopped
+    }
+
+    /// Clocks from one BOTTOM to the next (§20.3.3.4.3).
+    fn tca_cycle(&self) -> u64 {
+        u64::from(self.wide(reg::TCA0_PER)) + 1
+    }
+
+    /// Runs the counter up to `now`. A stopped timer stays a full cycle away
+    /// from BOTTOM, which is where it starts. Each BOTTOM is an overflow, and
+    /// PER's what it was for the cycle that ended, until the UPDATE there.
+    fn tca_advance(&mut self) -> Result<(), String> {
+        if !self.tca_running() {
+            self.next_bottom = self.now + self.tca_cycle();
+            return Ok(());
+        }
+        while self.now >= self.next_bottom {
+            self.tca_ovf = true;
+            self.tca_update()?;
+            self.next_bottom += self.tca_cycle();
+        }
+        Ok(())
+    }
+
+    /// (PER, [CMP0, CMP1]) as the next UPDATE leaves them.
+    fn tca_after_update(&self) -> (u16, [u16; 2]) {
+        let value = |i: usize, live: u16| {
+            if self.buffer_valid[i] {
+                self.wide(BUFFERED[i])
+            } else {
+                live
+            }
+        };
+        (
+            value(0, self.wide(reg::TCA0_PER)),
+            [value(1, self.compare[0]), value(2, self.compare[1])],
+        )
+    }
+
+    /// The UPDATE condition, at BOTTOM. LUPD holds it off, and the buffers
+    /// stay valid for the next one.
+    fn tca_update(&mut self) -> Result<(), String> {
+        if self.lupd || self.buffer_valid == [false; 3] {
+            return Ok(());
+        }
+        self.tca_check_update()?;
+        let (per, compare) = self.tca_after_update();
+        let i = WIDE.iter().position(|&a| a == reg::TCA0_PER);
+        self.wide[i.unwrap_or_default()] = per;
+        self.compare = compare;
+        self.buffer_valid = [false; 3];
+        Ok(())
+    }
+
+    /// Whether the next UPDATE leaves TCA0 running one level's whole output.
+    fn tca_check_update(&self) -> Result<(), String> {
+        let (per, [fet, linear]) = self.tca_after_update();
+        let whole = |o: ramp::Output| (o.top - 1, o.fet, o.linear) == (per, fet, linear);
+        if (0..=ramp::LEVELS).map(ramp::output).any(whole) {
+            return Ok(());
+        }
+        let advice = "so PERBUF and both CMPnBUFs have to land together, under LUPD";
+        if fet > per {
+            return Err(format!(
+                "an UPDATE here runs CMP0 at {fet} against a PER of {per}, which holds \
+                 the FET fully on for the cycle, {advice}"
+            ));
+        }
+        if linear > per {
+            return Err(format!(
+                "an UPDATE here runs CMP1 at {linear} against a PER of {per}, which holds \
+                 the linear channel fully on for the cycle, {advice}"
+            ));
+        }
+        Err(format!(
+            "an UPDATE here runs (CMP0, CMP1) of ({fet}, {linear}) against a PER of {per}, \
+             which is no level's output, {advice}"
+        ))
+    }
+
+    /// The firmware has finished writing a 16-bit TCA0 register.
+    fn tca_written(&mut self, low: usize) -> Result<(), String> {
+        if low == reg::TCA0_CNT {
+            self.next_bottom = self.now + self.tca_cycle();
+        } else if low == reg::TCA0_PER {
+            if self.tca_running() {
+                return Err(
+                    "writes TCA0.PER with the timer running, which applies at once and \
+                     can wrap the counter (section 20.3.3.3): use PERBUF"
+                        .into(),
+                );
+            }
+        } else if let Some(i) = BUFFERED.iter().position(|&a| a == low) {
+            self.buffer_valid[i] = true;
+            // A BOTTOM could land straight after this write.
+            if self.tca_running() && !self.lupd {
+                self.tca_check_update()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A write to TCA0.CTRLESET or CTRLECLR. The UPDATE command does what
+    /// BOTTOM would, whatever LUPD says (§20.3.3.5). That it works with the
+    /// counter broken is likely, not stated, since the command doesn't come
+    /// from the counter. `hw::set_output` doesn't lean on it to turn off.
+    fn tca_lock(&mut self, a: usize, value: u8) -> Result<(), String> {
+        if a == reg::TCA0_CTRLESET && value == regs::TCA_CMD_UPDATE {
+            let locked = mem::replace(&mut self.lupd, false);
+            self.tca_update()?;
+            self.lupd = locked;
+            return Ok(());
+        }
+        if value != regs::TCA_LUPD {
+            return Err(format!(
+                "writes {value:#04x} to {}, but the simulator only models LUPD and \
+                 the UPDATE command",
+                name(a)
+            ));
+        }
+        if a == reg::TCA0_CTRLESET {
+            self.lupd = !self.lupd_broken;
+        } else {
+            self.lupd = false;
+            if self.tca_running() {
+                self.tca_check_update()?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Registers that are plain storage as far as the firmware's concerned.
@@ -2845,7 +3009,10 @@ fn name(addr: usize) -> String {
         (reg::RTC_PITINTFLAGS, "RTC.PITINTFLAGS"),
         (reg::TCA0_CTRLA, "TCA0.CTRLA"),
         (reg::TCA0_CTRLB, "TCA0.CTRLB"),
+        (reg::TCA0_CTRLECLR, "TCA0.CTRLECLR"),
+        (reg::TCA0_CTRLESET, "TCA0.CTRLESET"),
         (reg::TCA0_CNT, "TCA0.CNT"),
+        (reg::TCA0_PER, "TCA0.PER"),
         (reg::TCA0_CMP0, "TCA0.CMP0"),
         (reg::TCA0_CMP1, "TCA0.CMP1"),
         (reg::TCA0_PERBUF, "TCA0.PERBUF"),
@@ -3229,6 +3396,9 @@ impl Bus for Chip {
                     .into(),
             );
         }
+        if self.lupd {
+            return Err("sleeps with TCA0.CTRLE.LUPD set, so the output can't update".into());
+        }
         if ctrla == regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN {
             self.ready_for_power_down()?;
             self.power_downs += 1;
@@ -3309,11 +3479,7 @@ impl Bus for Chip {
                 // With the PIT's flag up this is a counted wait that's
                 // finishing, not one starting.
                 self.tca_polled |= !self.pit_flag;
-                Ok(if self.tca_overflowed() {
-                    regs::TCA_OVF
-                } else {
-                    0
-                })
+                Ok(if self.tca_ovf { regs::TCA_OVF } else { 0 })
             }
             // Reading the flag doesn't move time on: a firmware that went
             // back to busy-waiting on it would run out of instructions.
@@ -3341,7 +3507,7 @@ impl Bus for Chip {
             }),
             reg::TCA0_CMP0 | reg::TCA0_CMP1 | reg::TCA0_PER => {
                 let [lo, hi] = match a {
-                    reg::TCA0_PER => self.tca_per,
+                    reg::TCA0_PER => self.wide(reg::TCA0_PER),
                     _ => self.compare[usize::from(a == reg::TCA0_CMP1)],
                 }
                 .to_le_bytes();
@@ -3411,7 +3577,7 @@ impl Bus for Chip {
                 // 0 is its reset value, which startup puts back.
                 if value != 0 && value & TCA_WGMODE != regs::TCA_WGMODE_SINGLESLOPE {
                     return Err(format!(
-                        "writes {value:#04x} to TCA0.CTRLB: PWM_CYCLE and the duty \
+                        "writes {value:#04x} to TCA0.CTRLB: the period and the duty \
                          cycles assume single-slope"
                     ));
                 }
@@ -3473,6 +3639,7 @@ impl Bus for Chip {
                 }
             }
             PORTA_INTFLAGS => self.porta_flags &= !value,
+            reg::TCA0_CTRLESET | reg::TCA0_CTRLECLR => self.tca_lock(a, value)?,
             reg::RSTCTRL_RSTFR => self.rstfr &= !value,
             reg::RSTCTRL_SWRR => {
                 self.take_protected_write(a)?;
@@ -3483,12 +3650,12 @@ impl Bus for Chip {
             }
             reg::TCA0_INTFLAGS => {
                 if value & regs::TCA_OVF != 0 {
-                    self.ovf_cleared = self.now / PWM_CYCLE;
+                    self.tca_ovf = false;
                 }
             }
             _ if tcb0(a) => self.write_tcb(a, value)?,
-            reg::TCA0_PER | reg::TCA0_CMP0 | reg::TCA0_CMP1 => self.temp = Some((a, value)),
-            _ if [reg::TCA0_PER, reg::TCA0_CMP0, reg::TCA0_CMP1].contains(&a.wrapping_sub(1)) => {
+            reg::TCA0_CMP0 | reg::TCA0_CMP1 => self.temp = Some((a, value)),
+            _ if [reg::TCA0_CMP0, reg::TCA0_CMP1].contains(&a.wrapping_sub(1)) => {
                 self.write_live(a, value)?;
             }
             _ if WIDE.contains(&a) => {
@@ -3505,25 +3672,7 @@ impl Bus for Chip {
                 Some((low, lo)) if low == a - 1 => {
                     let i = WIDE.iter().position(|&w| w == low).unwrap_or_default();
                     self.wide[i] = u16::from_le_bytes([lo, value]);
-                    let bottom = self.now + PWM_CYCLE;
-                    match low {
-                        // Full duty has to be over PER to hold the pin high,
-                        // and the cycle has to be what PWM_CYCLE says.
-                        reg::TCA0_PERBUF if self.wide[i] != ramp::PWM_TOP - 1 => {
-                            return Err(format!(
-                                "sets TCA0.PER to {}: full duty needs it at {}",
-                                self.wide[i],
-                                ramp::PWM_TOP - 1
-                            ));
-                        }
-                        reg::TCA0_CMP0BUF | reg::TCA0_CMP1BUF => {
-                            self.compare_update.get_or_insert(bottom);
-                        }
-                        reg::TCA0_CNT if self.compare_update.is_some() => {
-                            self.compare_update = Some(bottom);
-                        }
-                        _ => {}
-                    }
+                    self.tca_written(low)?;
                 }
                 _ => {
                     return Err(format!(
@@ -3667,6 +3816,7 @@ impl Chip {
         chip.rstfr = self.rstfr | flag;
         chip.resets = self.resets + 1;
         chip.bites = self.bites;
+        chip.lupd_broken = self.lupd_broken;
         *self = chip;
     }
 }
@@ -4021,8 +4171,7 @@ mod tests {
             c.io[reg::CLKCTRL_MCLKCTRLB] = regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN;
             c.io[reg::TCA0_CTRLA] = regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE;
             c.io[reg::TCA0_CTRLB] = regs::TCA_WGMODE_SINGLESLOPE;
-            write_wide(c, reg::TCA0_PERBUF, ramp::PWM_TOP - 1);
-            c.tca_per = ramp::PWM_TOP - 1;
+            c.wide[1] = ramp::PWM_TOP - 1;
         };
         let mut c = chip();
         assert!(!c.clocked_as_modelled(), "out of reset");
@@ -4037,11 +4186,7 @@ mod tests {
         }
         let mut c = chip();
         set_up(&mut c);
-        c.wide[WIDE.iter().position(|&a| a == reg::TCA0_PERBUF).unwrap()] = 0xFFFF;
-        assert!(!c.clocked_as_modelled(), "TCA0.PERBUF at its reset value");
-        let mut c = chip();
-        set_up(&mut c);
-        c.tca_per = 0xFFFF;
+        c.wide[WIDE.iter().position(|&a| a == reg::TCA0_PER).unwrap()] = 0xFFFF;
         assert!(!c.clocked_as_modelled(), "TCA0.PER at its reset value");
     }
 
@@ -4054,14 +4199,230 @@ mod tests {
         assert_eq!(c.write(ctrlb, regs::TCA_WGMODE_SINGLESLOPE), Ok(()));
     }
 
-    #[test]
-    fn refuses_a_period_that_keeps_full_duty_from_holding_the_pin_high() {
+    /// A chip with TCA0 running level `level`'s output from BOTTOM.
+    fn pwm_at(level: u8) -> Chip {
         let mut c = chip();
-        let [lo, hi] = ramp::PWM_TOP.to_le_bytes();
-        c.write(reg::TCA0_PERBUF as u16, lo).unwrap();
-        let err = c.write(reg::TCA0_PERBUF as u16 + 1, hi).unwrap_err();
-        assert!(err.contains("full duty"), "{err}");
-        write_wide(&mut c, reg::TCA0_PERBUF, ramp::PWM_TOP - 1);
+        let out = ramp::output(level);
+        c.wide[1] = out.top - 1;
+        c.compare = [out.fet, out.linear];
+        c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
+        c.next_bottom = c.now + u64::from(out.top);
+        c
+    }
+
+    /// `hw::set_output`'s writes, up to clearing the lock.
+    fn set_output(c: &mut Chip, out: ramp::Output) -> Result<(), String> {
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD)?;
+        write_wide(c, reg::TCA0_PERBUF, out.top - 1);
+        write_wide(c, reg::TCA0_CMP1BUF, out.linear);
+        write_wide(c, reg::TCA0_CMP0BUF, out.fet);
+        c.write(reg::TCA0_CTRLECLR as u16, regs::TCA_LUPD)
+    }
+
+    /// Writes a 16-bit register as `write_wide` does, but says how it went.
+    fn try_wide(c: &mut Chip, addr: usize, value: u16) -> Result<(), String> {
+        let [lo, hi] = value.to_le_bytes();
+        c.write(addr as u16, lo)?;
+        c.write(addr as u16 + 1, hi)
+    }
+
+    /// (top, FET, linear) as they're running now.
+    fn live(c: &Chip) -> (u16, u16, u16) {
+        (c.wide(reg::TCA0_PER) + 1, c.compare[0], c.compare[1])
+    }
+
+    #[test]
+    fn a_level_lands_whole_at_the_next_bottom() {
+        let (from, to) = (ramp::output(1), ramp::output(ramp::LINEAR_MAX));
+        let mut c = pwm_at(1);
+        set_output(&mut c, to).unwrap();
+        assert_eq!(
+            live(&c),
+            (from.top, from.fet, from.linear),
+            "not until BOTTOM"
+        );
+        c.advance_to(c.next_bottom - 1).unwrap();
+        assert_eq!(live(&c), (from.top, from.fet, from.linear));
+        c.elapse().unwrap();
+        assert_eq!(live(&c), (to.top, to.fet, to.linear));
+    }
+
+    #[test]
+    fn the_cycle_is_the_live_period_not_the_buffered_one() {
+        let to = ramp::output(1);
+        let mut c = pwm_at(ramp::LINEAR_MAX);
+        set_output(&mut c, to).unwrap();
+        let bottom = c.next_bottom;
+        c.advance_to(bottom).unwrap();
+        assert_eq!(c.next_bottom, bottom + u64::from(to.top));
+    }
+
+    #[test]
+    fn a_stopped_timer_counts_nothing_and_a_started_one_starts_a_cycle() {
+        let mut c = chip();
+        write_wide(&mut c, reg::TCA0_PER, ramp::PWM_TOP - 1);
+        c.advance_to(c.now + 10_000).unwrap();
+        assert_eq!(c.next_bottom, c.now + u64::from(ramp::PWM_TOP));
+    }
+
+    #[test]
+    fn the_lock_holds_an_update_over_a_bottom_until_the_next_one() {
+        let (from, to) = (ramp::output(1), ramp::output(ramp::LEVELS));
+        let mut c = pwm_at(1);
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        write_wide(&mut c, reg::TCA0_PERBUF, to.top - 1);
+        c.advance_to(c.next_bottom).unwrap();
+        assert_eq!(live(&c), (from.top, from.fet, from.linear), "locked");
+        write_wide(&mut c, reg::TCA0_CMP1BUF, to.linear);
+        write_wide(&mut c, reg::TCA0_CMP0BUF, to.fet);
+        c.write(reg::TCA0_CTRLECLR as u16, regs::TCA_LUPD).unwrap();
+        c.advance_to(c.next_bottom).unwrap();
+        assert_eq!(live(&c), (to.top, to.fet, to.linear));
+    }
+
+    #[test]
+    fn an_unlocked_write_is_caught_at_once() {
+        // Any order, any level: the first write that tears the output fails.
+        let to = ramp::output(ramp::LINEAR_MAX);
+        let mut c = pwm_at(1);
+        let err = try_wide(&mut c, reg::TCA0_PERBUF, to.top - 1).unwrap_err();
+        assert!(err.contains("LUPD"), "{err}");
+
+        let mut c = pwm_at(1);
+        let err = try_wide(&mut c, reg::TCA0_CMP1BUF, to.linear).unwrap_err();
+        assert!(err.contains("LUPD"), "{err}");
+    }
+
+    #[test]
+    fn a_compare_left_over_a_shorter_period_holds_the_fet_on_and_fails() {
+        // Level 149's FET compare against a period under it.
+        let mut c = pwm_at(ramp::LEVELS - 1);
+        let err = try_wide(&mut c, reg::TCA0_PERBUF, 100).unwrap_err();
+        assert!(err.contains("holds the FET fully on"), "{err}");
+
+        // Set up under the lock, the same goes for the moment it's cleared.
+        let mut c = pwm_at(ramp::LEVELS - 1);
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        write_wide(&mut c, reg::TCA0_PERBUF, 100);
+        let err = c
+            .write(reg::TCA0_CTRLECLR as u16, regs::TCA_LUPD)
+            .unwrap_err();
+        assert!(err.contains("holds the FET fully on"), "{err}");
+    }
+
+    #[test]
+    fn a_compare_left_over_a_shorter_period_holds_the_linear_channel_on_and_fails() {
+        let mut c = pwm_at(ramp::LINEAR_MAX - 1);
+        let err = try_wide(&mut c, reg::TCA0_PERBUF, 100).unwrap_err();
+        assert!(err.contains("holds the linear channel fully on"), "{err}");
+    }
+
+    #[test]
+    fn a_period_that_keeps_full_duty_from_holding_the_pin_high_is_no_level() {
+        let mut c = pwm_at(ramp::LINEAR_MAX);
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        write_wide(&mut c, reg::TCA0_PERBUF, ramp::PWM_TOP);
+        let err = c
+            .write(reg::TCA0_CTRLECLR as u16, regs::TCA_LUPD)
+            .unwrap_err();
+        assert!(err.contains("no level's output"), "{err}");
+    }
+
+    #[test]
+    fn a_torn_update_that_reaches_bottom_fails_too() {
+        // With the lock broken and the write-time check out of the way,
+        // BOTTOM itself still refuses it.
+        let mut c = pwm_at(1);
+        c.wide[2] = ramp::PWM_TOP - 1;
+        c.buffer_valid[0] = true;
+        let err = c.advance_to(c.next_bottom).unwrap_err();
+        assert!(err.contains("no level's output"), "{err}");
+    }
+
+    #[test]
+    fn a_broken_lock_lets_writes_through_as_if_it_was_never_set() {
+        let mut c = pwm_at(1);
+        c.lupd_broken = true;
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        let top = ramp::output(ramp::LINEAR_MAX).top;
+        assert!(try_wide(&mut c, reg::TCA0_PERBUF, top - 1).is_err());
+    }
+
+    #[test]
+    fn every_change_of_level_goes_through_under_the_lock() {
+        for from in 0..=ramp::LEVELS {
+            for to in [0, 1, ramp::LINEAR_MAX, ramp::LEVELS] {
+                let mut c = pwm_at(from);
+                let out = ramp::output(to);
+                set_output(&mut c, out).unwrap();
+                c.advance_to(c.next_bottom).unwrap();
+                assert_eq!(live(&c), (out.top, out.fet, out.linear));
+            }
+        }
+    }
+
+    #[test]
+    fn only_lupd_and_update_are_modelled_in_ctrle() {
+        let mut c = chip();
+        for addr in [reg::TCA0_CTRLESET, reg::TCA0_CTRLECLR] {
+            let err = c.write(addr as u16, 0x08).unwrap_err();
+            assert!(err.contains("only models LUPD"), "{err}");
+        }
+        let err = c
+            .write(reg::TCA0_CTRLECLR as u16, regs::TCA_CMD_UPDATE)
+            .unwrap_err();
+        assert!(err.contains("only models LUPD"), "{err}");
+    }
+
+    #[test]
+    fn the_update_command_lands_a_locked_row_now_and_empties_the_buffers() {
+        let mut c = pwm_at(1);
+        let off = ramp::Output::OFF;
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        write_wide(&mut c, reg::TCA0_PERBUF, off.top - 1);
+        write_wide(&mut c, reg::TCA0_CMP1BUF, off.linear);
+        write_wide(&mut c, reg::TCA0_CMP0BUF, off.fet);
+        assert_eq!(c.wide(reg::TCA0_PER), ramp::output(1).top - 1, "locked");
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_CMD_UPDATE)
+            .unwrap();
+        assert_eq!(c.wide(reg::TCA0_PER), off.top - 1);
+        assert_eq!(c.compare, [0, 0]);
+        assert_eq!(c.buffer_valid, [false; 3]);
+        assert!(c.lupd, "the command leaves the lock as it was");
+    }
+
+    #[test]
+    fn the_update_command_still_refuses_a_torn_row() {
+        let mut c = pwm_at(1);
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        write_wide(&mut c, reg::TCA0_CMP0BUF, 1000);
+        let err = c
+            .write(reg::TCA0_CTRLESET as u16, regs::TCA_CMD_UPDATE)
+            .unwrap_err();
+        assert!(err.contains("UPDATE"), "{err}");
+    }
+
+    #[test]
+    fn a_direct_compare_write_with_the_timer_running_has_to_be_0() {
+        let mut c = pwm_at(1);
+        assert_eq!(try_wide(&mut c, reg::TCA0_CMP0, 0), Ok(()));
+        assert_eq!(c.compare[0], 0);
+        let err = try_wide(&mut c, reg::TCA0_CMP1, 4).unwrap_err();
+        assert!(err.contains("use its BUF"), "{err}");
+    }
+
+    #[test]
+    fn writes_per_only_with_the_timer_stopped() {
+        let mut c = pwm_at(0);
+        let err = try_wide(&mut c, reg::TCA0_PER, 254).unwrap_err();
+        assert!(err.contains("PERBUF"), "{err}");
+    }
+
+    #[test]
+    fn wont_sleep_with_the_lock_set() {
+        let mut c = ready_to_power_down();
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        assert!(c.sleep().unwrap_err().contains("LUPD"));
     }
 
     #[test]
@@ -4559,21 +4920,40 @@ mod tests {
     fn tca0_flags_an_overflow_every_cycle_until_its_cleared() {
         let mut c = chip();
         let flags = reg::TCA0_INTFLAGS as u16;
+        let cycle = u64::from(ramp::PWM_TOP);
         c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
+        c.wide[1] = ramp::PWM_TOP - 1;
+        c.next_bottom = cycle;
         assert_eq!(c.read(flags), Ok(0));
         assert!(c.tca_polled);
-        c.now = PWM_CYCLE - 1;
+        c.advance_to(cycle - 1).unwrap();
         assert_eq!(c.read(flags), Ok(0));
-        c.now = PWM_CYCLE;
+        c.advance_to(cycle).unwrap();
         assert_eq!(c.read(flags), Ok(regs::TCA_OVF));
-        c.now = 3 * PWM_CYCLE;
+        c.advance_to(3 * cycle).unwrap();
         assert_eq!(c.read(flags), Ok(regs::TCA_OVF), "one flag for any number");
         c.write(flags, regs::TCA_OVF).unwrap();
         assert_eq!(c.read(flags), Ok(0));
-        c.now = 4 * PWM_CYCLE;
+        c.advance_to(4 * cycle).unwrap();
         assert_eq!(c.read(flags), Ok(regs::TCA_OVF));
+        c.write(flags, regs::TCA_OVF).unwrap();
         c.world.tca_stopped = true;
+        c.advance_to(8 * cycle).unwrap();
+        assert_eq!(c.read(flags), Ok(0), "stopped");
+    }
+
+    #[test]
+    fn tca0s_overflows_follow_the_live_period() {
+        let mut c = chip();
+        let flags = reg::TCA0_INTFLAGS as u16;
+        let long = u64::from(ramp::MAX_TOP);
+        c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
+        c.wide[1] = ramp::MAX_TOP - 1;
+        c.next_bottom = long;
+        c.advance_to(long - 1).unwrap();
         assert_eq!(c.read(flags), Ok(0));
+        c.advance_to(long).unwrap();
+        assert_eq!(c.read(flags), Ok(regs::TCA_OVF));
     }
 
     /// TCB0 as `hw::init` sets it up.
@@ -4907,36 +5287,36 @@ mod tests {
     }
 
     #[test]
-    fn a_compare_takes_its_buf_a_pwm_cycle_after_the_write() {
-        let mut c = chip();
-        c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
-        write_wide(&mut c, reg::TCA0_CMP1BUF, 300);
-        c.advance_to(c.now + PWM_CYCLE - 1).unwrap();
+    fn a_compare_takes_its_buf_at_bottom() {
+        let out = ramp::output(ramp::LEVELS);
+        let mut c = pwm_at(0);
+        set_output(&mut c, out).unwrap();
+        c.advance_to(c.next_bottom - 1).unwrap();
         assert_eq!(read_wide(&mut c, reg::TCA0_CMP1), 0);
         c.elapse().unwrap();
-        assert_eq!(read_wide(&mut c, reg::TCA0_CMP1), 300);
-        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0);
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP1), out.linear);
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), out.fet);
     }
 
     #[test]
     fn writing_cnt_puts_the_update_off_rather_than_forcing_it() {
-        let mut c = chip();
-        c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
-        write_wide(&mut c, reg::TCA0_CMP0BUF, 7);
-        c.advance_to(c.now + PWM_CYCLE - 1).unwrap();
+        let out = ramp::output(ramp::LEVELS);
+        let mut c = pwm_at(0);
+        set_output(&mut c, out).unwrap();
+        c.advance_to(c.next_bottom - 1).unwrap();
         write_wide(&mut c, reg::TCA0_CNT, 0);
         assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0, "not forced");
-        c.advance_to(c.now + PWM_CYCLE - 1).unwrap();
+        c.advance_to(c.now + c.tca_cycle() - 1).unwrap();
         assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0, "a full cycle away");
         c.elapse().unwrap();
-        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 7);
+        assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), out.fet);
     }
 
     #[test]
     fn a_stopped_timer_never_updates_its_compares() {
         let mut c = chip();
         write_wide(&mut c, reg::TCA0_CMP0BUF, 7);
-        c.advance_to(c.now + 2 * PWM_CYCLE).unwrap();
+        c.advance_to(c.now + 0x20000).unwrap();
         assert_eq!(read_wide(&mut c, reg::TCA0_CMP0), 0);
     }
 
@@ -5174,7 +5554,8 @@ mod tests {
         let mut s = failing(&STOP);
         s.chip.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
         s.chip.io[reg::TCA0_CTRLB] = regs::TCA_CMP0EN | regs::TCA_CMP1EN;
-        s.chip.wide = [0, 255, 200, 100];
+        s.chip.wide = [0, 254, 254, 200, 100];
+        s.chip.compare = [200, 100];
         assert!(held_low_until_reset(&mut s).unwrap_err().contains("LEDs"));
 
         let mut s = failing(&STOP);
@@ -6012,7 +6393,7 @@ mod tests {
     #[test]
     fn leds_need_the_timer_the_channel_and_the_pin() {
         let mut c = chip();
-        c.wide = [0, 255, 200, 100];
+        c.compare = [200, 100];
         assert_eq!(c.leds(), (0, 0));
         c.io[reg::TCA0_CTRLA] = regs::TCA_ENABLE;
         c.io[reg::TCA0_CTRLB] = regs::TCA_CMP0EN | regs::TCA_CMP1EN;

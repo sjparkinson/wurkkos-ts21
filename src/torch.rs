@@ -5,7 +5,7 @@
 
 use crate::button::{Clicks, Event};
 use crate::limits::Limits;
-use crate::ramp::PWM_TOP;
+use crate::ramp::output;
 use crate::selftest::{ClockCheck, Faults};
 use crate::sensors::Convert;
 use crate::temp::Calibration;
@@ -77,7 +77,7 @@ impl Torch {
     /// What the wait for a tick counted, or `selftest::NO_TICK` if the tick
     /// never came.
     pub fn clock(&mut self, clocks: u32) {
-        self.clock.result(clocks, PWM_TOP);
+        self.clock.result(clocks, output(self.level()).top);
     }
 
     /// Whether the clock check has failed, so the light's off for good.

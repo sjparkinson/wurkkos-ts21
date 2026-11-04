@@ -89,16 +89,21 @@ pub mod addr {
 
     pub const TCA0_CTRLA: usize = 0x0A00;
     pub const TCA0_CTRLB: usize = 0x0A01;
+    /// TCA0.CTRLECLR: writing a 1 clears that bit of CTRLE, here LUPD.
+    pub const TCA0_CTRLECLR: usize = 0x0A04;
+    /// TCA0.CTRLESET: writing a 1 sets that bit of CTRLE, here LUPD.
+    pub const TCA0_CTRLESET: usize = 0x0A05;
     /// 16-bit: write through `write16`, low byte first.
     pub const TCA0_CNT: usize = 0x0A20;
+    /// 16-bit, the live period, which PERBUF only reaches at BOTTOM. Resets to
+    /// 0xFFFF. Written once, in `hw::init`, with the timer stopped, and read
+    /// through `read16`, low byte first.
+    pub const TCA0_PER: usize = 0x0A26;
     /// 16-bit, the live compare value, which CMP0BUF only reaches at BOTTOM.
     /// Read through `read16`, low byte first.
     pub const TCA0_CMP0: usize = 0x0A28;
     /// 16-bit, as for CMP0.
     pub const TCA0_CMP1: usize = 0x0A2A;
-    /// 16-bit, the live period, which PERBUF only reaches at BOTTOM. Resets to
-    /// 0xFFFF.
-    pub const TCA0_PER: usize = 0x0A26;
     /// TCA0.INTFLAGS: OVF goes up at each overflow, cleared by writing 1.
     pub const TCA0_INTFLAGS: usize = 0x0A0B;
     /// 16-bit.
@@ -210,6 +215,12 @@ pub const TCA_CMP0EN: u8 = 0x10;
 pub const TCA_CMP1EN: u8 = 0x20;
 /// TCA0.CTRLB.WGMODE = SINGLESLOPE (single mode).
 pub const TCA_WGMODE_SINGLESLOPE: u8 = 0x03;
+/// TCA0.CTRLESET.LUPD and TCA0.CTRLECLR.LUPD (single mode): holds PERBUF and
+/// the CMPnBUFs back from the next UPDATE.
+pub const TCA_LUPD: u8 = 0x02;
+/// TCA0.CTRLESET.CMD = UPDATE (single mode): the same as an UPDATE condition,
+/// but now, and LUPD doesn't stop it (DS40002204A §20.3.3.5).
+pub const TCA_CMD_UPDATE: u8 = 0x01 << 2;
 /// TCA0.INTFLAGS.OVF (single mode).
 pub const TCA_OVF: u8 = 0x01;
 
