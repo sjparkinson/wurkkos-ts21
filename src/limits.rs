@@ -512,6 +512,20 @@ mod tests {
         ..Faults::NONE
     };
 
+    const WATCHDOG: Faults = Faults {
+        watchdog: true,
+        ..Faults::NONE
+    };
+
+    #[test]
+    fn a_watchdog_fault_refuses_the_fet_and_shows_nothing_from_off() {
+        let mut run = Run::with(WATCHDOG);
+        assert_eq!(run.secs(3), 0);
+        assert!(run.levels.iter().all(|&l| l == 0));
+        run.ui = LEVELS;
+        assert_eq!(run.secs(60), LINEAR_MAX);
+    }
+
     #[test]
     fn bad_flash_refuses_the_fet_and_shows_nothing_from_off() {
         let mut run = Run::with(FLASH);

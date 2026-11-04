@@ -386,6 +386,8 @@ mod tests {
             (regs::addr::TCA0_CMP1BUF, "TCA0", single, "CMP1BUF", 2),
             (regs::addr::VREF_CTRLA, "VREF", None, "CTRLA", 1),
             (regs::addr::VREF_CTRLB, "VREF", None, "CTRLB", 1),
+            (regs::addr::RSTCTRL_RSTFR, "RSTCTRL", None, "RSTFR", 1),
+            (regs::addr::RSTCTRL_SWRR, "RSTCTRL", None, "SWRR", 1),
             (regs::addr::WDT_CTRLA, "WDT", None, "CTRLA", 1),
             (regs::addr::WDT_STATUS, "WDT", None, "STATUS", 1),
             (regs::addr::ADC0_CALIB, "ADC0", None, "CALIB", 1),
@@ -469,6 +471,8 @@ mod tests {
         let adc_muxpos = atdf.register("ADC0", None, "MUXPOS");
         let adc_command = atdf.register("ADC0", None, "COMMAND");
         let adc_intflags = atdf.register("ADC0", None, "INTFLAGS");
+        let rstfr = atdf.register("RSTCTRL", None, "RSTFR");
+        let swrr = atdf.register("RSTCTRL", None, "SWRR");
         let wdt_ctrla = atdf.register("WDT", None, "CTRLA");
         let wdt_status = atdf.register("WDT", None, "STATUS");
         let crc_ctrla = atdf.register("CRCSCAN", None, "CTRLA");
@@ -502,6 +506,31 @@ mod tests {
                 regs::CLKCTRL_PDIV_4X,
                 mclkctrlb.value("PDIV", "4X"),
                 "CLKCTRL.MCLKCTRLB.PDIV=4X",
+            ),
+            (regs::RSTCTRL_PORF, rstfr.mask("PORF"), "RSTCTRL.RSTFR.PORF"),
+            (regs::RSTCTRL_BORF, rstfr.mask("BORF"), "RSTCTRL.RSTFR.BORF"),
+            (
+                regs::RSTCTRL_EXTRF,
+                rstfr.mask("EXTRF"),
+                "RSTCTRL.RSTFR.EXTRF",
+            ),
+            (regs::RSTCTRL_WDRF, rstfr.mask("WDRF"), "RSTCTRL.RSTFR.WDRF"),
+            (regs::RSTCTRL_SWRF, rstfr.mask("SWRF"), "RSTCTRL.RSTFR.SWRF"),
+            (
+                regs::RSTCTRL_UPDIRF,
+                rstfr.mask("UPDIRF"),
+                "RSTCTRL.RSTFR.UPDIRF",
+            ),
+            (regs::RSTCTRL_SWRE, swrr.mask("SWRE"), "RSTCTRL.SWRR.SWRE"),
+            (
+                regs::WDT_PERIOD_8CLK,
+                wdt_ctrla.value("PERIOD", "8CLK"),
+                "WDT.CTRLA.PERIOD=8CLK",
+            ),
+            (
+                regs::WDT_PERIOD_8KCLK,
+                wdt_ctrla.value("PERIOD", "8KCLK"),
+                "WDT.CTRLA.PERIOD=8KCLK",
             ),
             (
                 regs::WDT_PERIOD_32CLK,

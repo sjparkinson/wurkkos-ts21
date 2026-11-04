@@ -514,6 +514,7 @@ impl World {
         Faults {
             fuses: !fuses.ok(),
             flash: self.corrupt_flash,
+            watchdog: false,
         }
     }
 }
@@ -611,7 +612,7 @@ mod tests {
             world.faults(),
             Faults {
                 fuses: true,
-                flash: false
+                ..Faults::NONE
             }
         );
         assert_eq!(World::NORMAL.fuse(usize::from(map::FUSES) + 9), None);
