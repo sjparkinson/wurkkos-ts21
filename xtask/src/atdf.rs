@@ -378,13 +378,15 @@ mod tests {
             (regs::addr::PORTC_PIN0CTRL, "PORTC", None, "PIN0CTRL", 1),
             (regs::addr::TCA0_CTRLA, "TCA0", single, "CTRLA", 1),
             (regs::addr::TCA0_CTRLB, "TCA0", single, "CTRLB", 1),
+            (regs::addr::TCA0_CTRLECLR, "TCA0", single, "CTRLECLR", 1),
+            (regs::addr::TCA0_CTRLESET, "TCA0", single, "CTRLESET", 1),
             (regs::addr::TCA0_CNT, "TCA0", single, "CNT", 2),
+            (regs::addr::TCA0_PER, "TCA0", single, "PER", 2),
             (regs::addr::TCA0_CMP0, "TCA0", single, "CMP0", 2),
             (regs::addr::TCA0_CMP1, "TCA0", single, "CMP1", 2),
             (regs::addr::TCA0_PERBUF, "TCA0", single, "PERBUF", 2),
             (regs::addr::TCA0_CMP0BUF, "TCA0", single, "CMP0BUF", 2),
             (regs::addr::TCA0_CMP1BUF, "TCA0", single, "CMP1BUF", 2),
-            (regs::addr::TCA0_PER, "TCA0", single, "PER", 2),
             (regs::addr::TCA0_INTFLAGS, "TCA0", single, "INTFLAGS", 1),
             (regs::addr::TCB0_CTRLA, "TCB0", None, "CTRLA", 1),
             (regs::addr::TCB0_INTCTRL, "TCB0", None, "INTCTRL", 1),
@@ -577,6 +579,24 @@ mod tests {
                 regs::TCA_WGMODE_SINGLESLOPE,
                 ctrlb.value("WGMODE", "SINGLESLOPE"),
                 "TCA0.CTRLB.WGMODE=SINGLESLOPE",
+            ),
+            (
+                regs::TCA_LUPD,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLESET")
+                    .mask("LUPD"),
+                "TCA0.CTRLESET.LUPD",
+            ),
+            (
+                regs::TCA_LUPD,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLECLR")
+                    .mask("LUPD"),
+                "TCA0.CTRLECLR.LUPD",
+            ),
+            (
+                regs::TCA_CMD_UPDATE,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLESET")
+                    .value("CMD", "UPDATE"),
+                "TCA0.CTRLESET.CMD=UPDATE",
             ),
             (
                 regs::TCA_OVF,

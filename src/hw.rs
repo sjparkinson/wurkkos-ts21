@@ -231,11 +231,11 @@ pub fn init(watchdog: u8) -> bool {
     // 5 MHz clock. The BUF registers apply at the end of a cycle, so level
     // changes never glitch. A compare of 0 holds the pin low and one over
     // PER holds it high (section 20.3.3.4.3), so PER is one under the top
-    // duty. PER itself too, or the first cycle runs at its reset value of
-    // 0xFFFF until the buffer lands at BOTTOM (section 20.3.3.3): 13 ms of a
-    // tick, which is enough to fail the clock check at power-on.
+    // duty. PER goes in directly, with the timer stopped, or it'd run its
+    // first cycle at the reset value of 0xFFFF, 13 ms before the first
+    // UPDATE (section 20.3.3.3). That's enough to fail the clock check at
+    // power-on, and power-down could freeze it there.
     write16(reg::TCA0_PER, PWM_TOP - 1);
-    write16(reg::TCA0_PERBUF, PWM_TOP - 1);
     write16(reg::TCA0_CMP0BUF, 0);
     write16(reg::TCA0_CMP1BUF, 0);
     write(reg::TCA0_CTRLB, TCA_DRIVING);
@@ -294,7 +294,8 @@ const OVERDUE: u8 = 1 << 0;
 
 /// Whether both PWM channels are really at 0, not only their BUF registers,
 /// which reach CMPn at the next BOTTOM. The datasheet doesn't say whether
-/// `set_output` writing CNT counts as one, so this reads the real thing.
+/// `set_output` writing CNT counts as one, so this reads the real thing. PER
+/// lands on the same update, and the longest cycle is well inside a tick.
 fn output_settled() -> bool {
     read16(reg::TCA0_CMP0) == 0 && read16(reg::TCA0_CMP1) == 0
 }
@@ -617,17 +618,38 @@ pub fn switch_pressed() -> bool {
     read(reg::VPORTA_IN) & (1 << SWITCH) == 0
 }
 
+/// Writes one level's period and compares. LUPD holds them all back until
+/// they're all written, so they land on the same UPDATE (section 20.5.6).
+/// Without it a BOTTOM between two writes would run a compare against the
+/// wrong period for a cycle. Today's table only makes that a wrong duty, such
+/// as 255 of the FET out of 4095, but a compare over PER would hold the pin
+/// high, the FET fully on, and the lock doesn't depend on the table. If a
+/// BOTTOM comes while it's locked, the update waits for the next one, up to
+/// [`ts21::ramp::MAX_TOP`] clocks later. That the buffers stay valid over a
+/// locked BOTTOM is likely, not stated: section 20.5.2's ALUPD can't work
+/// otherwise. LUPD clears before CNT's written, in case that counts as BOTTOM.
+///
+/// Going off doesn't wait for BOTTOM. An UPDATE command lands the whole row at
+/// once, LUPD or no LUPD (section 20.3.3.5), which empties the buffers, so
+/// `prepare_sleep` can power down on this pass, and that takes the pins off
+/// TCA0 and leaves them low. Every level but off still waits for BOTTOM, so a
+/// cycle's never cut short with the light on. The compares get a direct write
+/// too, for a stopped TCA0, which never reaches BOTTOM and which the datasheet
+/// doesn't promise takes a command either. That write is always 0, so it can't
+/// go over PER, whichever row PER's still in.
 pub fn set_output(output: Output) {
-    write16(reg::TCA0_CMP1BUF, u16::from(output.linear));
-    write16(reg::TCA0_CMP0BUF, u16::from(output.fet));
-    if output == Output::OFF {
+    let off = output == Output::OFF;
+    write(reg::TCA0_CTRLESET, regs::TCA_LUPD);
+    write16(reg::TCA0_PERBUF, output.top - 1);
+    write16(reg::TCA0_CMP1BUF, output.linear);
+    write16(reg::TCA0_CMP0BUF, output.fet);
+    if off {
+        write(reg::TCA0_CTRLESET, regs::TCA_CMD_UPDATE);
+    }
+    write(reg::TCA0_CTRLECLR, regs::TCA_LUPD);
+    if off {
         // Restart the cycle so the next turn-on is consistent.
         write16(reg::TCA0_CNT, 0);
-        // The compares too, now, not at the next BOTTOM, which a stopped TCA0
-        // would never reach. That lets `prepare_sleep` power down on this
-        // pass, and it's that which takes the pins off TCA0 and leaves them
-        // low, whatever state the timer's in. The BUF writes above come
-        // first, since one still pending would land on top of these.
         write16(reg::TCA0_CMP0, 0);
         write16(reg::TCA0_CMP1, 0);
     }

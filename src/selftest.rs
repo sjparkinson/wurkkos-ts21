@@ -22,7 +22,7 @@
 //! off and leaves it off.
 
 use crate::TICKS_PER_SECOND;
-use crate::ramp::PWM_TOP;
+use crate::ramp::{MAX_TOP, PWM_TOP};
 use crate::regs;
 
 /// The fuse bytes the firmware checks, as read from data space.
@@ -179,7 +179,7 @@ const _: () = {
     assert!(NOMINAL_CLOCKS == 78_125);
     assert!(CLOCKS_MIN < LEAST_CLOCKS - PASS_CLOCKS);
     assert!(CLOCKS_MIN - PWM_TOP as u32 > NOMINAL_CLOCKS / 2);
-    assert!(CLOCKS_MAX > MOST_CLOCKS + PWM_TOP as u32);
+    assert!(CLOCKS_MAX > MOST_CLOCKS + MAX_TOP as u32);
     assert!(TICKS_PER_SECOND <= u8::MAX as u16);
 };
 
