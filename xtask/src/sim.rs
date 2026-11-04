@@ -83,9 +83,10 @@
 //!
 //! It can also break the chip for src/rt.rs's register and RAM tests to
 //! find: a stuck bit or two shorted bits in a CPU register, forced before
-//! every instruction, or a byte of SRAM with a stuck bit, two shorted bits, or an address that
-//! reaches another byte (`world::RamFault`). The stack checks wait until
-//! those tests are done, since they point SP all over SRAM.
+//! every instruction, or a byte of SRAM with a stuck bit, two shorted bits,
+//! an address that reaches another byte, or a store that disturbs another
+//! byte (`world::RamFault`). The stack checks wait until those tests are
+//! done, since they point SP all over SRAM.
 //!
 //! With that in place it runs six things:
 //!
@@ -96,8 +97,8 @@
 //!    src/rt.rs run zero times.
 //! 3. Power-on with every stuck register bit and a spread of RAM faults
 //!    (`startup_faults`), then every short between two bits of a register
-//!    (`register_shorts`), checking each one stops in `__selftest_failed`
-//!    with the light dark.
+//!    (`register_shorts`) and coupling between bytes (`ram_coupling`),
+//!    checking each one stops in `__selftest_failed` with the light dark.
 //! 4. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
 //!    with the cell, temperature, broken ADC, fuses, corrupt flash or
 //!    broken RAM or register the example scripts.
@@ -299,12 +300,17 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         .map_err(|e| format!("startup self-tests: {e}"))?;
 
     let marks = Marks {
+        march_down_check: symbol("__march_down_check")? / 2,
+        march_last: symbol("__march_last")? / 2,
+        ram_tested: ram_tested / 2,
         register_shorts: symbol("__register_shorts")? / 2,
         register_shorts_end: symbol("__register_shorts_end")? / 2,
         registers_tested: symbol("__registers_tested")? / 2,
     };
     register_shorts(&power_on, &power_on_image, &signed, &marks)
         .map_err(|e| format!("register shorts: {e}"))?;
+    ram_coupling(&power_on, &power_on_image, &signed, &marks)
+        .map_err(|e| format!("RAM coupling: {e}"))?;
 
     let mut report = Report {
         stack: 0,
@@ -603,9 +609,8 @@ fn stays_dark(sim: &mut Sim) -> Result<(), String> {
 /// - stuck bits in the first, middle and last bytes of SRAM;
 /// - addresses that reach another byte, either way round, next door and
 ///   far apart;
-/// - every pair of bits in a byte shorted together, which only shows up
-///   with the backgrounds after 0x00, since 0x00 and 0xFF write both bits
-///   the same.
+/// - every pair of bits in a byte shorted together, which needs backgrounds
+///   that write the two differently: 0x00 and 0xFF never would.
 ///
 /// It also checks the right test found each one: a register fault from
 /// before `registers_tested`, a RAM fault from between there and
@@ -771,8 +776,103 @@ fn register_shorts(
     }
 }
 
+/// Powers up with coupling faults between two bytes:
+///
+/// - Every one between two neighbours, either way round: any bit going
+///   either way, flipping or forcing any bit of the other. All of them have
+///   to stop in the RAM test.
+/// - A bit 7 going high in the upper byte, flipping any bit of the lower,
+///   next door and from one end of SRAM to the other. The ⇓ pass has to be
+///   what finds it, and with that check patched out it has to reach `main`:
+///   the ascending passes alone don't see it.
+/// - The other way round, with the culprit in the lower byte, where a pass
+///   going up finds it first, which is why the march needs both directions.
+fn ram_coupling(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    power_on_image: &impl Fn(Vec<u8>, &World) -> Result<(Sim, Boot), String>,
+    image: &[u8],
+    marks: &Marks,
+) -> Result<(), String> {
+    let found = |fault: RamFault, found_in: &Range<u32>| -> Result<(), String> {
+        let what = fault.to_string();
+        let world = World {
+            ram: Some(fault),
+            ..World::NORMAL
+        };
+        let (mut sim, boot) = power_on(&world).map_err(|e| format!("{what}: {e}"))?;
+        let Boot::Failed { from } = boot else {
+            return Err(format!("{what}: not found, and the firmware reached main"));
+        };
+        if !found_in.contains(&from) {
+            return Err(format!(
+                "{what}: found by the wrong test, at {:#06x}",
+                from * 2
+            ));
+        }
+        stays_dark(&mut sim).map_err(|e| format!("{what}: {e}"))
+    };
+    let couple = |from, bit, rising, to, victim, force| RamFault::Coupling {
+        from,
+        bit,
+        rising,
+        to,
+        victim,
+        force,
+    };
+
+    let low = SRAM.start + (SRAM.end - SRAM.start) / 2;
+    let high = low + 1;
+    let ram_test = marks.registers_tested..marks.ram_tested;
+    for (from, to) in [(high, low), (low, high)] {
+        for (bit, victim) in (0..8).flat_map(|bit| (0..8).map(move |victim| (bit, victim))) {
+            for rising in [false, true] {
+                for force in [None, Some(false), Some(true)] {
+                    found(couple(from, bit, rising, to, victim, force), &ram_test)?;
+                }
+            }
+        }
+    }
+
+    let mut without_down = image.to_vec();
+    // `cp`, `breq`, then or_fail's `rjmp`.
+    let at = marks.march_down_check as usize * 2 + 4;
+    if word(image, at).is_none_or(|w| w >> 12 != 0xC) {
+        return Err("expected an rjmp two words after __march_down_check".into());
+    }
+    without_down[at..at + 2].fill(0); // nop
+
+    let up = marks.registers_tested..marks.march_down_check;
+    let down = marks.march_down_check..marks.march_last;
+    let last = marks.march_last..marks.ram_tested;
+    for (below, above) in [(low, high), (SRAM.start, SRAM.end - 1)] {
+        for victim in 0..8 {
+            let fault = couple(above, 7, true, below, victim, None);
+            found(fault, &down)?;
+            let world = World {
+                ram: Some(fault),
+                ..World::NORMAL
+            };
+            if let (_, Boot::Failed { from }) = power_on_image(without_down.clone(), &world)? {
+                return Err(format!(
+                    "{fault}: found at {:#06x} with the ⇓ pass's check gone, \
+                     so that isn't the only thing that finds it",
+                    from * 2
+                ));
+            }
+            found(couple(below, 7, false, above, victim, None), &up)?;
+            found(couple(below, 7, true, above, victim, None), &last)?;
+        }
+    }
+    Ok(())
+}
+
 /// Word addresses of the labels in src/rt.rs's self-tests.
 struct Marks {
+    /// The compare in the March test's ⇓ pass, and the last pass after it.
+    march_down_check: u32,
+    march_last: u32,
+    /// Where the RAM test ends.
+    ram_tested: u32,
     /// Where the 0x33 and 0x0F register patterns start, and the end of them.
     register_shorts: u32,
     register_shorts_end: u32,
@@ -2208,7 +2308,14 @@ impl Bus for Chip {
         self.ccp_hold = false;
         if SRAM.contains(&addr) {
             let cell = self.world.ram.map_or(addr, |fault| fault.cell(addr));
+            let before = self.sram[usize::from(cell - SRAM.start)];
             self.sram[usize::from(cell - SRAM.start)] = value;
+            if let Some(fault) = self.world.ram
+                && let Some(victim) = fault.disturbs(cell, before, value)
+            {
+                let byte = &mut self.sram[usize::from(victim - SRAM.start)];
+                *byte = fault.disturbed(*byte);
+            }
             return Ok(());
         }
         match a {
@@ -3206,6 +3313,24 @@ mod tests {
         });
         c.write(0x3800, 0x55).unwrap();
         assert_eq!(c.read(0x3800), Ok(0x54));
+
+        c.world.ram = Some(RamFault::Coupling {
+            from: 0x3900,
+            bit: 7,
+            rising: true,
+            to: 0x3800,
+            victim: 0,
+            force: None,
+        });
+        c.write(0x3800, 0x00).unwrap();
+        c.write(0x3900, 0x00).unwrap();
+        assert_eq!(c.read(0x3800), Ok(0x00), "no edge");
+        c.write(0x3900, 0x80).unwrap();
+        assert_eq!(c.read(0x3800), Ok(0x01), "the rising edge");
+        c.write(0x3900, 0xFF).unwrap();
+        assert_eq!(c.read(0x3800), Ok(0x01), "no edge");
+        c.read(0x3900).unwrap();
+        assert_eq!(c.read(0x3800), Ok(0x01), "a read");
     }
 
     #[test]

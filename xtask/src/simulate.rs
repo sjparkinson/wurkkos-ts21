@@ -18,8 +18,9 @@
 //! for the MCU (25 °C to start), and `adc:0` for a broken ADC whose every
 //! conversion reads that number. So `cell:3.05V 1C wait:6s` is a low cell.
 //! `fuse:OSCCFG=0x01` sets a fuse byte and `flash:corrupt` breaks a byte of
-//! flash. `ram:stuck:0x3800.3=1`, `ram:alias:0x3900=0x3800` and
-//! `ram:bridge:0x3800.0.1` break a byte of SRAM, and `reg:r24.0=1` and
+//! flash. `ram:stuck:0x3800.3=1`, `ram:alias:0x3900=0x3800`,
+//! `ram:bridge:0x3800.0.1` and `ram:couple:0x3900.7=1:0x3800.0` break a byte
+//! of SRAM, and `reg:r24.0=1` and
 //! `reg:short:r24.0.2=0` a CPU register, `SREG`, `SPL` and `SPH` included
 //! (`world::RamFault` and `RegisterFault` say how). The firmware
 //! only checks any of those at power-on, so they have to come before
@@ -764,6 +765,7 @@ mod tests {
             "ram:stuck:0x3800.3=1 wait:3s 1C wait:1s",
             "ram:alias:0x3900=0x3800 1C wait:2s",
             "ram:bridge:0x3C00.0.1 1C wait:2s",
+            "ram:couple:0x3900.7=1:0x3800.0 1C wait:2s",
             "reg:r24.0=1 1C 2H wait:1s",
             "reg:short:r24.0.2=0 1C wait:1s",
         ] {
