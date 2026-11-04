@@ -62,7 +62,7 @@ Never write fuses. Changing `SYSCFG0` can disable UPDI, and then the light needs
 
 ## Bumping the nightly
 
-AVR is a tier 3 target. Pick a nightly, change `rust-toolchain.toml`, run every check above, and compare `cargo xtask hex` before and after. Then see whether the workarounds in [docs/toolchain.md](docs/toolchain.md) are still needed.
+AVR is a tier 3 target. Dependabot opens a PR with the latest nightly every week, and CI runs every check above on it. To bump by hand, pick a nightly, change `rust-toolchain.toml` and run those checks. Either way, compare `cargo xtask hex` before and after, then see whether the workarounds in [docs/toolchain.md](docs/toolchain.md) are still needed.
 
 ## Commits
 
