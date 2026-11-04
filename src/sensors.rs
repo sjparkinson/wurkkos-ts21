@@ -14,9 +14,9 @@
 //! tick 10  that result is the temperature
 //! ```
 //!
-//! The ADC's only set up when the channel changes. With the light off it
-//! reads nothing but the voltage, so after the first round it skips the
-//! setup and goes straight to converting.
+//! The ADC's only set up when the channel changes. While a click's being
+//! counted with the light off it reads nothing but the voltage, so after the
+//! first round it skips the setup and goes straight to converting.
 //!
 //! A conversion takes a fraction of a millisecond, so it's always done by
 //! the next tick, and nothing ever waits on the ADC.
@@ -32,7 +32,8 @@
 //! insurance.
 //!
 //! The temperature is only read when asked for, which the caller does while
-//! the light's on. The voltage is read all the time.
+//! the light's on. The voltage is read until [`Schedule::rest`], since the
+//! ADC can't run in power-down, and starts again from the top after it.
 
 /// What the ADC is measuring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,9 +50,9 @@ pub enum Channel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Convert {
     pub channel: Channel,
-    /// Set the ADC (and the reference) up for `channel` first. Only the
-    /// first conversion of a turn on a different channel from the last
-    /// turn's needs it.
+    /// Set the ADC (and the reference) up for `channel` first, turning them
+    /// on if they're off. Only the first conversion of a turn on a different
+    /// channel from the last turn's needs it, or the first after a rest.
     pub setup: bool,
 }
 
@@ -78,8 +79,8 @@ pub struct Schedule {
     temperature: bool,
     /// The channel the ADC was last set up for, `None` before the first.
     /// Its registers keep their values until a reset, which starts this
-    /// afresh too. Anything that turns the ADC or its reference off (sleep,
-    /// one day) has to put this back to `None`.
+    /// afresh too. [`Schedule::rest`] puts it back to `None`, since the
+    /// firmware turns the reference off to power down.
     set_up: Option<Channel>,
 }
 
@@ -90,6 +91,13 @@ impl Schedule {
             temperature: false,
             set_up: None,
         }
+    }
+
+    /// Back to where it started, for after the firmware's powered down. The
+    /// next tick sets the ADC up again, and throws that conversion away as
+    /// usual, which gives the reference a tick to start.
+    pub fn rest(&mut self) {
+        *self = Self::new();
     }
 
     /// One tick. `result` is the ADC's result if it has one ready, and
@@ -260,6 +268,17 @@ mod tests {
         // and that's all.
         let off = run(&mut schedule, 64, Some(1), false);
         assert_eq!(setups(&off), [Channel::Voltage]);
+    }
+
+    #[test]
+    fn a_rest_starts_the_round_again_and_sets_the_adc_up() {
+        let mut schedule = Schedule::new();
+        run(&mut schedule, 21, Some(1), true);
+        schedule.rest();
+        let ticks = run(&mut schedule, 3, Some(7), false);
+        assert_eq!(ticks[0], (None, convert(Channel::Voltage, true)));
+        assert_eq!(ticks[1], (None, convert(Channel::Voltage, false)));
+        assert_eq!(ticks[2], (Some(Reading::Voltage(7)), None));
     }
 
     #[test]

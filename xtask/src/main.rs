@@ -145,6 +145,15 @@ fn hex() -> Result<(), String> {
             "instructions per 64 Hz tick"
         )
     );
+    println!(
+        "{}",
+        row(
+            "off",
+            sim.off_instructions,
+            Some(sim.loop_budget),
+            "instructions per 64 Hz tick"
+        )
+    );
     Ok(())
 }
 

@@ -528,6 +528,11 @@ mod tests {
                 pinctrl.value("ISC", "BOTHEDGES"),
                 "PORT.PINnCTRL.ISC=BOTHEDGES",
             ),
+            (
+                regs::PORT_ISC_INPUT_DISABLE,
+                pinctrl.value("ISC", "INPUT_DISABLE"),
+                "PORT.PINnCTRL.ISC=INPUT_DISABLE",
+            ),
             (regs::TCA_ENABLE, ctrla.mask("ENABLE"), "TCA0.CTRLA.ENABLE"),
             (
                 regs::TCA_CLKSEL_DIV1,

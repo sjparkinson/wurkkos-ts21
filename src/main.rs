@@ -43,7 +43,7 @@ extern "C" fn main() -> ! {
     let mut feeder = Feeder::new();
 
     loop {
-        hw::wait_for_tick();
+        hw::wait_for_tick(torch.resting());
         torch.tick(hw::switch_pressed(), hw::adc_result());
         if let Some(convert) = torch.convert() {
             hw::adc_start(convert);

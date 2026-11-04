@@ -36,10 +36,23 @@ impl Torch {
         if let Some(event) = event {
             self.ui.handle(event);
         }
-        if self.limits.tick(self.ui.output_level(), adc).off {
+        if !self.resting() && self.limits.tick(self.ui.output_level(), adc).off {
             self.ui.off();
         }
+        // Checked again, so a pass that turns the light off has already
+        // rested if the firmware powers down straight after it.
+        if self.resting() {
+            self.limits.rest();
+        }
         event
+    }
+
+    /// Whether there's nothing to do until the switch moves: the light's
+    /// off and no click is being counted. The firmware powers down between
+    /// these ticks, and a press ends it on the tick that sees the press, in
+    /// time to read the cell before a click can turn the light on.
+    pub fn resting(&self) -> bool {
+        self.clicks.idle() && self.ui.output_level() == 0 && self.limits.level() == 0
     }
 
     /// The level the LEDs should be at right now, `0` meaning off.
@@ -89,7 +102,8 @@ mod tests {
     use super::*;
     use crate::button::RELEASE_TICKS;
     use crate::ramp::{LEVELS, LINEAR_MAX, Output, output};
-    use crate::testing::{Adc, CALIBRATION};
+    use crate::sensors::Channel;
+    use crate::testing::{Adc, CALIBRATION, voltage_reading};
     use crate::ui::LEVEL;
 
     /// A torch and the ADC it reads.
@@ -227,11 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_adc_stays_dark_at_power_on_and_still_works() {
+    fn a_dead_adc_stays_dark_from_off_and_still_works() {
         let mut rig = Rig::new();
         (rig.adc.voltage, rig.adc.temperature) = (0, 0);
-        rig.run(false, 64);
+        // Resting reads nothing, so hold the switch to read the garbage.
+        rig.run(true, 3 * 64);
         assert_eq!(rig.level(), 0);
+        rig.run(false, RELEASE_TICKS + 1);
         // At level 50 the floor's above it, so on and off work as usual.
         rig.click();
         rig.run(false, 60 * 64);
@@ -253,6 +269,140 @@ mod tests {
         assert_eq!(rig.level(), LEVEL);
         assert_eq!(output(rig.level()).fet, 0);
         rig.click();
+        assert_eq!(rig.level(), 0);
+    }
+
+    #[test]
+    fn rests_once_off_and_idle() {
+        let mut rig = Rig::new();
+        assert!(rig.torch.resting(), "from power-on");
+        rig.run(false, 64);
+        assert!(rig.torch.resting());
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        assert!(!rig.torch.resting(), "on");
+        rig.click();
+        assert_eq!(rig.level(), 0);
+        assert!(rig.torch.resting(), "back off");
+    }
+
+    #[test]
+    fn never_rests_mid_click() {
+        let mut rig = Rig::new();
+        rig.run(true, 4);
+        assert!(!rig.torch.resting(), "pressed");
+        for _ in 0..RELEASE_TICKS {
+            rig.tick(false);
+            assert!(!rig.torch.resting(), "a click waiting to count");
+        }
+    }
+
+    #[test]
+    fn the_pass_that_turns_it_off_has_already_rested() {
+        // At every point in the ADC's round, some of which start a
+        // conversion that power-down would cut off.
+        for phase in 0..u16::from(crate::sensors::CYCLE_TICKS) {
+            let mut rig = Rig::new();
+            rig.click();
+            rig.run(false, phase);
+            rig.run(true, 4);
+            rig.run(false, RELEASE_TICKS);
+            assert_eq!(rig.level(), LEVEL, "{phase}");
+            rig.tick(false);
+            assert_eq!(rig.level(), 0, "{phase}");
+            assert!(rig.torch.resting(), "{phase}");
+            assert_eq!(rig.torch.convert(), None, "{phase}");
+            // So a press on the very next tick sets the ADC up again.
+            rig.tick(true);
+            assert!(rig.torch.convert().is_some_and(|c| c.setup), "{phase}");
+        }
+    }
+
+    #[test]
+    fn clicks_that_do_nothing_rest_on_the_pass_they_count() {
+        // The one way in that skips `Limits::tick`: the clicks finish with
+        // the light off, so the torch is resting before it gets there. Each
+        // press length lands that pass on a different point of the ADC's
+        // round, some of which leave a conversion asked for.
+        for press in 1..=u16::from(crate::sensors::CYCLE_TICKS) {
+            let mut rig = Rig::new();
+            rig.run(true, press);
+            rig.run(false, 1);
+            rig.run(true, press);
+            rig.run(false, RELEASE_TICKS);
+            assert!(!rig.torch.resting(), "{press}");
+            assert_eq!(rig.tick(false), Some(Event::Click(2)), "{press}");
+            assert!(rig.torch.resting(), "{press}");
+            assert_eq!(rig.torch.convert(), None, "{press}");
+            rig.tick(true);
+            assert!(rig.torch.convert().is_some_and(|c| c.setup), "{press}");
+        }
+    }
+
+    #[test]
+    fn a_resting_torch_starts_no_conversions() {
+        let mut rig = Rig::new();
+        for _ in 0..64 {
+            rig.tick(false);
+            assert_eq!(rig.torch.convert(), None);
+        }
+    }
+
+    #[test]
+    fn a_press_ends_the_rest_and_reads_the_cell_before_the_light_comes_on() {
+        let mut rig = Rig::new();
+        rig.run(false, 64);
+        rig.tick(true);
+        let setup = Convert {
+            channel: Channel::Voltage,
+            setup: true,
+        };
+        assert_eq!(rig.torch.convert(), Some(setup), "on the tick it's seen");
+        // The conversion after the one that's thrown away, a tick later, is
+        // the reading, long before the click can count.
+        rig.tick(true);
+        let reading = Convert {
+            channel: Channel::Voltage,
+            setup: false,
+        };
+        assert_eq!(rig.torch.convert(), Some(reading));
+        assert_eq!(rig.level(), 0);
+    }
+
+    #[test]
+    fn clicking_off_and_on_doesnt_buy_a_sagging_cell_time() {
+        let mut rig = Rig::new();
+        // 2.90 V under load, off a second, and it reads 3.20 V at rest.
+        rig.adc.voltage = 2331;
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        rig.run(false, 32);
+        rig.click();
+        rig.adc.voltage = voltage_reading(320);
+        rig.run(false, 64);
+        // Still unloaded for the click, then it sags as the light comes on.
+        // A filter that started again from 3.20 V would take about 3.4 s.
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        rig.adc.voltage = 2331;
+        rig.run(false, 2 * 64);
+        assert_eq!(rig.level(), 0);
+    }
+
+    #[test]
+    fn a_stale_voltage_never_outlives_a_long_rest() {
+        let mut rig = Rig::new();
+        rig.click();
+        rig.run(false, 5 * 64);
+        rig.click();
+        rig.run(false, crate::battery::FORGET_TICKS);
+        assert!(rig.torch.resting());
+        // It runs flat in the drawer. Filtering down from 3.8 V would take
+        // over four seconds, so this only passes on a fresh reading.
+        rig.adc.voltage = 2331; // 2.90 V
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        rig.run(false, 2 * 64);
         assert_eq!(rig.level(), 0);
     }
 

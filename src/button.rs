@@ -40,6 +40,11 @@ impl Clicks {
         }
     }
 
+    /// Whether the switch is up with no clicks waiting to count.
+    pub fn idle(&self) -> bool {
+        !self.pressed && self.count == 0
+    }
+
     /// Feeds in one sample, `true` meaning the switch is down.
     pub fn tick(&mut self, pressed: bool) -> Option<Event> {
         self.ticks = self.ticks.saturating_add(1);
@@ -98,6 +103,33 @@ mod tests {
             }
         }
         (events, n)
+    }
+
+    #[test]
+    fn idle_until_a_press_and_again_once_the_clicks_count() {
+        let mut clicks = Clicks::new();
+        assert!(clicks.idle());
+        clicks.tick(true);
+        assert!(!clicks.idle(), "pressed");
+        clicks.tick(false);
+        assert!(!clicks.idle(), "a click waiting to count");
+        for _ in 0..RELEASE_TICKS - 1 {
+            assert_eq!(clicks.tick(false), None);
+            assert!(!clicks.idle());
+        }
+        assert_eq!(clicks.tick(false), Some(Event::Click(1)));
+        assert!(clicks.idle());
+    }
+
+    #[test]
+    fn idle_once_a_hold_ends() {
+        let mut clicks = Clicks::new();
+        for _ in 0..=HOLD_TICKS {
+            clicks.tick(true);
+            assert!(!clicks.idle());
+        }
+        assert_eq!(clicks.tick(false), Some(Event::Release { clicks: 0 }));
+        assert!(clicks.idle());
     }
 
     #[test]

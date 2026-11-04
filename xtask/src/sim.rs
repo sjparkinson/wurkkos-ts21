@@ -195,7 +195,7 @@ pub const ISC_INTDISABLE: u8 = 0x0;
 pub const ISC_BOTHEDGES: u8 = regs::PORT_ISC_BOTHEDGES;
 pub const ISC_RISING: u8 = 0x2;
 pub const ISC_FALLING: u8 = 0x3;
-pub const ISC_INPUT_DISABLE: u8 = 0x4;
+pub const ISC_INPUT_DISABLE: u8 = regs::PORT_ISC_INPUT_DISABLE;
 pub const ISC_LEVEL: u8 = 0x5;
 /// Instructions from a write to a CMPnBUF to the BOTTOM that applies it: a
 /// dual-slope cycle is two PERs of CPU clocks, and no instruction is quicker
@@ -223,7 +223,15 @@ pub struct Report {
     pub loop_instructions: u64,
     /// What that's measured against.
     pub loop_budget: u64,
+    /// The most instructions one pass took that ended in power-down, which
+    /// is what the chip stays awake for, 64 times a second, when it's off.
+    pub off_instructions: u64,
 }
+
+/// Ticks the library can be resting before the firmware has to be powering
+/// down: the pass that turns the light off stays in idle while the compares
+/// settle.
+const REST_GRACE_TICKS: u32 = 1;
 
 pub fn check(elf: &Elf) -> Result<Report, String> {
     let symbol = |name| {
@@ -274,6 +282,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         stack: 0,
         loop_instructions: 0,
         loop_budget: TICK_BUDGET,
+        off_instructions: 0,
     };
     for example in spec::examples(spec::UI_MD)? {
         let samples = simulate::samples(&example.actions);
@@ -284,6 +293,9 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     }
     against_the_library(sim, &mut report)
         .map_err(|e| format!("random switching, against the library: {e}"))?;
+    if report.off_instructions == 0 {
+        return Err("never powered down".into());
+    }
     Ok(report)
 }
 
@@ -687,8 +699,10 @@ fn in_step(
         return Err("hw::init left PB5 without its pull-up, so the button LED is out".into());
     }
     let mut rig = Rig::new(&power_on);
+    let mut resting = 0;
     for (tick, sample) in samples.enumerate() {
         sim.chip.world = sample.world;
+        let power_downs = sim.chip.power_downs;
         let took = sim
             .tick(sample.pressed)
             .map_err(|e| format!("tick {tick}: {e}"))?;
@@ -699,7 +713,18 @@ fn in_step(
             ));
         }
         report.loop_instructions = report.loop_instructions.max(took);
+        let powered_down = sim.chip.power_downs > power_downs;
+        if powered_down {
+            report.off_instructions = report.off_instructions.max(took);
+        }
         rig.tick(sample.pressed, &sample.world);
+        resting = if rig.torch.resting() { resting + 1 } else { 0 };
+        if resting > REST_GRACE_TICKS && !powered_down {
+            return Err(format!(
+                "tick {tick}: the library's been resting for {resting} ticks, \
+                 but the firmware didn't power down"
+            ));
+        }
         let output = ramp::output(rig.level());
         let want = (output.linear.into(), output.fet.into());
         let leds = sim.chip.leds();
