@@ -20,12 +20,13 @@
 //! Between instructions, then, an interrupt waits while SREG.I is clear,
 //! while LVL0EX is set, for the instruction after `sei`, for four
 //! instructions after a write to SPL or until the next I/O write if that's
-//! sooner (§8.5.4), and for as long as the bus says (`holds_interrupts`,
-//! which is the CCP window, §8.5.7). Each of those leaves the request
-//! pending. The datasheet's "up to four" for SPL doesn't say what makes it
-//! fewer, so this holds for all four. `out SREG` setting I gets no hold,
-//! since the instruction set manual only promises one for `sei`. None of
-//! this has been seen on a real chip.
+//! sooner (§8.5.4, §8.7.2), and for as long as the bus says
+//! (`holds_interrupts`, which is the CCP window, §8.5.7). Each of those
+//! leaves the request pending. `out SREG` setting I gets no hold, since the
+//! instruction set manual only promises one for `sei`, though §8.7.3 gives
+//! that write a one-cycle wait state and doesn't say whether it delays an
+//! interrupt, so that's likely, not known. None of this has been seen on a
+//! real chip.
 //!
 //! `sleep` is an error with interrupts off or inside a handler, since
 //! nothing could wake the CPU, and otherwise asks the bus whether it would

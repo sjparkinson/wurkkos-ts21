@@ -977,7 +977,10 @@ struct Chip {
     /// The last instruction a protected register still takes a write on.
     unlocked_until: Option<u64>,
     /// Whether the CCP period's still holding interrupts off. The key's first
-    /// store or `sleep` ends it, whatever the store was (§8.5.7.1).
+    /// store to the bus or `sleep` ends it, whatever the store was
+    /// (§8.5.7.1). `take_protected_write` doesn't look at this, so a late
+    /// protected write within the four still goes through here; layout.rs
+    /// refuses anything between the key and its write.
     ccp_hold: bool,
     pressed: bool,
     pit_busy: u8,
@@ -1920,11 +1923,12 @@ impl Bus for Chip {
         (requests != 0).then(|| requests.trailing_zeros() as u8)
     }
 
-    /// Interrupts are ignored for the CCP period, and left pending (§8.5.7.2,
-    /// which reads as covering both keys). The same four instructions as
-    /// `take_protected_write`, unless a store or `sleep` ended it sooner. The
-    /// datasheet also ends it on a load from flash, which isn't modelled:
-    /// nothing runs one between the key and its write.
+    /// Interrupts are ignored for the four instructions after either key,
+    /// and left pending (§8.7.1, §8.5.7.2). That the store or `sleep` which
+    /// ends the protected change (§8.5.7.1) ends this too is likely, not
+    /// stated. So is a load from flash ending it, which isn't modelled:
+    /// nothing runs one between the key and its write. Nor is a write to SPL,
+    /// SPH or SREG, which the CPU keeps from the bus.
     fn holds_interrupts(&self) -> bool {
         self.ccp_hold && self.unlocked_until.is_some_and(|until| self.now <= until)
     }
