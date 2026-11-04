@@ -34,6 +34,7 @@ extern "C" fn main() -> ! {
     let faults = Faults {
         flash: !hw::flash_ok(),
         fuses: !hw::fuses().ok(),
+        watchdog: false,
     };
 
     hw::init();

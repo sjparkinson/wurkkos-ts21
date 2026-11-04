@@ -32,6 +32,11 @@ pub mod addr {
     pub const VPORTA_IN: usize = 0x0002;
     pub const VPORTB_DIR: usize = 0x0004;
 
+    /// RSTCTRL.RSTFR: what caused the last reset. Sticky, cleared by writing 1.
+    pub const RSTCTRL_RSTFR: usize = 0x0040;
+    /// RSTCTRL.SWRR: SWRE. Behind configuration change protection.
+    pub const RSTCTRL_SWRR: usize = 0x0041;
+
     pub const CLKCTRL_MCLKCTRLB: usize = 0x0061;
 
     /// CRCSCAN.CTRLA: ENABLE starts a scan.
@@ -135,11 +140,33 @@ pub const CPU_CCP_IOREG: u8 = 0xD8;
 /// leaves it out of its patterns, so nothing can fire mid-test.
 pub const CPU_SREG_I: u8 = 0x80;
 
+/// RSTCTRL.RSTFR.PORF, a power-on reset.
+pub const RSTCTRL_PORF: u8 = 0x01;
+/// RSTCTRL.RSTFR.BORF, a brown-out reset.
+pub const RSTCTRL_BORF: u8 = 0x02;
+/// RSTCTRL.RSTFR.EXTRF, the reset pin, which is UPDI on this light.
+pub const RSTCTRL_EXTRF: u8 = 0x04;
+/// RSTCTRL.RSTFR.WDRF, the watchdog.
+pub const RSTCTRL_WDRF: u8 = 0x08;
+/// RSTCTRL.RSTFR.SWRF, a software reset.
+pub const RSTCTRL_SWRF: u8 = 0x10;
+/// RSTCTRL.RSTFR.UPDIRF, a UPDI reset, which is what a flash leaves. It
+/// doesn't set PORF.
+pub const RSTCTRL_UPDIRF: u8 = 0x20;
+/// RSTCTRL.SWRR.SWRE: writing it resets the chip.
+pub const RSTCTRL_SWRE: u8 = 0x01;
+
 /// CLKCTRL.MCLKCTRLB.PEN, prescaler enable.
 pub const CLKCTRL_PEN: u8 = 0x01;
 /// CLKCTRL.MCLKCTRLB.PDIV = 4X.
 pub const CLKCTRL_PDIV_4X: u8 = 0x01 << 1;
 
+/// WDT.CTRLA.PERIOD = 8CLK: 8 cycles of the 1.024 kHz clock, the shortest
+/// timeout, which is all the proof's first step needs.
+pub const WDT_PERIOD_8CLK: u8 = 0x01;
+/// WDT.CTRLA.PERIOD = 8KCLK: 8,192 cycles, the longest timeout, for a chip
+/// whose watchdog failed its proof.
+pub const WDT_PERIOD_8KCLK: u8 = 0x0B;
 /// WDT.CTRLA.PERIOD = 32CLK: 32 cycles of the 1.024 kHz clock. In window
 /// mode that's the open window, after the closed one.
 pub const WDT_PERIOD_32CLK: u8 = 0x03;

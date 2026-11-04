@@ -10,6 +10,9 @@
 //! which catches a flash that a `cargo xtask flash` left half-written. The
 //! hardware does the sums, so all that's here is what a failure means.
 //!
+//! `watchdog::Proof` adds one more: whether the watchdog passed its proof,
+//! and whether it's since had to reset a chip that hung.
+//!
 //! A failure doesn't leave a dead torch, because the first flash has to be
 //! easy to diagnose. It quietly refuses the FET instead: `limits::Limits`
 //! caps the light at the top of the linear channel until the cell comes out.
@@ -56,17 +59,20 @@ pub struct Faults {
     /// Flash doesn't match the CRC `cargo xtask hex` put at its end, by
     /// CRCSCAN's sums.
     pub flash: bool,
+    /// The watchdog failed its proof, or had to reset a chip that hung.
+    pub watchdog: bool,
 }
 
 impl Faults {
     pub const NONE: Self = Self {
         fuses: false,
         flash: false,
+        watchdog: false,
     };
 
     /// Whether anything failed, which refuses the FET.
     pub const fn any(self) -> bool {
-        self.fuses || self.flash
+        self.fuses || self.flash || self.watchdog
     }
 }
 
@@ -238,6 +244,10 @@ mod tests {
             flash: true,
             ..Faults::NONE
         };
-        assert!(fuses.any() && flash.any());
+        let watchdog = Faults {
+            watchdog: true,
+            ..Faults::NONE
+        };
+        assert!(fuses.any() && flash.any() && watchdog.any());
     }
 }
