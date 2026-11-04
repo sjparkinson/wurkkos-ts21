@@ -266,8 +266,9 @@ global_asm!(
     // with the first's write in it. Going down as well as up is meant for
     // coupling, where a write to one byte disturbs another: whichever way
     // round they are, one pass reads the victim after the culprit's write.
-    // That's the theory; xtask's simulator doesn't model coupling, so
-    // nothing here proves it.
+    // xtask's simulator checks that with a bit 7 that disturbs a byte below
+    // it when it goes high. Only the ⇓ pass sees that, and it gets through
+    // if that check goes.
     //
     // The test is destructive, which is why it runs before .data and .bss
     // exist and before anything's on the stack. AN2632 tests SRAM in
@@ -277,11 +278,13 @@ global_asm!(
     // AN2632 runs it with D = 0x00, which can't tell two bits in a byte
     // apart, since they always hold the same value. Its option for that is
     // the backgrounds 0x55, 0xAA, 0x33, 0xCC, 0x0F and 0xF0. This runs the
-    // whole march once for each of 0x00, 0x55, 0x33 and 0x0F, and the w~D
+    // whole march once for each of 0xAA, 0x55, 0x33 and 0x0F, and the w~D
     // steps write the other half, so every pair of bits in a byte is seen
-    // both equal and different. The backgrounds all have bit 7 clear, so
-    // that bit is only ever checked high by the ⇓ pass; the simulator finds
-    // a stuck one slipping through if that check goes.
+    // both equal and different. It's 0xAA, not 0x00, so that every bit is 0
+    // in one D and 1 in another: with 0x00, bit 7 was 0 in all four, and
+    // the simulator found couplings that force a bit 7 getting through.
+    // Bits 0 and 7, 1 and 6, 2 and 5, and 3 and 4 are still opposite in
+    // every D, so one of those forcing the other in the same byte can.
     //
     // It's 24 instructions a byte for each background, about 200,000 in
     // all, and by the instruction set manual's AVRxt timings about 280,000
@@ -291,7 +294,7 @@ global_asm!(
     // r20 to r23 hold the backgrounds still to come, r19 how many, r16 D
     // and r17 its complement. X walks SRAM, r25:r24 is where it stops, and
     // r0 holds each byte read back.
-    "  ldi r20, 0x00",
+    "  ldi r20, 0xAA",
     "  ldi r21, 0x55",
     "  ldi r22, 0x33",
     "  ldi r23, 0x0F",
@@ -327,6 +330,8 @@ global_asm!(
     "  ldi r25, hi8({sram_start})",
     "3:",
     "  ld r0, -X",
+    ".global __march_down_check",
+    "__march_down_check:",
     "  cp r0, r17",
     "  or_fail",
     "  st X, r16",
@@ -334,6 +339,8 @@ global_asm!(
     "  cpc r27, r25",
     "  brne 3b",
     // ⇕(rD), going up from the first byte again.
+    ".global __march_last",
+    "__march_last:",
     "  ldi r24, lo8({sram_end})",
     "  ldi r25, hi8({sram_end})",
     "4:",

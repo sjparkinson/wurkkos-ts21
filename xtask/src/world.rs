@@ -73,9 +73,51 @@ pub enum RamFault {
     /// was written to them, so they only show up when written different
     /// values, which a march with only 0x00 and 0xFF never does.
     Bridge { addr: u16, bits: [u8; 2] },
+    /// A coupling fault: a store that takes bit `bit` of `from` to `rising`
+    /// disturbs bit `victim` of `to`, flipping it, or forcing it to `force`
+    /// if that's set. A store that doesn't change the bit does nothing, and
+    /// reading never does.
+    Coupling {
+        from: u16,
+        bit: u8,
+        rising: bool,
+        to: u16,
+        victim: u8,
+        force: Option<bool>,
+    },
 }
 
 impl RamFault {
+    /// The byte a store of `after` over `before` at `addr` disturbs, if any.
+    pub fn disturbs(self, addr: u16, before: u8, after: u8) -> Option<u16> {
+        match self {
+            Self::Coupling {
+                from,
+                bit,
+                rising,
+                to,
+                ..
+            } if from == addr => {
+                let mask = 1 << bit;
+                let edge = before & mask != after & mask && (after & mask != 0) == rising;
+                edge.then_some(to)
+            }
+            _ => None,
+        }
+    }
+
+    /// What a byte holding `stored` holds once `disturbs` has picked it.
+    pub fn disturbed(self, stored: u8) -> u8 {
+        match self {
+            Self::Coupling { victim, force, .. } => match force {
+                None => stored ^ 1 << victim,
+                Some(true) => stored | 1 << victim,
+                Some(false) => stored & !(1 << victim),
+            },
+            _ => stored,
+        }
+    }
+
     /// The byte an access to `addr` really reaches.
     pub fn cell(self, addr: u16) -> u16 {
         match self {
@@ -174,8 +216,10 @@ fn set_bits(v: &mut u8, mask: u8, high: bool) {
 
 /// Scripts write the faults as `ram:stuck:0x3800.3=1` (bit 3 of 0x3800
 /// stuck high), `ram:alias:0x3900=0x3800` (0x3900 reaches 0x3800's byte),
-/// `ram:bridge:0x3800.0.1` (bits 0 and 1 of 0x3800 shorted), `reg:r24.0=1`
-/// and `reg:short:r24.0.2=0` (bits 0 and 2 of r24 shorted, with 0 winning).
+/// `ram:bridge:0x3800.0.1` (bits 0 and 1 of 0x3800 shorted),
+/// `ram:couple:0x3900.7=1:0x3800.0` (bit 7 of 0x3900 going high flips bit 0
+/// of 0x3800; a trailing `=0` or `=1` forces it instead), `reg:r24.0=1` and
+/// `reg:short:r24.0.2=0` (bits 0 and 2 of r24 shorted, with 0 winning).
 /// These parse the part after `ram:` or `reg:`, and print the whole word.
 impl FromStr for RamFault {
     type Err = String;
@@ -183,8 +227,8 @@ impl FromStr for RamFault {
     fn from_str(s: &str) -> Result<Self, String> {
         let bad = || {
             format!(
-                "expected ram:stuck:0x3800.3=1, ram:alias:0x3900=0x3800 or \
-                 ram:bridge:0x3800.0.1, not `ram:{s}`"
+                "expected ram:stuck:0x3800.3=1, ram:alias:0x3900=0x3800, \
+                 ram:bridge:0x3800.0.1 or ram:couple:0x3900.7=1:0x3800.0, not `ram:{s}`"
             )
         };
         let (kind, rest) = s.split_once(':').ok_or_else(bad)?;
@@ -222,6 +266,29 @@ impl FromStr for RamFault {
                     bits,
                 }
             }
+            "couple" => {
+                let (culprit, target) = rest.split_once(':').ok_or_else(bad)?;
+                let (at, edge) = culprit.split_once('=').ok_or_else(bad)?;
+                let (from, bit) = at.split_once('.').ok_or_else(bad)?;
+                let (at, force) = match target.split_once('=') {
+                    Some((at, force)) => (at, Some(level(force)?)),
+                    None => (target, None),
+                };
+                let (to, victim) = at.split_once('.').ok_or_else(bad)?;
+                let (from, bit) = (sram_address(from)?, bit_number(bit)?);
+                let (to, victim) = (sram_address(to)?, bit_number(victim)?);
+                if from == to && bit == victim {
+                    return Err(format!("bit {bit} of {from:#06x} can't couple to itself"));
+                }
+                Self::Coupling {
+                    from,
+                    bit,
+                    rising: level(edge)?,
+                    to,
+                    victim,
+                    force,
+                }
+            }
             _ => return Err(bad()),
         };
         Ok(fault)
@@ -236,6 +303,21 @@ impl fmt::Display for RamFault {
             }
             Self::Alias { addr, to } => write!(f, "ram:alias:{addr:#06x}={to:#06x}"),
             Self::Bridge { addr, bits: [a, b] } => write!(f, "ram:bridge:{addr:#06x}.{a}.{b}"),
+            Self::Coupling {
+                from,
+                bit,
+                rising,
+                to,
+                victim,
+                force,
+            } => {
+                let edge = u8::from(rising);
+                write!(f, "ram:couple:{from:#06x}.{bit}={edge}:{to:#06x}.{victim}")?;
+                match force {
+                    Some(force) => write!(f, "={}", u8::from(force)),
+                    None => Ok(()),
+                }
+            }
         }
     }
 }
@@ -582,12 +664,52 @@ mod tests {
     }
 
     #[test]
+    fn a_coupling_only_fires_on_its_own_edge() {
+        let fault = |rising, force| RamFault::Coupling {
+            from: 0x3900,
+            bit: 7,
+            rising,
+            to: 0x3800,
+            victim: 0,
+            force,
+        };
+        let rising = fault(true, None);
+        assert_eq!(rising.disturbs(0x3900, 0x00, 0x80), Some(0x3800));
+        assert_eq!(rising.disturbs(0x3900, 0x80, 0x00), None, "falling");
+        assert_eq!(rising.disturbs(0x3900, 0x80, 0xFF), None, "already high");
+        assert_eq!(rising.disturbs(0x3901, 0x00, 0x80), None, "another byte");
+        let falling = fault(false, None);
+        assert_eq!(falling.disturbs(0x3900, 0x80, 0x00), Some(0x3800));
+        assert_eq!(falling.disturbs(0x3900, 0x00, 0x80), None, "rising");
+    }
+
+    #[test]
+    fn a_coupling_flips_or_forces_its_victim() {
+        let fault = |force| RamFault::Coupling {
+            from: 0x3900,
+            bit: 7,
+            rising: true,
+            to: 0x3800,
+            victim: 0,
+            force,
+        };
+        assert_eq!(fault(None).disturbed(0x10), 0x11);
+        assert_eq!(fault(None).disturbed(0x11), 0x10);
+        assert_eq!(fault(Some(true)).disturbed(0x10), 0x11);
+        assert_eq!(fault(Some(true)).disturbed(0x11), 0x11);
+        assert_eq!(fault(Some(false)).disturbed(0x11), 0x10);
+        assert_eq!(fault(Some(false)).disturbed(0x10), 0x10);
+    }
+
+    #[test]
     fn faults_print_the_way_scripts_write_them() {
         for word in [
             "ram:stuck:0x3800.3=1",
             "ram:stuck:0x3fff.0=0",
             "ram:alias:0x3900=0x3800",
             "ram:bridge:0x3800.0.1",
+            "ram:couple:0x3900.7=1:0x3800.0",
+            "ram:couple:0x3800.0=0:0x3800.1=1",
         ] {
             let fault: RamFault = word["ram:".len()..].parse().unwrap();
             assert_eq!(fault.to_string(), word);
@@ -620,6 +742,12 @@ mod tests {
             "bridge:0x3800.1.1",
             "bridge:0x3800.1",
             "bridge:0x3800.0.1.2",
+            "couple:0x3900.7=1",
+            "couple:0x3900.7:0x3800.0",
+            "couple:0x3900.7=2:0x3800.0",
+            "couple:0x3900.7=1:0x3800",
+            "couple:0x3900.7=1:0x3800.0=2",
+            "couple:0x3800.0=1:0x3800.0",
             "flip:0x3800.0",
             "",
         ] {
