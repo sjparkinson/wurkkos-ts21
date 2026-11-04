@@ -87,7 +87,6 @@ jobs:
           mv dist/avr-none/release/wurkkos-ts21-0614.elf "dist/wurkkos-ts21-0614-$version.elf"
 
       - uses: actions/attest@v4.2.2
-        id: attest
         with:
           subject-path: dist/wurkkos-ts21-0614-*
 
@@ -106,10 +105,6 @@ jobs:
 
           See [docs/flashing.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/flashing.md) for information on programmers, and pad order.
 
-          ## Verify
-
-          Both files have a [build provenance attestation]($ATTESTATION_URL). \`gh attestation verify\` checks its signature and that the file was built by this repo's CI.
-
           ## Size
 
           \`\`\`
@@ -117,8 +112,6 @@ jobs:
           \`\`\`
 
           EOF
-        env:
-          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
 
       # --generate-notes appends GitHub's changelog to the notes file.
       - name: gh release
