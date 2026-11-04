@@ -14,7 +14,8 @@
 #![allow(unsafe_code)]
 
 use core::arch::asm;
-use core::ptr::{read_volatile, write_volatile};
+use core::mem::MaybeUninit;
+use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use ts21::ramp::{Output, PWM_TOP};
 use ts21::selftest::Fuses;
@@ -147,7 +148,13 @@ fn protected_write(addr: usize, value: u8) {
     }
 }
 
-pub fn init() {
+/// `watchdog` is `WDT.CTRLA` for this boot, from `ts21::watchdog::Proof`. It's
+/// the only thing that changes between a step of the proof and normal use.
+/// Either way TCA0 starts with both compares at 0, and nothing but
+/// `set_output` changes them, so on every boot of the proof the pins are held
+/// low as they are with the light off. During a reset itself nothing holds
+/// them: every output tri-states (section 16.3.1).
+pub fn init(watchdog: u8) {
     // 20 MHz oscillator (the factory OSCCFG fuse) divided by 4. 5 MHz is in
     // spec down to 1.8 V. 10 MHz needs 2.7 V (table 36-3), and VCC can go
     // under that near the cut-off, or on the FET quicker than the low-voltage
@@ -157,8 +164,9 @@ pub fn init() {
         regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN,
     );
 
-    // The watchdog, in window mode, before anything that could wait on a
-    // peripheral. `ts21::watchdog` has the window and when `main` feeds it.
+    // The watchdog, before anything that could wait on a peripheral. In
+    // normal use that's window mode, and `ts21::watchdog` has the window,
+    // when `main` feeds it and the other settings the proof uses.
     // Until the first feed there's no closed window, only the 32-clock
     // timeout, and the first pass of the loop feeds it. Wait for the write
     // to sync before going on, so that feed can't land while it's still
@@ -166,10 +174,7 @@ pub fn init() {
     // the PIT does too and the loop runs every tick, on or off. Never set
     // WDT.STATUS.LOCK and never touch the WDTCFG fuse.
     while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
-    protected_write(
-        reg::WDT_CTRLA,
-        regs::WDT_WINDOW_32CLK | regs::WDT_PERIOD_32CLK,
-    );
+    protected_write(reg::WDT_CTRLA, watchdog);
     while read(reg::WDT_STATUS) & regs::WDT_SYNCBUSY != 0 {}
 
     // Pull every pin we don't drive up, so nothing floats and leaks current,
@@ -337,6 +342,51 @@ pub fn feed_watchdog() {
     // and no flags. No `nomem`, so the compiler can't move it above the
     // output's volatile stores.
     unsafe { asm!("wdr", options(nostack, preserves_flags)) }
+}
+
+/// Where the watchdog's proof keeps its place across a reset (`ts21::watchdog`
+/// says what the bytes mean). `.noinit` isn't copied, zeroed or tested on a
+/// reset that isn't power-on or UPDI, so it holds what the last boot stored,
+/// and after power-on it holds junk, which is why it's `MaybeUninit`.
+#[unsafe(link_section = ".noinit")]
+static mut MARKER: MaybeUninit<[u8; 2]> = MaybeUninit::uninit();
+
+/// What the marker holds. Only ever read before anything's stored on this
+/// boot, or by the proof's own loop, so nothing shares it with a handler.
+pub fn marker() -> [u8; 2] {
+    let at = addr_of!(MARKER).cast::<u8>();
+    // SAFETY: both bytes are in the static, and any value is a valid `u8`.
+    // Volatile, because startup never wrote it, so the compiler has nothing
+    // to go on but the `uninit` above.
+    unsafe { [read_volatile(at), read_volatile(at.add(1))] }
+}
+
+/// Stores the marker. A reset between the two bytes leaves a marker that
+/// doesn't check out, which `ts21::watchdog` treats as a failed proof.
+pub fn set_marker(marker: [u8; 2]) {
+    let at = addr_of_mut!(MARKER).cast::<u8>();
+    // SAFETY: both bytes are in the static, and nothing else is using it.
+    unsafe {
+        write_volatile(at, marker[0]);
+        write_volatile(at.add(1), marker[1]);
+    }
+}
+
+/// What caused this reset, from `RSTCTRL.RSTFR`, leaving it clear for the
+/// next one. The flags are sticky, and only a power-on reset clears them
+/// (section 12.5.1), so this has to run on every boot before anything could
+/// reset the chip. Left up, PORF would make the next bite look like another
+/// power-on, and the proof would start over, forever.
+pub fn take_reset_flags() -> u8 {
+    let flags = read(reg::RSTCTRL_RSTFR);
+    write(reg::RSTCTRL_RSTFR, flags);
+    flags
+}
+
+/// Resets the chip, for a proof that waited for a bite that never came. It
+/// takes effect at once (section 12.3.2.1.3), so this doesn't really return.
+pub fn software_reset() {
+    protected_write(reg::RSTCTRL_SWRR, regs::RSTCTRL_SWRE);
 }
 
 /// The temperature sensor's factory calibration from the signature row.

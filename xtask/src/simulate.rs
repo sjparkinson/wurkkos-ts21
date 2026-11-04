@@ -22,9 +22,11 @@
 //! `ram:bridge:0x3800.0.1` and `ram:couple:0x3900.7=1:0x3800.0` break a byte
 //! of SRAM, `reg:r24.0=1` and `reg:short:r24.0.2=0` a CPU register, `SREG`,
 //! `SPL` and `SPH` included (`world::RamFault` and `RegisterFault` say how),
-//! and `wdt:never` the watchdog (`world::WdtFault` has the rest). A script's
+//! and `wdt:never` the watchdog (`world::WdtFault` has the rest). `proof:press`
+//! is a press that comes and goes during the watchdog's proof. A script's
 //! are all there from power-on, so they have to come before anything that
-//! takes time.
+//! takes time. `hang` can go anywhere: the firmware stops there until the
+//! watchdog resets it, once.
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
@@ -77,6 +79,10 @@ pub enum Action {
     Register(RegisterFault),
     /// A broken watchdog, from reset. Power-on only.
     Wdt(WdtFault),
+    /// A press that comes and goes during the watchdog's proof. Power-on only.
+    ProofPress,
+    /// The firmware hangs, until the watchdog resets it.
+    Hang,
 }
 
 impl Action {
@@ -90,6 +96,7 @@ impl Action {
                 | Self::Ram(_)
                 | Self::Register(_)
                 | Self::Wdt(_)
+                | Self::ProofPress
         )
     }
 
@@ -130,6 +137,12 @@ impl FromStr for Action {
         }
         if let Some(fault) = word.strip_prefix("wdt:") {
             return fault.parse().map(Self::Wdt);
+        }
+        if word == "proof:press" {
+            return Ok(Self::ProofPress);
+        }
+        if word == "hang" {
+            return Ok(Self::Hang);
         }
         if let Some(raw) = word.strip_prefix("adc:") {
             let raw = raw
@@ -309,6 +322,14 @@ pub fn samples(actions: &[Action]) -> Vec<Sample> {
             }
             Action::Wdt(fault) => {
                 world.wdt = Some(fault);
+                continue;
+            }
+            Action::ProofPress => {
+                world.proof_press = Some(1);
+                continue;
+            }
+            Action::Hang => {
+                world.hang = true;
                 continue;
             }
         };

@@ -273,6 +273,31 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_watchdog_leaves_the_ui_working_on_the_linear_channel() {
+        let mut rig = Rig::with(Faults {
+            watchdog: true,
+            ..Faults::NONE
+        });
+        rig.run(false, 3 * 64);
+        assert_eq!(rig.level(), 0);
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        assert_eq!(output(rig.level()).fet, 0);
+        rig.click();
+        assert_eq!(rig.level(), 0);
+    }
+
+    #[test]
+    fn one_pressed_tick_is_a_click() {
+        // `src/main.rs` counts its first tick as pressed if the watchdog's
+        // proof owes it a press, and a tick is all the press that's left.
+        let mut rig = Rig::new();
+        rig.run(true, 1);
+        rig.run(false, RELEASE_TICKS + 1);
+        assert_eq!(rig.level(), LEVEL);
+    }
+
+    #[test]
     fn rests_once_off_and_idle() {
         let mut rig = Rig::new();
         assert!(rig.torch.resting(), "from power-on");
