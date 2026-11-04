@@ -97,12 +97,6 @@ jobs:
 
           See [docs/flashing.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/flashing.md) for information on programmers, and pad order.
 
-          ## Size
-
-          \`\`\`
-          $(cat dist/size.txt)
-          \`\`\`
-
           EOF
 
       - name: gh release
