@@ -1,0 +1,30 @@
+# Its own workspace on purpose: the clean-room build shares nothing with the
+# firmware in ../src except vendor/ and the pinned toolchain.
+[workspace]
+
+[package]
+name = "ts21-clean"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+name = "ts21_clean"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ts21-clean"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = true

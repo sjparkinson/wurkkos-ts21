@@ -1,0 +1,3 @@
+# Merges with ../.cargo/config.toml, which already picks the CPU and rust-lld.
+[target.avr-none]
+rustflags = ["-C", "link-arg=-Tlink.x"]
