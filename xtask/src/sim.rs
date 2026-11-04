@@ -74,10 +74,9 @@
 //!   cycles later, then BUSY for a couple of reads. Only the whole-flash
 //!   scan with STATUS polled is modelled; NMIEN is an error.
 //!
-//! Interrupts only ever arrive while the CPU's asleep, since that's where
-//! the PIT's period ends and between ticks is where the switch changes. So
-//! nothing here tests a handler landing mid-instruction-sequence, such as
-//! halfway through a 16-bit TCA0 write.
+//! Left to itself, the chip only interrupts while the CPU's asleep, since
+//! that's where the PIT's period ends. `Landings` makes them land everywhere
+//! else: see it for how.
 //!
 //! Touching a register it doesn't model is an error too, so new peripheral
 //! code fails here until the model learns about it.
@@ -88,7 +87,7 @@
 //! reaches another byte (`world::RamFault`). The stack checks wait until
 //! those tests are done, since they point SP all over SRAM.
 //!
-//! With that in place it runs five things:
+//! With that in place it runs six things:
 //!
 //! 1. Reset to `main`, with SRAM full of junk, checking the self-tests pass
 //!    and .data and .bss come out right.
@@ -103,13 +102,15 @@
 //!    broken RAM or register the example scripts.
 //! 5. Twenty thousand ticks of random clicks and holds, with a good cell at
 //!    room temperature.
+//! 6. Both of those again with `Landings` on, which has to catch a handler
+//!    between a TCA0 low and high byte at least once.
 //!
 //! `probe` separately runs src/bin/link_probe.rs, which has real statics,
 //! and checks it reads them from where link.x put them.
 //!
-//! Both drive `ts21::torch` alongside the firmware and check the LEDs show
-//! the library's level on every tick; the examples then check where the
-//! library ended up.
+//! The last three drive `ts21::torch` alongside the firmware and check the
+//! LEDs show the library's level on every tick; the examples then check
+//! where the library ended up.
 //!
 //! Throughout, it measures how deep the stack goes and checks every pass of
 //! the main loop fits in a 64 Hz tick.
@@ -229,6 +230,7 @@ const WIDE: [usize; 4] = [
     reg::TCA0_CMP1BUF,
 ];
 
+#[derive(Default)]
 pub struct Report {
     /// The most stack the firmware used, in bytes.
     pub stack: u16,
@@ -239,6 +241,8 @@ pub struct Report {
     /// The most instructions one pass took that ended in power-down, which
     /// is what the chip stays awake for, 64 times a second, when it's off.
     pub off_instructions: u64,
+    /// Handlers that landed with a TCA0 16-bit access half done.
+    pub mid_access: u32,
 }
 
 /// Ticks the library can be resting before the firmware has to be powering
@@ -296,6 +300,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         loop_instructions: 0,
         loop_budget: TICK_BUDGET,
         off_instructions: 0,
+        mid_access: 0,
     };
     for example in spec::examples(spec::UI_MD)? {
         let samples = simulate::samples(&example.actions);
@@ -306,6 +311,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     }
     against_the_library(sim, &mut report)
         .map_err(|e| format!("random switching, against the library: {e}"))?;
+    mid_pass(&power_on, &mut report).map_err(|e| format!("with interrupts mid-pass: {e}"))?;
     if report.off_instructions == 0 {
         return Err("never powered down".into());
     }
@@ -753,6 +759,7 @@ fn in_step(
         }
     }
     report.stack = report.stack.max(sim.stack());
+    report.mid_access += sim.mid_access;
     Ok(rig.level())
 }
 
@@ -776,6 +783,8 @@ struct Sim {
     landed: Option<Landed>,
     /// Handlers so far that landed with a TCA0 16-bit access half done.
     mid_access: u32,
+    /// Set to land interrupts on purpose, mid-pass.
+    landings: Option<Landings>,
 }
 
 /// Where startup ended up.
@@ -822,6 +831,7 @@ impl Sim {
             testing: None,
             landed: None,
             mid_access: 0,
+            landings: None,
         })
     }
 
@@ -873,7 +883,7 @@ impl Sim {
         let handling = self.cpu.handling;
         self.cpu.step(&mut self.chip)?;
         self.watch_handler(handling)?;
-        if awake {
+        if awake && !self.landing_stops_time(handling) {
             self.executed += 1;
             self.chip.elapse()?;
         }
@@ -918,7 +928,7 @@ impl Sim {
                 vector_name(vector)
             ));
         }
-        Ok(())
+        self.land()
     }
 
     /// Runs until PC reaches `target`, a word address.
@@ -1654,6 +1664,160 @@ struct Landed {
     r: [u8; 32],
     sreg: u8,
     sp: u16,
+    gpior0: u8,
+}
+
+/// Lands interrupts where they'd otherwise never arrive, on a firmware that
+/// doesn't know the difference, so a run still has to match the library tick
+/// by tick.
+///
+/// Before every instruction a run reaches, the first time it does, a tick
+/// that isn't one: the PIT's interrupt goes up, the handler runs, and what it
+/// did to GPIOR0 is put back. The real tick can't land mid-pass unless a pass
+/// overruns, which `Sim::tick` already fails, and a real one here would add a
+/// pass the library doesn't have. This is there so `rtc_pit` gets looked at
+/// wherever a stretched pass could put it.
+///
+/// A landing with SREG.I clear, or held off, waits as the CPU says, and the
+/// next instruction doesn't get one until it's been taken, so each
+/// instruction of a `cli` section gets its own go over the passes that
+/// follow.
+///
+/// Then for the tick that really can land near the loop. Nothing but the tick
+/// wakes the CPU, so a pass can't be caught there by waking it early. Instead
+/// `Landings` notes where `hw::wait_for_tick`'s loop is, from its `cli` to its
+/// `sleep`, and on each pass after that jumps time on to just before the PIT's
+/// period ends, awake, `early` words before the `sleep`, and `early` goes
+/// round the loop. That's the same as a pass that ran long, but one that's
+/// already fed the watchdog. So the real tick lands on each instruction of the
+/// loop, `sei; sleep` included, and a tick slept through would cost a pass.
+///
+/// Time stands still while a landed handler runs, so the handlers don't eat
+/// into the pass's budget.
+struct Landings {
+    /// Whether each instruction's had its landing, by word address.
+    visits: Vec<bool>,
+    /// The tick count when a tick that isn't one went up, until its handler
+    /// has been and gone.
+    probe: Option<u32>,
+    /// The last `cli` the CPU reached, as a word address.
+    cli_at: u32,
+    /// `hw::wait_for_tick`'s loop, from that `cli` to its `sleep`.
+    wait_loop: Option<Range<u32>>,
+    /// The tick count at the last jump. No other landing happens until that
+    /// tick, so nothing gets in the way of it.
+    jumped: Option<u32>,
+    early: u32,
+}
+
+/// The `cli` instruction.
+const CLI_WORD: u16 = 0x94F8;
+
+impl Landings {
+    fn new() -> Self {
+        Self {
+            visits: vec![false; FLASH_SIZE / 2],
+            probe: None,
+            cli_at: 0,
+            wait_loop: None,
+            jumped: None,
+            early: 1,
+        }
+    }
+}
+
+impl Sim {
+    /// `before` is what the CPU was handling before the step just run.
+    fn landing_stops_time(&self, before: Option<u8>) -> bool {
+        self.landings.is_some() && (before.is_some() || self.cpu.handling.is_some())
+    }
+
+    /// Lands whatever's due before the next instruction. Nothing lands on
+    /// top of a request that's already pending, or inside a handler.
+    fn land(&mut self) -> Result<(), String> {
+        let Some(landings) = &mut self.landings else {
+            return Ok(());
+        };
+        let chip = &mut self.chip;
+        let pc = self.cpu.pc;
+        if word(&chip.flash, pc as usize * 2) == Some(CLI_WORD) {
+            landings.cli_at = pc;
+        }
+        if self.cpu.handling.is_some()
+            || landings.jumped == Some(chip.ticks)
+            || chip.interrupt().is_some()
+        {
+            return Ok(());
+        }
+        let pit_on = chip.io[reg::RTC_PITCTRLA] & regs::RTC_PITEN != 0;
+        if !pit_on || chip.enabled() & 1 << regs::VECTOR_RTC_PIT == 0 {
+            return Ok(());
+        }
+        if self.cpu.asleep {
+            // `sleep` is one word, and PC's past it.
+            landings.wait_loop = Some(landings.cli_at..pc.wrapping_sub(1));
+            return Ok(());
+        }
+        if let Some(wait_loop) = &landings.wait_loop {
+            let from = wait_loop.end.saturating_sub(landings.early);
+            let from = from.max(wait_loop.start);
+            if (from..wait_loop.end).contains(&pc) {
+                landings.early = match from == wait_loop.start {
+                    true => 1,
+                    false => landings.early + 1,
+                };
+                landings.jumped = Some(chip.ticks);
+                return chip.advance_to((chip.next_pit - 1).max(chip.now));
+            }
+        }
+        if let Some(visited @ false) = landings.visits.get_mut(pc as usize) {
+            *visited = true;
+            chip.pit_flag = true;
+            landings.probe = Some(chip.ticks);
+        }
+        Ok(())
+    }
+
+    /// A handler's finished, having found `landed`. If that was a tick that
+    /// isn't one, puts back what it told the main loop, unless a real tick
+    /// came in under the same flag while it was pending.
+    fn end_probe(&mut self, vector: u8, landed: &Landed) {
+        if usize::from(vector) == regs::VECTOR_RTC_PIT
+            && let Some(landings) = &mut self.landings
+            && landings.probe.take() == Some(self.chip.ticks)
+        {
+            self.chip.io[reg::GPIO_GPIOR0] = landed.gpior0;
+        }
+    }
+}
+
+/// Runs docs/ui.md's examples and the random switching again with `Landings`
+/// on, for what `check` already compares against the library. A handler
+/// that lands on the stack's deepest point counts towards the stack, but the
+/// other figures are for a run with nothing extra in it, so they stay.
+fn mid_pass(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    report: &mut Report,
+) -> Result<(), String> {
+    let mut landed = Report::default();
+    for example in spec::examples(spec::UI_MD)? {
+        let samples = simulate::samples(&example.actions);
+        let world = samples.first().map_or(World::NORMAL, |s| s.world);
+        let (mut sim, boot) =
+            power_on(&world).map_err(|e| format!("{}: startup: {e}", example.row))?;
+        sim.landings = Some(Landings::new());
+        ui_example(sim, boot, samples, &example, &mut landed)
+            .map_err(|e| format!("{}: {e}", example.row))?;
+    }
+    let (mut sim, _) = power_on(&World::NORMAL)?;
+    sim.landings = Some(Landings::new());
+    against_the_library(sim, &mut landed).map_err(|e| format!("random switching: {e}"))?;
+    if landed.mid_access == 0 {
+        return Err("no handler ever landed between a TCA0 low and high byte".into());
+    }
+    report.stack = report.stack.max(landed.stack);
+    report.mid_access = landed.mid_access;
+    Ok(())
 }
 
 impl Sim {
@@ -1668,6 +1832,7 @@ impl Sim {
                     r: self.cpu.r,
                     sreg: self.cpu.sreg,
                     sp: self.cpu.sp,
+                    gpior0: self.chip.io[reg::GPIO_GPIOR0],
                 });
             }
             (Some(vector), None) => {
@@ -1675,6 +1840,7 @@ impl Sim {
                 if let Some(landed) = self.landed.take() {
                     self.gave_back(&landed)
                         .map_err(|e| format!("the handler for {}: {e}", vector_name(vector)))?;
+                    self.end_probe(vector, &landed);
                 }
             }
             _ => {}
@@ -2973,6 +3139,30 @@ mod tests {
         s
     }
 
+    /// `image` with the PIT's vector going to `handler`, after `main`, and
+    /// the PIT running with its interrupt on, which is what `Landings` lands.
+    fn sim_with_tick_handler(main: &[u16], handler: &[u16]) -> Sim {
+        let mut bytes = image(main);
+        let at = (bytes.len() / 2) as u16;
+        let slot = regs::VECTOR_RTC_PIT * VECTOR_WORDS as usize * 2 + 2;
+        bytes[slot..slot + 2].copy_from_slice(&at.to_le_bytes());
+        bytes.extend(handler.iter().flat_map(|w| w.to_le_bytes()));
+        let mut s = Sim::new(bytes, SRAM.start + 1, u32::from(UNHANDLED) * 2).unwrap();
+        s.chip.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        s.chip.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
+        s
+    }
+
+    /// Clears the PIT's flag with r18, as `quiet_handler` does PORTA's.
+    fn quiet_tick() -> Vec<u16> {
+        vec![STS_R18, reg::RTC_PITINTFLAGS as u16, RETI]
+    }
+
+    /// `counting_handler` for the PIT.
+    fn counting_tick() -> Vec<u16> {
+        vec![STS_R17, SEEN, STS_R18, reg::RTC_PITINTFLAGS as u16, RETI]
+    }
+
     /// Runs `main` with PA5's flag up from reset, and says how many
     /// `inc r17`s ran before `counting_handler` did.
     fn incs_before_the_handler(main: &[u16]) -> u8 {
@@ -3186,6 +3376,152 @@ mod tests {
             assert!(err.contains("PORTA_PORT (vector 3)"), "{err}");
             assert!(err.contains(want), "{err}");
         }
+    }
+
+    /// ldi r18, 0xFF; sei; then a 16-bit write, which `Landings` has to find
+    /// on its own.
+    fn sixteen_bit_write(handler: &[u16]) -> Sim {
+        let low = reg::TCA0_CMP0BUF as u16;
+        let main = [SET_UP[0], SEI, STS_R18, low, STS_R18, low + 1, SPIN];
+        let mut s = sim_with_tick_handler(&main, handler);
+        s.landings = Some(Landings::new());
+        s
+    }
+
+    #[test]
+    fn landings_get_between_a_low_and_a_high_byte_on_their_own() {
+        let mut s = sixteen_bit_write(&quiet_tick());
+        for _ in 0..40 {
+            s.step().unwrap();
+        }
+        // Once for the landing that waited for sei, once for its own.
+        assert_eq!(s.mid_access, 2);
+        assert_eq!(s.chip.wide(reg::TCA0_CMP0BUF), 0xFFFF);
+
+        let handler = [STS_R18, reg::TCA0_CMP1BUF as u16, RETI];
+        let mut s = sixteen_bit_write(&handler);
+        let err = (0..40).try_for_each(|_| s.step()).unwrap_err();
+        assert!(err.contains("section 8.5.6"), "{err}");
+    }
+
+    #[test]
+    fn landings_visit_each_instruction_once_and_stop_there() {
+        let main = [SET_UP[0], SEI, INC_R17, INC_R17, INC_R17, SPIN];
+        let mut s = sim_with_tick_handler(&main, &counting_tick());
+        s.landings = Some(Landings::new());
+        let mut seen = Vec::new();
+        for _ in 0..80 {
+            let was = s.cpu.handling;
+            s.step().unwrap();
+            if was.is_none() && s.cpu.handling.is_some() {
+                seen.push(s.cpu.r[17]);
+            }
+        }
+        assert_eq!(s.cpu.r[17], 3);
+        // The landing from before sei waits for the first `inc`. Then the
+        // second `inc`, the third, and the spin, which is reached again and
+        // again but only gets the one.
+        assert_eq!(seen, [1, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_landed_handler_takes_no_time() {
+        let mut s = sixteen_bit_write(&quiet_tick());
+        for _ in 0..40 {
+            s.step().unwrap();
+            if s.cpu.handling.is_some() {
+                let (now, executed) = (s.chip.now, s.executed);
+                s.step().unwrap();
+                assert_eq!((s.chip.now, s.executed), (now, executed));
+            }
+        }
+    }
+
+    #[test]
+    fn a_tick_that_isnt_one_leaves_gpior0_as_it_was() {
+        // Clears its flag and tells the main loop there's been a tick, as
+        // `rtc_pit` does.
+        let mut s = sixteen_bit_write(&[
+            STS_R18,
+            reg::RTC_PITINTFLAGS as u16,
+            STS_R18,
+            reg::GPIO_GPIOR0 as u16,
+            RETI,
+        ]);
+        let mut probes = 0;
+        for _ in 0..60 {
+            let was = s.cpu.handling;
+            s.step().unwrap();
+            if was.is_none() && s.cpu.handling == Some(regs::VECTOR_RTC_PIT as u8) {
+                probes += 1;
+            }
+        }
+        assert!(probes > 0);
+        assert_eq!(s.chip.ticks, 0, "no real tick");
+        assert!(!s.chip.pit_flag);
+        assert_eq!(s.chip.io[reg::GPIO_GPIOR0], 0, "and no sign of one");
+    }
+
+    #[test]
+    fn a_real_tick_under_a_probes_flag_stands() {
+        let mut s = sim(&[SPIN]);
+        s.landings = Some(Landings::new());
+        s.landings.as_mut().unwrap().probe = Some(0);
+        s.chip.ticks = 1;
+        s.chip.io[reg::GPIO_GPIOR0] = 1;
+        let landed = Landed {
+            r: s.cpu.r,
+            sreg: s.cpu.sreg,
+            sp: s.cpu.sp,
+            gpior0: 0,
+        };
+        s.end_probe(regs::VECTOR_RTC_PIT as u8, &landed);
+        assert_eq!(s.chip.io[reg::GPIO_GPIOR0], 1);
+    }
+
+    #[test]
+    fn the_real_tick_lands_just_before_the_sleep_and_further_back_each_time() {
+        // Sleeps again whenever it wakes: a loop of cli, nop, sei and sleep.
+        let main = [SET_UP[0], CLI_WORD, NOP, SEI, SLEEP, 0xCFFB];
+        let mut s = sim_with_tick_handler(&main, &quiet_tick());
+        s.chip.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN;
+        s.landings = Some(Landings::new());
+        let jumped = |s: &Sim| s.landings.as_ref().unwrap().jumped;
+        // It can't jump until it's seen where the loop is.
+        while s.landings.as_ref().unwrap().wait_loop.is_none() {
+            s.step().unwrap();
+        }
+        assert_eq!(jumped(&s), None);
+        let wait_loop = s.landings.as_ref().unwrap().wait_loop.clone().unwrap();
+        assert_eq!(wait_loop.end - wait_loop.start, 3);
+        // Further back each time, then round again, and never out of the loop.
+        for early in [1, 2, 3, 1] {
+            let last = jumped(&s);
+            while jumped(&s) == last {
+                s.step().unwrap();
+            }
+            assert_eq!(s.cpu.pc, wait_loop.end - early);
+            assert!(!s.cpu.asleep);
+            assert_eq!(s.chip.now, s.chip.next_pit - 1, "awake, just before");
+        }
+    }
+
+    /// With the CCP window and landings together: nothing lands in the four.
+    #[test]
+    fn landings_wait_out_the_ccp_window_too() {
+        let main = [&SET_UP[..], &[SEI, OUT_CCP_R16, INC_R17, INC_R17, SPIN]].concat();
+        let mut s = sim_with_tick_handler(&main, &counting_tick());
+        s.landings = Some(Landings::new());
+        let mut landed_at = Vec::new();
+        for _ in 0..40 {
+            let was = s.cpu.handling;
+            s.step().unwrap();
+            if was.is_none() && s.cpu.handling.is_some() {
+                landed_at.push(s.cpu.r[17]);
+            }
+        }
+        assert!(!landed_at.is_empty());
+        assert!(landed_at.iter().all(|&incs| incs == 2), "{landed_at:?}");
     }
 
     /// Polling the PIT flag doesn't move time on, and the loop budget
