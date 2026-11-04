@@ -380,6 +380,7 @@ mod tests {
             (regs::addr::TCA0_CTRLB, "TCA0", single, "CTRLB", 1),
             (regs::addr::TCA0_CTRLECLR, "TCA0", single, "CTRLECLR", 1),
             (regs::addr::TCA0_CTRLESET, "TCA0", single, "CTRLESET", 1),
+            (regs::addr::TCA0_CTRLFSET, "TCA0", single, "CTRLFSET", 1),
             (regs::addr::TCA0_CNT, "TCA0", single, "CNT", 2),
             (regs::addr::TCA0_PER, "TCA0", single, "PER", 2),
             (regs::addr::TCA0_CMP0, "TCA0", single, "CMP0", 2),
@@ -591,6 +592,24 @@ mod tests {
                 atdf.register("TCA0", Some("SINGLE"), "CTRLECLR")
                     .mask("LUPD"),
                 "TCA0.CTRLECLR.LUPD",
+            ),
+            (
+                regs::TCA_PERBV,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLFSET")
+                    .mask("PERBV"),
+                "TCA0.CTRLFSET.PERBV",
+            ),
+            (
+                regs::TCA_CMP0BV,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLFSET")
+                    .mask("CMP0BV"),
+                "TCA0.CTRLFSET.CMP0BV",
+            ),
+            (
+                regs::TCA_CMP1BV,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLFSET")
+                    .mask("CMP1BV"),
+                "TCA0.CTRLFSET.CMP1BV",
             ),
             (
                 regs::TCA_CMD_UPDATE,
@@ -947,6 +966,11 @@ mod tests {
             u32::from(crate::sim::TCA_WGMODE),
             ctrlb.mask("WGMODE"),
             "TCA0.CTRLB.WGMODE"
+        );
+        assert_eq!(
+            u32::from(crate::sim::TCA_ALUPD),
+            ctrlb.mask("ALUPD"),
+            "TCA0.CTRLB.ALUPD"
         );
     }
 
