@@ -82,8 +82,8 @@
 //! code fails here until the model learns about it.
 //!
 //! It can also break the chip for src/rt.rs's register and RAM tests to
-//! find: a stuck bit in a CPU register, forced after every instruction, or
-//! a byte of SRAM with a stuck bit, two shorted bits, or an address that
+//! find: a stuck bit or two shorted bits in a CPU register, forced before
+//! every instruction, or a byte of SRAM with a stuck bit, two shorted bits, or an address that
 //! reaches another byte (`world::RamFault`). The stack checks wait until
 //! those tests are done, since they point SP all over SRAM.
 //!
@@ -95,7 +95,8 @@
 //!    because the firmware has no statics yet, so as linked both loops in
 //!    src/rt.rs run zero times.
 //! 3. Power-on with every stuck register bit and a spread of RAM faults
-//!    (`startup_faults`), checking each one stops in `__selftest_failed`
+//!    (`startup_faults`), then every short between two bits of a register
+//!    (`register_shorts`), checking each one stops in `__selftest_failed`
 //!    with the light dark.
 //! 4. Every example in docs/ui.md (see `spec.rs`), each on a fresh chip,
 //!    with the cell, temperature, broken ADC, fuses, corrupt flash or
@@ -274,13 +275,13 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
 
     // A chip that's just had its cell put in, in `world`, run to the end of
     // startup.
-    let power_on = |world: &World| -> Result<(Sim, Boot), String> {
-        let mut sim =
-            Sim::new(signed.clone(), linked.bss.end, unhandled)?.testing_until(ram_tested);
+    let power_on_image = |image: Vec<u8>, world: &World| -> Result<(Sim, Boot), String> {
+        let mut sim = Sim::new(image, linked.bss.end, unhandled)?.testing_until(ram_tested);
         sim.chip.world = *world;
         let boot = sim.boot(main, failed)?;
         Ok((sim, boot))
     };
+    let power_on = |world: &World| power_on_image(signed.clone(), world);
 
     let (sim, boot) = power_on(&World::NORMAL).map_err(|e| format!("startup: {e}"))?;
     if let Boot::Failed { from } = boot {
@@ -296,6 +297,14 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
 
     startup_faults(&power_on, symbol("__registers_tested")? / 2, ram_tested / 2)
         .map_err(|e| format!("startup self-tests: {e}"))?;
+
+    let marks = Marks {
+        register_shorts: symbol("__register_shorts")? / 2,
+        register_shorts_end: symbol("__register_shorts_end")? / 2,
+        registers_tested: symbol("__registers_tested")? / 2,
+    };
+    register_shorts(&power_on, &power_on_image, &signed, &marks)
+        .map_err(|e| format!("register shorts: {e}"))?;
 
     let mut report = Report {
         stack: 0,
@@ -550,6 +559,8 @@ fn ui_example(
 /// It presses and releases the switch a few times on the way, since
 /// "nothing, ever" includes clicks.
 fn stays_dark(sim: &mut Sim) -> Result<(), String> {
+    // `__selftest_failed` starts with a `cli`, then spins.
+    sim.step()?;
     let failed = sim.cpu.pc;
     for step in 0..2_000 {
         if step % 250 == 0 {
@@ -641,7 +652,8 @@ fn startup_faults(
         (Register::Sph, 6),
     ]);
     let registers = tested.flat_map(|(reg, bits)| {
-        (0..bits).flat_map(move |bit| [false, true].map(|high| RegisterFault { reg, bit, high }))
+        (0..bits)
+            .flat_map(move |bit| [false, true].map(|high| RegisterFault::Stuck { reg, bit, high }))
     });
 
     let worlds = ram
@@ -674,6 +686,110 @@ fn startup_faults(
         stays_dark(&mut sim).map_err(fault)?;
     }
     Ok(())
+}
+
+/// Powers up with every pair of bits in every register src/rt.rs tests
+/// shorted, both ways round, and checks each stops in `__selftest_failed`
+/// and stays dark. 0x55 and 0xAA set two bits differently only if they're an
+/// odd distance apart, so those shorts have to stop before
+/// `__register_shorts`, and the rest have to get past it and stop after. The
+/// exceptions can stop anywhere in the register test: SREG, where a short
+/// can spoil the very flags the compares read, and r16 and r17, which also
+/// carry SREG's and SPH's patterns, with bits masked off that 0x55 and 0xAA
+/// would have set the same.
+///
+/// Then it jumps over `__register_shorts`, and checks a short it found gets
+/// all the way to `main` without it.
+fn register_shorts(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    power_on_image: &impl Fn(Vec<u8>, &World) -> Result<(Sim, Boot), String>,
+    image: &[u8],
+    marks: &Marks,
+) -> Result<(), String> {
+    let tested = (0..32).map(|n| (Register::R(n), 8)).chain([
+        (Register::Spl, 8),
+        (Register::Sph, 6),
+        (Register::Sreg, 7),
+    ]);
+    for (reg, width) in tested {
+        for a in 0..width {
+            for b in a + 1..width {
+                for high in [false, true] {
+                    let register = RegisterFault::Short {
+                        reg,
+                        bits: [a, b],
+                        high,
+                    };
+                    let fault = |e: String| format!("{register}: {e}");
+                    let world = World {
+                        register: Some(register),
+                        ..World::NORMAL
+                    };
+                    let carries_patterns = matches!(reg, Register::Sreg | Register::R(16 | 17));
+                    let found_in = if carries_patterns {
+                        0..marks.registers_tested
+                    } else if (b - a) % 2 == 1 {
+                        0..marks.register_shorts
+                    } else {
+                        marks.register_shorts..marks.registers_tested
+                    };
+                    let (mut sim, boot) = power_on(&world).map_err(fault)?;
+                    let Boot::Failed { from } = boot else {
+                        return Err(fault("not found, and the firmware reached main".into()));
+                    };
+                    if !found_in.contains(&from) {
+                        return Err(fault(format!(
+                            "found by the wrong test, at {:#06x}",
+                            from * 2
+                        )));
+                    }
+                    stays_dark(&mut sim).map_err(fault)?;
+                }
+            }
+        }
+    }
+
+    let mut skipping = image.to_vec();
+    let at = marks.register_shorts as usize * 2;
+    let jump = rjmp(marks.register_shorts, marks.register_shorts_end)?;
+    skipping[at..at + 2].copy_from_slice(&jump.to_le_bytes());
+    let world = World {
+        register: Some(RegisterFault::Short {
+            reg: Register::R(5),
+            bits: [0, 2],
+            high: false,
+        }),
+        ..World::NORMAL
+    };
+    match power_on_image(skipping, &world)? {
+        (_, Boot::Main) => Ok(()),
+        (_, Boot::Failed { from }) => Err(format!(
+            "a short between bits two apart was found at {:#06x} with \
+             `__register_shorts` skipped, so that isn't what finds it",
+            from * 2
+        )),
+    }
+}
+
+/// Word addresses of the labels in src/rt.rs's self-tests.
+struct Marks {
+    /// Where the 0x33 and 0x0F register patterns start, and the end of them.
+    register_shorts: u32,
+    register_shorts_end: u32,
+    /// Where the register test ends.
+    registers_tested: u32,
+}
+
+/// An `rjmp` at word address `from`, forwards to `to`.
+fn rjmp(from: u32, to: u32) -> Result<u16, String> {
+    match to.checked_sub(from + 1) {
+        Some(k) if k < 2048 => Ok(0xC000 | k as u16),
+        _ => Err(format!(
+            "an rjmp at {:#06x} can't reach {:#06x}",
+            from * 2,
+            to * 2
+        )),
+    }
 }
 
 /// Switches the firmware and the library the same random way. The host
@@ -3053,7 +3169,7 @@ mod tests {
     fn a_stuck_register_is_stuck_from_the_first_instruction() {
         // mov r17, r16, with r16 stuck high at bit 0 and never written.
         let mut s = sim(&[0x2F10, SPIN]);
-        s.chip.world.register = Some(RegisterFault {
+        s.chip.world.register = Some(RegisterFault::Stuck {
             reg: Register::R(16),
             bit: 0,
             high: true,
