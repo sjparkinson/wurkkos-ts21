@@ -25,7 +25,12 @@
 //!   starts at the first `wdr`, as on the chip (§19.3.3.2). A feed exactly
 //!   on a window edge fails too: `wdr` takes two to three WDT clocks to
 //!   sync, so on the chip it's a coin toss. `hw::init` has to turn it on,
-//!   and nothing may change it after that, off included.
+//!   and nothing may change it after that, off included. Those are errors
+//!   only while nothing's expecting a bite; otherwise it resets the chip.
+//! - Reset: RSTCTRL.RSTFR is sticky, with a flag for each reset since it was
+//!   last cleared by writing 1, and RSTCTRL.SWRR takes the CCP key. A reset
+//!   puts every register back and restarts the CPU, but leaves SRAM alone.
+//!   The datasheet doesn't promise that; AN2632 §6 leans on it.
 //! - ADC0 only converts when it's set up for one of the two measurements the
 //!   firmware makes (the 1.5 V reference against VDD, four accumulated, or
 //!   the temperature sensor against 1.1 V with the datasheet's delays and
@@ -121,6 +126,7 @@
 //! the main loop fits in a 64 Hz tick.
 
 use std::iter;
+use std::mem;
 use std::ops::Range;
 
 use ts21::ramp;
@@ -134,7 +140,7 @@ use crate::simulate::{self, Sample};
 use crate::spec::{self, Example};
 use crate::switching::RandomSwitching;
 use crate::updi::map;
-use crate::world::{self, CALIBRATION, RamFault, Register, RegisterFault, Rig, World};
+use crate::world::{self, CALIBRATION, RamFault, Register, RegisterFault, Rig, WdtFault, World};
 
 // The fake chip uses the addresses and the fields it models, not all of them.
 // atdf.rs loads this file again for its tests on purpose: there, an unused
@@ -1456,6 +1462,8 @@ struct Sim {
     ticks_landed: u32,
     /// Set to land interrupts on purpose, mid-pass.
     landings: Option<Landings>,
+    /// What `testing` goes back to on a reset, since startup runs again.
+    ram_tested: Option<u32>,
 }
 
 /// Where startup ended up.
@@ -1504,6 +1512,7 @@ impl Sim {
             mid_access: 0,
             ticks_landed: 0,
             landings: None,
+            ram_tested: None,
         })
     }
 
@@ -1511,6 +1520,7 @@ impl Sim {
     /// byte address, as startup does with the real src/rt.rs.
     fn testing_until(mut self, ram_tested: u32) -> Self {
         self.testing = Some(ram_tested / 2);
+        self.ram_tested = self.testing;
         self
     }
 
@@ -1558,6 +1568,10 @@ impl Sim {
         if awake && !self.landing_stops_time(handling) {
             self.executed += 1;
             self.chip.elapse()?;
+        }
+        if let Some(flag) = self.chip.pending_reset.take() {
+            self.reset(flag);
+            return Ok(());
         }
         if self.testing == Some(self.cpu.pc) {
             self.testing = None;
@@ -1685,6 +1699,16 @@ struct Chip {
     adc: Adc,
     wdt: Wdt,
     crc: CrcScan,
+    /// RSTCTRL.RSTFR.
+    rstfr: u8,
+    /// A reset that's happened, for `Sim::step` to carry out: which RSTFR
+    /// flag it sets.
+    pending_reset: Option<u8>,
+    /// Resets so far, not counting power-on.
+    resets: u32,
+    /// Whether a bite resets the chip, as on the real thing, or fails the
+    /// firmware, which is what it's for in normal use.
+    bites: bool,
 }
 
 /// The watchdog, as the firmware can see it. Its settings are in
@@ -1707,6 +1731,8 @@ struct Wdt {
     windowed: bool,
     /// Reads of WDT.STATUS that still report SYNCBUSY after a CTRLA write.
     busy: u8,
+    /// Whether a `wdr` has gone through, for `WdtFault::Stops`.
+    fed: bool,
 }
 
 /// WDT clocks in a WDT.CTRLA PERIOD or WINDOW setting, 0 for off.
@@ -1804,6 +1830,10 @@ impl Chip {
                 busy_reads: 0,
                 status: regs::CRCSCAN_OK,
             },
+            rstfr: regs::RSTCTRL_PORF,
+            pending_reset: None,
+            resets: 0,
+            bites: false,
         }
     }
 
@@ -2031,8 +2061,8 @@ impl Chip {
         let ticks = self.wdt.ticks;
         let clocks = ticks * WDT_CLOCKS_PER_TICK;
         let timeout = self.wdt_closed() + self.wdt_open();
-        if clocks >= timeout {
-            return Err(format!(
+        if self.wdt_times_out(clocks, timeout) {
+            return self.bite(format!(
                 "the watchdog went {ticks} ticks ({clocks} WDT clocks) {WDT_TIMED_OUT}, \
                  against a {timeout}-clock timeout, so the chip would have reset"
             ));
@@ -2300,6 +2330,8 @@ fn name(addr: usize) -> String {
     }
     let known = [
         (reg::CPU_CCP, "CPU.CCP"),
+        (reg::RSTCTRL_RSTFR, "RSTCTRL.RSTFR"),
+        (reg::RSTCTRL_SWRR, "RSTCTRL.SWRR"),
         (reg::VPORTA_IN, "VPORTA.IN"),
         (reg::VPORTB_DIR, "VPORTB.DIR"),
         (reg::CLKCTRL_MCLKCTRLB, "CLKCTRL.MCLKCTRLB"),
@@ -2753,6 +2785,7 @@ impl Bus for Chip {
             reg::SIGROW_TEMPSENSE0 => Ok(CALIBRATION.gain),
             reg::SIGROW_TEMPSENSE1 => Ok(CALIBRATION.offset as u8),
             reg::CRCSCAN_STATUS => Ok(self.crc_status()),
+            reg::RSTCTRL_RSTFR => Ok(self.rstfr),
             _ if self.world.fuse(a).is_some() => Ok(self.world.fuse(a).unwrap_or(0xFF)),
             _ if plain(a) => Ok(self.io[a]),
             _ => Err(format!(
@@ -2862,6 +2895,14 @@ impl Bus for Chip {
                 }
             }
             PORTA_INTFLAGS => self.porta_flags &= !value,
+            reg::RSTCTRL_RSTFR => self.rstfr &= !value,
+            reg::RSTCTRL_SWRR => {
+                self.take_protected_write(a)?;
+                if value != regs::RSTCTRL_SWRE {
+                    return Err(format!("writes {value:#04x} to RSTCTRL.SWRR"));
+                }
+                self.pending_reset = Some(regs::RSTCTRL_SWRF);
+            }
             _ if WIDE.contains(&a) => {
                 if let Some((pending, _)) = self.temp {
                     return Err(format!(
@@ -2961,11 +3002,14 @@ impl Bus for Chip {
         if self.wdt.busy > 0 {
             return Err("wdr before the WDT.CTRLA write has synced".into());
         }
+        if self.world.wdt == Some(WdtFault::Deaf) {
+            return Ok(());
+        }
         let ticks = self.wdt.ticks;
         let clocks = ticks * WDT_CLOCKS_PER_TICK;
         let closed = self.wdt_closed();
-        if closed > 0 && clocks <= closed {
-            return Err(format!(
+        if self.wdr_in_closed_window(clocks, closed) {
+            return self.bite(format!(
                 "wdr {ticks} ticks ({clocks} WDT clocks) after the last, in or on the edge \
                  of the {closed}-clock closed window, so the chip would have reset (or, \
                  within 2 to 3 clocks of the last, ignored it, section 19.3.6)"
@@ -2973,7 +3017,74 @@ impl Bus for Chip {
         }
         self.wdt.ticks = 0;
         self.wdt.windowed = self.watchdog_windowed();
+        self.wdt.fed = true;
         Ok(())
+    }
+}
+
+// The reset controller, and the watchdog actually resetting the chip.
+
+impl Chip {
+    /// Whether `clocks` since the last `wdr` run out a `timeout`, allowing
+    /// for a broken watchdog.
+    fn wdt_times_out(&self, clocks: u32, timeout: u32) -> bool {
+        match self.world.wdt {
+            Some(WdtFault::Never) => false,
+            Some(WdtFault::Stops) if self.wdt.fed => false,
+            Some(WdtFault::Early) => clocks >= timeout / 2,
+            _ => clocks >= timeout,
+        }
+    }
+
+    /// Whether a `wdr` `clocks` after the last lands in a `closed` window,
+    /// allowing for a broken watchdog.
+    fn wdr_in_closed_window(&self, clocks: u32, closed: u32) -> bool {
+        match self.world.wdt {
+            Some(WdtFault::Open) => false,
+            Some(WdtFault::Shut) => self.watchdog_windowed(),
+            _ => closed > 0 && clocks <= closed,
+        }
+    }
+
+    /// The watchdog resets the chip. In normal use nothing's expecting that,
+    /// so it's the firmware failing, for the reason in `why`.
+    fn bite(&mut self, why: String) -> Result<(), String> {
+        if !self.bites {
+            return Err(why);
+        }
+        self.pending_reset = Some(regs::RSTCTRL_WDRF);
+        Ok(())
+    }
+
+    /// Everything back to its reset value but the things a reset doesn't
+    /// reach: flash, SRAM, the flags in RSTFR and the world outside. The
+    /// PIT starts from nothing, and comes up to a period later, which is
+    /// the slow end of "anytime between enabling and a full period"
+    /// (DS40002204A §23.5.2.2).
+    fn reset(&mut self, flag: u8) {
+        let mut chip = Self::new(mem::take(&mut self.flash));
+        chip.sram = mem::take(&mut self.sram);
+        chip.now = self.now;
+        chip.next_pit = self.now + PIT_PERIOD;
+        chip.pressed = self.pressed;
+        chip.ticks = self.ticks;
+        chip.power_downs = self.power_downs;
+        chip.world = self.world;
+        chip.rstfr = self.rstfr | flag;
+        chip.resets = self.resets + 1;
+        chip.bites = self.bites;
+        *self = chip;
+    }
+}
+
+impl Sim {
+    /// A reset that sets `flag` in RSTFR, which starts the CPU again from
+    /// the reset vector. Startup's self-tests come round again, so the stack
+    /// checks wait for them as they did at power-on.
+    fn reset(&mut self, flag: u8) {
+        self.cpu = Cpu::new(&SRAM);
+        self.chip.reset(flag);
+        self.testing = self.ram_tested;
     }
 }
 
@@ -3305,6 +3416,144 @@ mod tests {
             assert_eq!(next_tick(&mut c), Ok(()), "tick {tick}");
             assert_eq!(c.wdr(), Ok(()), "tick {tick}");
         }
+    }
+
+    /// A chip like `watchdog`'s with a `fault`, on which a bite resets it.
+    fn biting(value: u8, fault: Option<WdtFault>) -> Chip {
+        let mut c = chip();
+        c.bites = true;
+        c.world.wdt = fault;
+        c.io[reg::RTC_PITCTRLA] = regs::RTC_PERIOD_CYC512 | regs::RTC_PITEN;
+        wdt_write(&mut c, value).unwrap();
+        while c.read(reg::WDT_STATUS as u16).unwrap() != 0 {}
+        c
+    }
+
+    /// Ticks until `c` bites, up to `most`, feeding it after each of the
+    /// ticks `feeds` says.
+    fn ticks_to_bite(c: &mut Chip, most: u32, feeds: &[u32]) -> Option<u32> {
+        for tick in 1..=most {
+            next_tick(c).unwrap();
+            if c.pending_reset.is_some() {
+                return Some(tick);
+            }
+            if feeds.contains(&tick) {
+                c.wdr().unwrap();
+                if c.pending_reset.is_some() {
+                    return Some(tick);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_timeout_or_a_closed_window_resets_the_chip_once_bites_are_expected() {
+        let mut c = biting(regs::WDT_PERIOD_32CLK, None);
+        assert_eq!(ticks_to_bite(&mut c, 8, &[]), Some(2));
+        assert_eq!(c.pending_reset, Some(regs::RSTCTRL_WDRF));
+        let mut c = biting(WDT_ON, None);
+        assert_eq!(ticks_to_bite(&mut c, 8, &[1, 2]), Some(2));
+    }
+
+    #[test]
+    fn a_watchdog_that_never_bites() {
+        let mut c = biting(regs::WDT_PERIOD_8CLK, Some(WdtFault::Never));
+        assert_eq!(ticks_to_bite(&mut c, 100, &[]), None);
+    }
+
+    #[test]
+    fn a_watchdog_that_bites_early() {
+        let mut c = biting(regs::WDT_PERIOD_32CLK, Some(WdtFault::Early));
+        assert_eq!(ticks_to_bite(&mut c, 8, &[]), Some(1));
+    }
+
+    #[test]
+    fn a_watchdog_that_ignores_a_feed() {
+        let mut c = biting(regs::WDT_PERIOD_32CLK, Some(WdtFault::Deaf));
+        assert_eq!(ticks_to_bite(&mut c, 8, &[1]), Some(2));
+    }
+
+    #[test]
+    fn a_watchdog_that_stops_once_fed() {
+        let mut c = biting(regs::WDT_PERIOD_32CLK, Some(WdtFault::Stops));
+        assert_eq!(ticks_to_bite(&mut c, 100, &[1]), None);
+        let mut c = biting(regs::WDT_PERIOD_32CLK, Some(WdtFault::Stops));
+        assert_eq!(ticks_to_bite(&mut c, 100, &[]), Some(2), "unfed");
+    }
+
+    #[test]
+    fn a_window_that_lets_an_early_feed_through() {
+        let mut c = biting(WDT_ON, Some(WdtFault::Open));
+        // Fed in the closed window, and then it times out as usual.
+        assert_eq!(ticks_to_bite(&mut c, 8, &[1, 2]), Some(6));
+    }
+
+    #[test]
+    fn a_window_that_never_opens() {
+        let mut c = biting(WDT_ON, Some(WdtFault::Shut));
+        assert_eq!(ticks_to_bite(&mut c, 8, &[1]), Some(1));
+        let mut c = biting(regs::WDT_PERIOD_32CLK, Some(WdtFault::Shut));
+        assert_eq!(ticks_to_bite(&mut c, 8, &[1]), Some(3), "with no window");
+    }
+
+    #[test]
+    fn rstfr_is_sticky_until_a_1_is_written() {
+        let mut c = chip();
+        let rstfr = reg::RSTCTRL_RSTFR as u16;
+        assert_eq!(c.read(rstfr), Ok(regs::RSTCTRL_PORF), "power-on");
+        c.reset(regs::RSTCTRL_WDRF);
+        assert_eq!(
+            c.read(rstfr),
+            Ok(regs::RSTCTRL_PORF | regs::RSTCTRL_WDRF),
+            "still there after another reset"
+        );
+        c.write(rstfr, regs::RSTCTRL_PORF).unwrap();
+        assert_eq!(c.read(rstfr), Ok(regs::RSTCTRL_WDRF));
+        c.write(rstfr, 0).unwrap();
+        assert_eq!(c.read(rstfr), Ok(regs::RSTCTRL_WDRF), "0s do nothing");
+    }
+
+    #[test]
+    fn a_software_reset_takes_the_ccp_key() {
+        let swrr = reg::RSTCTRL_SWRR as u16;
+        let mut c = chip();
+        assert!(c.write(swrr, regs::RSTCTRL_SWRE).is_err());
+        c.write(reg::CPU_CCP as u16, regs::CPU_CCP_IOREG).unwrap();
+        c.write(swrr, regs::RSTCTRL_SWRE).unwrap();
+        assert_eq!(c.pending_reset, Some(regs::RSTCTRL_SWRF));
+    }
+
+    #[test]
+    fn a_reset_leaves_sram_and_the_outside_world_and_nothing_else() {
+        let mut c = biting(WDT_ON, Some(WdtFault::Open));
+        c.write(SRAM.start, 0x42).unwrap();
+        c.set_switch(true).unwrap();
+        c.io[reg::VPORTB_DIR] = FET;
+        c.pending_reset = Some(regs::RSTCTRL_WDRF);
+        let (now, ticks) = (c.now, c.ticks);
+
+        c.reset(regs::RSTCTRL_WDRF);
+
+        assert_eq!(c.read(SRAM.start), Ok(0x42));
+        assert!(c.pressed);
+        assert_eq!(c.world.wdt, Some(WdtFault::Open));
+        assert_eq!((c.now, c.ticks, c.resets), (now, ticks, 1));
+        assert!(!c.watchdog_running(), "WDTCFG is 0");
+        assert_eq!(c.io[reg::VPORTB_DIR], 0, "the pins float until startup");
+        assert_eq!(c.pending_reset, None);
+    }
+
+    #[test]
+    fn a_reset_starts_the_cpu_and_the_self_test_wait_again() {
+        let mut s = sim(&[SPIN]).testing_until(0x1000);
+        s.testing = None;
+        s.cpu.sp = SRAM.end - 0x10;
+        s.chip.pending_reset = Some(regs::RSTCTRL_WDRF);
+        s.step().unwrap();
+        assert_eq!((s.cpu.pc, s.cpu.sp), (0, SRAM.end - 1));
+        assert_eq!(s.chip.resets, 1);
+        assert_eq!(s.testing, Some(0x1000 / 2));
     }
 
     /// The watchdog counts whenever time moves: polling for the tick, a
