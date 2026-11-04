@@ -96,21 +96,19 @@ jobs:
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           ## Flash
 
-          Download the \`.hex\`, then from a checkout of this repo:
+          From a checkout of this repo:
 
           \`\`\`sh
+          gh release download v$VERSION -R $GITHUB_REPOSITORY -p wurkkos-ts21-0614-$VERSION.hex
+          gh attestation verify wurkkos-ts21-0614-$VERSION.hex -R $GITHUB_REPOSITORY
           cargo xtask flash /dev/cu.usbserial-XXXX wurkkos-ts21-0614-$VERSION.hex
           \`\`\`
 
-          [docs/flashing.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/flashing.md) covers programmers, pad order and getting back to Anduril.
+          See [docs/flashing.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/flashing.md) for information on programmers, and pad order.
 
           ## Verify
 
-          Both files have a [build provenance attestation]($ATTESTATION_URL). To check a download came from this repo's CI:
-
-          \`\`\`sh
-          gh attestation verify wurkkos-ts21-0614-$VERSION.hex -R $GITHUB_REPOSITORY
-          \`\`\`
+          Both files have a [build provenance attestation]($ATTESTATION_URL). \`gh attestation verify\` checks its signature and that the file was built by this repo's CI.
 
           ## Size
 
