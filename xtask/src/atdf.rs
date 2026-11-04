@@ -499,9 +499,9 @@ mod tests {
                 "CLKCTRL.MCLKCTRLB.PEN",
             ),
             (
-                regs::CLKCTRL_PDIV_2X,
-                mclkctrlb.value("PDIV", "2X"),
-                "CLKCTRL.MCLKCTRLB.PDIV=2X",
+                regs::CLKCTRL_PDIV_4X,
+                mclkctrlb.value("PDIV", "4X"),
+                "CLKCTRL.MCLKCTRLB.PDIV=4X",
             ),
             (
                 regs::WDT_PERIOD_32CLK,
@@ -542,9 +542,9 @@ mod tests {
             (regs::TCA_CMP0EN, ctrlb.mask("CMP0EN"), "TCA0.CTRLB.CMP0EN"),
             (regs::TCA_CMP1EN, ctrlb.mask("CMP1EN"), "TCA0.CTRLB.CMP1EN"),
             (
-                regs::TCA_WGMODE_DSBOTTOM,
-                ctrlb.value("WGMODE", "DSBOTTOM"),
-                "TCA0.CTRLB.WGMODE=DSBOTTOM",
+                regs::TCA_WGMODE_SINGLESLOPE,
+                ctrlb.value("WGMODE", "SINGLESLOPE"),
+                "TCA0.CTRLB.WGMODE=SINGLESLOPE",
             ),
             (
                 regs::RTC_PITEN,
@@ -599,9 +599,9 @@ mod tests {
                 "ADC0.CTRLB.SAMPNUM=ACC4",
             ),
             (
-                regs::ADC_PRESC_DIV16,
-                adc_ctrlc.value("PRESC", "DIV16"),
-                "ADC0.CTRLC.PRESC=DIV16",
+                regs::ADC_PRESC_DIV8,
+                adc_ctrlc.value("PRESC", "DIV8"),
+                "ADC0.CTRLC.PRESC=DIV8",
             ),
             (
                 regs::ADC_REFSEL_INTREF,
@@ -862,6 +862,17 @@ mod tests {
             .map(num)
             .collect();
         (memory, numbers)
+    }
+
+    #[test]
+    fn simulator_wgmode_mask_matches_the_atdf() {
+        let atdf = Atdf::load();
+        let ctrlb = atdf.register("TCA0", Some("SINGLE"), "CTRLB");
+        assert_eq!(
+            u32::from(crate::sim::TCA_WGMODE),
+            ctrlb.mask("WGMODE"),
+            "TCA0.CTRLB.WGMODE"
+        );
     }
 
     #[test]

@@ -139,8 +139,8 @@ pub const CPU_SREG_I: u8 = 0x80;
 
 /// CLKCTRL.MCLKCTRLB.PEN, prescaler enable.
 pub const CLKCTRL_PEN: u8 = 0x01;
-/// CLKCTRL.MCLKCTRLB.PDIV = 2X.
-pub const CLKCTRL_PDIV_2X: u8 = 0x00;
+/// CLKCTRL.MCLKCTRLB.PDIV = 4X.
+pub const CLKCTRL_PDIV_4X: u8 = 0x01 << 1;
 
 /// WDT.CTRLA.PERIOD = 32CLK: 32 cycles of the 1.024 kHz clock. In window
 /// mode that's the open window, after the closed one.
@@ -167,8 +167,8 @@ pub const TCA_CLKSEL_DIV1: u8 = 0x00;
 pub const TCA_CMP0EN: u8 = 0x10;
 /// TCA0.CTRLB.CMP1EN (single mode).
 pub const TCA_CMP1EN: u8 = 0x20;
-/// TCA0.CTRLB.WGMODE = DSBOTTOM (single mode).
-pub const TCA_WGMODE_DSBOTTOM: u8 = 0x07;
+/// TCA0.CTRLB.WGMODE = SINGLESLOPE (single mode).
+pub const TCA_WGMODE_SINGLESLOPE: u8 = 0x03;
 
 /// RTC.PITCTRLA.PITEN.
 pub const RTC_PITEN: u8 = 0x01;
@@ -199,9 +199,9 @@ pub const ADC_ENABLE: u8 = 0x01;
 pub const ADC_SAMPNUM_ACC1: u8 = 0x00;
 /// ADC0.CTRLB.SAMPNUM = ACC4, four conversions accumulated.
 pub const ADC_SAMPNUM_ACC4: u8 = 0x02;
-/// ADC0.CTRLC.PRESC = DIV16: 10 MHz / 16 = 625 kHz, inside the 200 kHz to
+/// ADC0.CTRLC.PRESC = DIV8: 5 MHz / 8 = 625 kHz, inside the 200 kHz to
 /// 1.5 MHz the datasheet wants for 10 bits (table 36-26).
-pub const ADC_PRESC_DIV16: u8 = 0x03;
+pub const ADC_PRESC_DIV8: u8 = 0x02;
 /// ADC0.CTRLC.REFSEL = INTREF, the internal reference from VREF.
 pub const ADC_REFSEL_INTREF: u8 = 0x00 << 4;
 /// ADC0.CTRLC.REFSEL = VDDREF.

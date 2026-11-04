@@ -16,8 +16,9 @@ pub const LEVELS: u8 = 150;
 /// The highest level that runs on the linear channel alone.
 pub const LINEAR_MAX: u8 = 75;
 
-/// TCA0's period. Dual-slope PWM at 10 MHz with a TOP of 255 runs at
-/// 10 MHz / (2 × 255) ≈ 19.6 kHz, well above anything you'd hear or see.
+/// Full duty, and TCA0's cycle in clocks. Single-slope PWM at 5 MHz with a
+/// period of 254 runs at 5 MHz / 255 ≈ 19.6 kHz, well above anything you'd
+/// hear or see, and a compare of 255 is over the period, so fully on.
 pub const PWM_TOP: u16 = 255;
 
 /// Duty cycles for one level, each out of [`PWM_TOP`].

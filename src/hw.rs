@@ -45,7 +45,7 @@ const _: () = assert!(PORTB_OUTPUTS & 1 << AUX == 0);
 const UNUSED_PIN: u8 = regs::PORT_PULLUPEN | regs::PORT_ISC_INPUT_DISABLE;
 
 /// TCA0.CTRLB with both PWM channels on their pins.
-const TCA_DRIVING: u8 = regs::TCA_CMP0EN | regs::TCA_CMP1EN | regs::TCA_WGMODE_DSBOTTOM;
+const TCA_DRIVING: u8 = regs::TCA_CMP0EN | regs::TCA_CMP1EN | regs::TCA_WGMODE_SINGLESLOPE;
 
 /// WDT clocks in a WDT.CTRLA WINDOW or PERIOD setting `n`, 1 to 11.
 const fn wdt_clocks(n: u8) -> u16 {
@@ -148,11 +148,13 @@ fn protected_write(addr: usize, value: u8) {
 }
 
 pub fn init() {
-    // 20 MHz oscillator (the factory OSCCFG fuse) divided by 2. 10 MHz is
-    // safe down to 2.7 V, below anywhere a lithium cell should be run.
+    // 20 MHz oscillator (the factory OSCCFG fuse) divided by 4. 5 MHz is in
+    // spec down to 1.8 V. 10 MHz needs 2.7 V (table 36-3), and VCC can go
+    // under that near the cut-off, or on the FET quicker than the low-voltage
+    // protection's filter sees it.
     protected_write(
         reg::CLKCTRL_MCLKCTRLB,
-        regs::CLKCTRL_PDIV_2X | regs::CLKCTRL_PEN,
+        regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN,
     );
 
     // The watchdog, in window mode, before anything that could wait on a
@@ -193,10 +195,12 @@ pub fn init() {
 
     write(reg::VPORTB_DIR, PORTB_OUTPUTS);
 
-    // Dual-slope PWM on WO0 (FET) and WO1 (linear), straight off the
-    // 10 MHz clock. The BUF registers apply at the end of a cycle, so level
-    // changes never glitch.
-    write16(reg::TCA0_PERBUF, PWM_TOP);
+    // Single-slope PWM on WO0 (FET) and WO1 (linear), straight off the
+    // 5 MHz clock. The BUF registers apply at the end of a cycle, so level
+    // changes never glitch. A compare of 0 holds the pin low and one over
+    // PER holds it high (section 20.3.3.4.3), so PER is one under the top
+    // duty.
+    write16(reg::TCA0_PERBUF, PWM_TOP - 1);
     write16(reg::TCA0_CMP0BUF, 0);
     write16(reg::TCA0_CMP1BUF, 0);
     write(reg::TCA0_CTRLB, TCA_DRIVING);
@@ -210,7 +214,7 @@ pub fn init() {
     // The ATDF says CALIB resets to 50% duty, the datasheet says 25%, and
     // 25% is what it wants at this clock (section 30.5.17), so say so.
     write(reg::ADC0_CALIB, regs::ADC_DUTYCYC_DUTY25);
-    write(reg::ADC0_CTRLC, regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV16);
+    write(reg::ADC0_CTRLC, regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV8);
     write(reg::ADC0_CTRLD, regs::ADC_INITDLY_DLY32);
     write(reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US);
 
@@ -266,7 +270,7 @@ fn prepare_sleep(rest: bool) {
     if rest && output_settled() {
         write(reg::ADC0_CTRLA, 0);
         write(reg::VREF_CTRLB, 0);
-        write(reg::TCA0_CTRLB, regs::TCA_WGMODE_DSBOTTOM);
+        write(reg::TCA0_CTRLB, regs::TCA_WGMODE_SINGLESLOPE);
         write(
             reg::SLPCTRL_CTRLA,
             regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN,
@@ -435,7 +439,7 @@ pub fn adc_start(convert: Convert) {
         write(reg::VREF_CTRLA, vref);
         write(
             reg::ADC0_CTRLC,
-            regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV16 | refsel,
+            regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV8 | refsel,
         );
         write(reg::ADC0_MUXPOS, muxpos);
         write(reg::ADC0_CTRLB, sampnum);
