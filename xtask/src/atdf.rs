@@ -379,6 +379,8 @@ mod tests {
             (regs::addr::TCA0_CTRLA, "TCA0", single, "CTRLA", 1),
             (regs::addr::TCA0_CTRLB, "TCA0", single, "CTRLB", 1),
             (regs::addr::TCA0_CNT, "TCA0", single, "CNT", 2),
+            (regs::addr::TCA0_CMP0, "TCA0", single, "CMP0", 2),
+            (regs::addr::TCA0_CMP1, "TCA0", single, "CMP1", 2),
             (regs::addr::TCA0_PERBUF, "TCA0", single, "PERBUF", 2),
             (regs::addr::TCA0_CMP0BUF, "TCA0", single, "CMP0BUF", 2),
             (regs::addr::TCA0_CMP1BUF, "TCA0", single, "CMP1BUF", 2),
@@ -657,6 +659,12 @@ mod tests {
                 atdf.register("SLPCTRL", None, "CTRLA")
                     .value("SMODE", "IDLE"),
                 "SLPCTRL.CTRLA.SMODE=IDLE",
+            ),
+            (
+                regs::SLPCTRL_SMODE_PDOWN,
+                atdf.register("SLPCTRL", None, "CTRLA")
+                    .value("SMODE", "PDOWN"),
+                "SLPCTRL.CTRLA.SMODE=PDOWN",
             ),
             (
                 regs::CRCSCAN_ENABLE,
