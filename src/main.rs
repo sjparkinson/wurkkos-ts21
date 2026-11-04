@@ -68,7 +68,7 @@ extern "C" fn main() -> ! {
 
 // Turns the light off and spins. The watchdog isn't fed here, so it resets
 // the chip (to off, as it boots) 64 WDT clocks after the last feed, about
-// 63 ms nominal, 48 to 95 ms over the oscillator's full spread.
+// 63 ms nominal, 48 to 89 ms over the oscillator's full spread.
 #[cfg(target_arch = "avr")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
