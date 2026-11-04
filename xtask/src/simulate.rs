@@ -20,10 +20,11 @@
 //! `fuse:OSCCFG=0x01` sets a fuse byte and `flash:corrupt` breaks a byte of
 //! flash. `ram:stuck:0x3800.3=1`, `ram:alias:0x3900=0x3800`,
 //! `ram:bridge:0x3800.0.1` and `ram:couple:0x3900.7=1:0x3800.0` break a byte
-//! of SRAM, and `reg:r24.0=1` and
-//! `reg:short:r24.0.2=0` a CPU register, `SREG`, `SPL` and `SPH` included
-//! (`world::RamFault` and `RegisterFault` say how). A script's are all there
-//! from power-on, so they have to come before anything that takes time.
+//! of SRAM, `reg:r24.0=1` and `reg:short:r24.0.2=0` a CPU register, `SREG`,
+//! `SPL` and `SPH` included (`world::RamFault` and `RegisterFault` say how),
+//! and `wdt:never` the watchdog (`world::WdtFault` has the rest). A script's
+//! are all there from power-on, so they have to come before anything that
+//! takes time.
 //!
 //! With no script it runs live in the terminal, in real time, with the keys
 //! in `HELP`. Terminals don't say when a key goes up, which a hold needs, so
@@ -35,7 +36,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::world::{FUSE_NAMES, RamFault, RegisterFault, Rig, World, unmodelled_fuse};
+use crate::world::{FUSE_NAMES, RamFault, RegisterFault, Rig, WdtFault, World, unmodelled_fuse};
 use ts21::TICKS_PER_SECOND;
 use ts21::button::{Event, HOLD_TICKS, RELEASE_TICKS};
 use ts21::ramp::{self, LEVELS};
@@ -74,6 +75,8 @@ pub enum Action {
     Ram(RamFault),
     /// A stuck bit in a CPU register, from reset. Power-on only.
     Register(RegisterFault),
+    /// A broken watchdog, from reset. Power-on only.
+    Wdt(WdtFault),
 }
 
 impl Action {
@@ -82,7 +85,11 @@ impl Action {
     fn power_on(self) -> bool {
         matches!(
             self,
-            Self::Fuse { .. } | Self::CorruptFlash | Self::Ram(_) | Self::Register(_)
+            Self::Fuse { .. }
+                | Self::CorruptFlash
+                | Self::Ram(_)
+                | Self::Register(_)
+                | Self::Wdt(_)
         )
     }
 
@@ -120,6 +127,9 @@ impl FromStr for Action {
         }
         if let Some(fault) = word.strip_prefix("reg:") {
             return fault.parse().map(Self::Register);
+        }
+        if let Some(fault) = word.strip_prefix("wdt:") {
+            return fault.parse().map(Self::Wdt);
         }
         if let Some(raw) = word.strip_prefix("adc:") {
             let raw = raw
@@ -295,6 +305,10 @@ pub fn samples(actions: &[Action]) -> Vec<Sample> {
             }
             Action::Register(fault) => {
                 world.register = Some(fault);
+                continue;
+            }
+            Action::Wdt(fault) => {
+                world.wdt = Some(fault);
                 continue;
             }
         };

@@ -403,6 +403,67 @@ impl fmt::Display for RegisterFault {
     }
 }
 
+/// A watchdog that doesn't do what the datasheet says, for the proof in
+/// `ts21::watchdog` to find. The chip has it from reset. Scripts write them
+/// as `wdt:never`, and so on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WdtFault {
+    /// It never resets the chip, however long it goes without a `wdr`.
+    Never,
+    /// Its timeouts run out in half the time.
+    Early,
+    /// `wdr` does nothing, so a timeout runs out however often it's fed.
+    Deaf,
+    /// After a `wdr` it never resets the chip again.
+    Stops,
+    /// A `wdr` in the closed window goes through as an ordinary feed.
+    Open,
+    /// The window never opens: any `wdr` with a window set resets the chip.
+    Shut,
+}
+
+impl WdtFault {
+    pub const ALL: [Self; 6] = [
+        Self::Never,
+        Self::Early,
+        Self::Deaf,
+        Self::Stops,
+        Self::Open,
+        Self::Shut,
+    ];
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Early => "early",
+            Self::Deaf => "deaf",
+            Self::Stops => "stops",
+            Self::Open => "open",
+            Self::Shut => "shut",
+        }
+    }
+}
+
+impl FromStr for WdtFault {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|fault| fault.word() == s)
+            .ok_or_else(|| {
+                let words: Vec<&str> = Self::ALL.iter().map(|f| f.word()).collect();
+                format!("no watchdog fault `{s}`; try {}", words.join(", "))
+            })
+    }
+}
+
+impl fmt::Display for WdtFault {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "wdt:{}", self.word())
+    }
+}
+
 /// A data-space address in SRAM, like `0x3800`.
 fn sram_address(s: &str) -> Result<u16, String> {
     let addr = s
@@ -453,6 +514,8 @@ pub struct World {
     pub ram: Option<RamFault>,
     /// A broken CPU register, from reset too.
     pub register: Option<RegisterFault>,
+    /// A broken watchdog, from reset too.
+    pub wdt: Option<WdtFault>,
 }
 
 impl Default for World {
@@ -471,6 +534,7 @@ impl World {
         corrupt_flash: false,
         ram: None,
         register: None,
+        wdt: None,
     };
 
     /// Whether src/rt.rs's startup tests find a broken register or byte of
@@ -770,6 +834,15 @@ mod tests {
                 register.parse::<RegisterFault>().is_err(),
                 "reg:{register} parsed"
             );
+        }
+        assert!("sometimes".parse::<WdtFault>().is_err());
+    }
+
+    #[test]
+    fn watchdog_faults_print_the_way_scripts_write_them() {
+        for fault in WdtFault::ALL {
+            let word = fault.to_string();
+            assert_eq!(word["wdt:".len()..].parse(), Ok(fault));
         }
     }
 
