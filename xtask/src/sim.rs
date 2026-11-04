@@ -7,7 +7,8 @@
 //! the rules the real chip enforces quietly into errors:
 //!
 //! - A protected register only takes a write within four instructions of
-//!   the CCP key. The real chip ignores a late write.
+//!   the CCP key. The real chip ignores a late write. Interrupts wait out
+//!   those four instructions, or until the first store or `sleep` (§8.5.7).
 //! - TCA0's 16-bit registers are written low byte, then high byte, through
 //!   the shared TEMP byte. The other way round, the real chip pairs the high
 //!   byte with a stale low one.
@@ -954,6 +955,9 @@ struct Chip {
     now: u64,
     /// The last instruction a protected register still takes a write on.
     unlocked_until: Option<u64>,
+    /// Whether the CCP period's still holding interrupts off. The key's first
+    /// store or `sleep` ends it, whatever the store was (§8.5.7.1).
+    ccp_hold: bool,
     pressed: bool,
     pit_busy: u8,
     /// RTC.PITINTFLAGS.PI.
@@ -1079,6 +1083,7 @@ impl Chip {
             io: vec![0; 0x1000],
             now: 0,
             unlocked_until: None,
+            ccp_hold: false,
             pressed: false,
             pit_busy: PIT_SYNC_READS,
             pit_flag: false,
@@ -1644,9 +1649,19 @@ impl Bus for Chip {
         (requests != 0).then(|| requests.trailing_zeros() as u8)
     }
 
+    /// Interrupts are ignored for the CCP period, and left pending (§8.5.7.2,
+    /// which reads as covering both keys). The same four instructions as
+    /// `take_protected_write`, unless a store or `sleep` ended it sooner. The
+    /// datasheet also ends it on a load from flash, which isn't modelled:
+    /// nothing runs one between the key and its write.
+    fn holds_interrupts(&self) -> bool {
+        self.ccp_hold && self.unlocked_until.is_some_and(|until| self.now <= until)
+    }
+
     /// Idle and power-down are modelled. Every interrupt the firmware uses
     /// wakes the chip from either.
     fn sleep(&mut self) -> Result<(), String> {
+        self.ccp_hold = false;
         let ctrla = self.io[reg::SLPCTRL_CTRLA];
         if ctrla & regs::SLPCTRL_SEN == 0 {
             return Err(
@@ -1773,6 +1788,7 @@ impl Bus for Chip {
 
     fn write(&mut self, addr: u16, value: u8) -> Result<(), String> {
         let a = usize::from(addr);
+        self.ccp_hold = false;
         if SRAM.contains(&addr) {
             let cell = self.world.ram.map_or(addr, |fault| fault.cell(addr));
             self.sram[usize::from(cell - SRAM.start)] = value;
@@ -1786,6 +1802,7 @@ impl Bus for Chip {
                     ));
                 }
                 self.unlocked_until = Some(self.now + 4);
+                self.ccp_hold = true;
             }
             reg::CLKCTRL_MCLKCTRLB => {
                 self.take_protected_write(a)?;
@@ -2811,6 +2828,127 @@ mod tests {
             err.contains("enables PORTB_PORT (vector 4) with SREG.I set"),
             "{err}"
         );
+    }
+
+    // Hand-written programs for the interrupt tests. Encodings as in avr.rs.
+    const SEI: u16 = 0x9478;
+    const SLEEP: u16 = 0x9588;
+    const RETI: u16 = 0x9518;
+    const INC_R17: u16 = 0x9513;
+    const OUT_CCP_R16: u16 = 0xBF04; // out CPU.CCP, r16
+    const OUT_GPIOR0_R17: u16 = 0xBB1C; // out GPIO.GPIOR0, r17
+    const STS_R17: u16 = 0x9310; // sts k, r17; k is the next word
+    const STS_R18: u16 = 0x9320;
+
+    /// Where `counting_handler` writes down r17.
+    const SEEN: u16 = 0x3900;
+    /// Writes down r17 and clears PORTA's flags with r18, which `main` has
+    /// to have set to 0xFF. It changes no register, as a handler mustn't.
+    fn counting_handler() -> Vec<u16> {
+        vec![STS_R17, SEEN, STS_R18, PORTA_INTFLAGS as u16, RETI]
+    }
+
+    /// ldi r18, 0xFF, then ldi r16, the CCP key.
+    const SET_UP: [u16; 2] = [0xEF2F, 0xED08];
+
+    /// `image` with the PORTA vector going to `handler`, after `main`, and
+    /// PA5 sensing both edges.
+    fn sim_with_handler(main: &[u16], handler: &[u16]) -> Sim {
+        let mut bytes = image(main);
+        let at = (bytes.len() / 2) as u16;
+        let slot = VECTOR_PORTA_PORT * VECTOR_WORDS as usize * 2 + 2;
+        bytes[slot..slot + 2].copy_from_slice(&at.to_le_bytes());
+        bytes.extend(handler.iter().flat_map(|w| w.to_le_bytes()));
+        let mut s = Sim::new(bytes, SRAM.start + 1, u32::from(UNHANDLED) * 2).unwrap();
+        s.chip.io[reg::PORTA_PIN0CTRL + 5] = ISC_BOTHEDGES;
+        s
+    }
+
+    /// Runs `main` with PA5's flag up from reset, and says how many
+    /// `inc r17`s ran before `counting_handler` did.
+    fn incs_before_the_handler(main: &[u16]) -> u8 {
+        let main = [&SET_UP[..], main, &[SPIN]].concat();
+        let mut s = sim_with_handler(&main, &counting_handler());
+        s.chip.porta_flags = SWITCH;
+        for _ in 0..40 {
+            s.step().unwrap();
+        }
+        assert_eq!(s.chip.porta_flags, 0, "the handler ran");
+        s.chip.sram(&(SEEN..SEEN + 1))[0]
+    }
+
+    #[test]
+    fn interrupts_wait_out_the_ccp_window() {
+        let incs = [INC_R17; 6];
+        // sei's own hold covers the key, which starts the four.
+        let main = [&[SEI, OUT_CCP_R16][..], &incs].concat();
+        assert_eq!(incs_before_the_handler(&main), 4);
+    }
+
+    #[test]
+    fn a_store_ends_the_ccp_window_early() {
+        let main = [SEI, OUT_CCP_R16, INC_R17, OUT_GPIOR0_R17, INC_R17, INC_R17];
+        assert_eq!(incs_before_the_handler(&main), 1, "an I/O register");
+        let main = [SEI, OUT_CCP_R16, STS_R17, 0x3910, INC_R17, INC_R17];
+        assert_eq!(incs_before_the_handler(&main), 0, "SRAM counts too");
+    }
+
+    #[test]
+    fn the_protected_write_ends_the_ccp_window() {
+        // ldi r17, PDIV 4X | PEN, then the key and its write.
+        let value = regs::CLKCTRL_PDIV_4X | regs::CLKCTRL_PEN;
+        let main = [
+            ldi(17, value),
+            SEI,
+            OUT_CCP_R16,
+            STS_R17,
+            reg::CLKCTRL_MCLKCTRLB as u16,
+            SPIN,
+        ];
+        let main = [&SET_UP[..], &main].concat();
+        let mut s = sim_with_handler(&main, &counting_handler());
+        s.chip.porta_flags = SWITCH;
+        // jmp, the two set-ups, the ldi, sei, the key and the write.
+        for _ in 0..7 {
+            s.step().unwrap();
+        }
+        assert_eq!(s.chip.porta_flags, SWITCH);
+        assert!(!s.chip.holds_interrupts());
+        s.step().unwrap();
+        assert_eq!(s.cpu.handling, Some(VECTOR_PORTA_PORT as u8));
+    }
+
+    #[test]
+    fn sleep_ends_the_ccp_window() {
+        let main = [&SET_UP[..], &[SEI, OUT_CCP_R16, SLEEP, SPIN]].concat();
+        let mut s = sim_with_handler(&main, &counting_handler());
+        s.chip.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN;
+        s.chip.porta_flags = SWITCH;
+        for _ in 0..6 {
+            s.step().unwrap();
+        }
+        assert!(s.cpu.asleep);
+        s.step().unwrap();
+        assert!(!s.cpu.asleep, "the pending interrupt woke it at once");
+        assert!(s.chip.now < PIT_PERIOD);
+    }
+
+    #[test]
+    fn an_interrupt_during_the_ccp_window_keeps_its_flag_and_fires_after() {
+        // The flag goes up partway through the window, not before it.
+        let main = [&SET_UP[..], &[SEI, OUT_CCP_R16, INC_R17, INC_R17, SPIN]].concat();
+        let mut s = sim_with_handler(&main, &counting_handler());
+        for _ in 0..6 {
+            s.step().unwrap();
+        }
+        s.chip.porta_flags = SWITCH;
+        for _ in 0..3 {
+            s.step().unwrap();
+            assert_eq!(s.cpu.handling, None);
+        }
+        assert_eq!(s.chip.porta_flags, SWITCH, "pending");
+        s.step().unwrap();
+        assert_eq!(s.cpu.handling, Some(VECTOR_PORTA_PORT as u8));
     }
 
     /// Polling the PIT flag doesn't move time on, and the loop budget

@@ -17,6 +17,16 @@
 //! `sei; sleep` close the race AN2515C §4.5 describes. Only level 0 is
 //! modelled: no NMI, no level 1 vector and no round robin.
 //!
+//! Between instructions, then, an interrupt waits while SREG.I is clear,
+//! while LVL0EX is set, for the instruction after `sei`, for four
+//! instructions after a write to SPL or until the next I/O write if that's
+//! sooner (§8.5.4), and for as long as the bus says (`holds_interrupts`,
+//! which is the CCP window, §8.5.7). Each of those leaves the request
+//! pending. The datasheet's "up to four" for SPL doesn't say what makes it
+//! fewer, so this holds for all four. `out SREG` setting I gets no hold,
+//! since the instruction set manual only promises one for `sei`. None of
+//! this has been seen on a real chip.
+//!
 //! `sleep` is an error with interrupts off or inside a handler, since
 //! nothing could wake the CPU, and otherwise asks the bus whether it would
 //! sleep and what could wake it. Asleep, each step either takes a pending
@@ -45,6 +55,12 @@ pub const I: u8 = 7;
 /// two-word `jmp` per slot: vector n is at word 2n (DS40002204A table 7-2).
 pub const VECTOR_WORDS: u32 = 2;
 
+/// Instructions a write to SPL holds interrupts off for (DS40002204A §8.5.4).
+const SPL_HOLD: u8 = 4;
+/// Where I/O memory ends, the 64 I/O registers and the extended ones (§6.2,
+/// the memory map). A write below this ends SPL's hold early.
+const IO_END: u16 = 0x1000;
+
 /// Everything outside the CPU: program memory, data space and the
 /// interrupt lines.
 pub trait Bus {
@@ -60,6 +76,11 @@ pub trait Bus {
     /// The highest-priority interrupt that's both enabled and flagged, as a
     /// vector number. The CPU checks SREG.I and LVL0EX itself.
     fn interrupt(&self) -> Option<u8>;
+    /// Whether something outside the CPU is holding interrupts off for now.
+    /// Requests stay pending until it stops.
+    fn holds_interrupts(&self) -> bool {
+        false
+    }
     /// The CPU has run `sleep` with interrupts on. Errors if the chip
     /// wouldn't sleep, or would sleep with nothing enabled to wake it.
     fn sleep(&mut self) -> Result<(), String>;
@@ -81,6 +102,8 @@ pub struct Cpu {
     pub handling: Option<u8>,
     /// Set by `sei`: the next instruction runs before any interrupt.
     hold: bool,
+    /// Set by a write to SPL: instructions still to run before any interrupt.
+    spl_hold: u8,
     /// The SP bits that exist. The datasheet says unused ones read 0
     /// without saying which (DS40002204A §8.7.2), so this keeps only the
     /// ones SRAM needs, the fewest it could be.
@@ -98,6 +121,7 @@ impl Cpu {
             asleep: false,
             handling: None,
             hold: false,
+            spl_hold: 0,
             sp_bits: sram.end.next_power_of_two() - 1,
         }
     }
@@ -106,9 +130,13 @@ impl Cpu {
     /// Errors carry the instruction's byte address.
     pub fn step(&mut self, bus: &mut impl Bus) -> Result<(), String> {
         let hold = std::mem::take(&mut self.hold);
+        let spl_hold = self.spl_hold;
+        self.spl_hold = spl_hold.saturating_sub(1);
         if self.flag(I)
             && self.handling.is_none()
             && !hold
+            && spl_hold == 0
+            && !bus.holds_interrupts()
             && let Some(vector) = bus.interrupt()
         {
             // Asleep, PC already points past the `sleep`, which is where
@@ -547,8 +575,14 @@ impl Cpu {
     }
 
     fn store(&mut self, bus: &mut impl Bus, addr: u16, value: u8) -> Result<(), String> {
+        if addr < IO_END {
+            self.spl_hold = 0;
+        }
         match addr {
-            SPL => self.sp = (self.sp & 0xFF00 | u16::from(value)) & self.sp_bits,
+            SPL => {
+                self.sp = (self.sp & 0xFF00 | u16::from(value)) & self.sp_bits;
+                self.spl_hold = SPL_HOLD;
+            }
             SPH => self.sp = (self.sp & 0x00FF | u16::from(value) << 8) & self.sp_bits,
             SREG => self.sreg = value,
             _ => bus.write(addr, value)?,
@@ -633,6 +667,9 @@ mod tests {
     /// A data address the test programs' handlers write to: each write is
     /// logged, and clears those bits of `pending`, like an INTFLAGS.
     const FLAGS: u16 = 0x00FF;
+    /// A data address that adds what's written to it to `pending`, so a
+    /// test program can flag an interrupt partway through.
+    const RAISE: u16 = 0x00FE;
 
     struct TestBus {
         flash: Vec<u16>,
@@ -641,6 +678,8 @@ mod tests {
         wdrs: u32,
         /// Interrupts flagged, a bit per vector. All count as enabled.
         pending: u32,
+        /// `holds_interrupts`, as the CCP window would.
+        held: bool,
         /// What the handlers wrote to `FLAGS`.
         log: Vec<u8>,
         /// Bits of `pending` that time flags each `idle`.
@@ -656,6 +695,7 @@ mod tests {
                 data: vec![0; 0x10000],
                 wdrs: 0,
                 pending: 0,
+                held: false,
                 log: Vec::new(),
                 wake: 0,
                 sleeps: 0,
@@ -680,11 +720,17 @@ mod tests {
                 self.log.push(value);
                 self.pending &= !u32::from(value);
             }
+            if addr == RAISE {
+                self.pending |= u32::from(value);
+            }
             self.data[usize::from(addr)] = value;
             Ok(())
         }
         fn interrupt(&self) -> Option<u8> {
             (self.pending != 0).then(|| self.pending.trailing_zeros() as u8)
+        }
+        fn holds_interrupts(&self) -> bool {
+            self.held
         }
         fn sleep(&mut self) -> Result<(), String> {
             self.sleeps += 1;
@@ -1142,6 +1188,125 @@ mod tests {
         let image = program(&[(3, &clears(1 << 3))], &[ldi(17, 1), NOP]);
         let (_, bus) = run(&image, |_, bus| bus.pending = 1 << 3);
         assert!(bus.log.is_empty());
+    }
+
+    const INC_R17: u16 = 0x9513;
+    /// out SPL, r16
+    const OUT_SPL: u16 = 0xBF0D;
+    /// out SPH, r18
+    const OUT_SPH: u16 = 0xBF2E;
+
+    /// Runs `main` with vector 3 pending from reset, under a handler that
+    /// copies r17 to r19, and says how many `inc r17`s ran before it. r16 and
+    /// r18 hold SP where it is.
+    fn incs_before_the_handler(main: &[u16]) -> u8 {
+        let mut handler = vec![0x2F31]; // mov r19, r17
+        handler.extend(clears(1 << 3));
+        let image = program(&[(3, &handler)], main);
+        let (cpu, bus) = run(&image, |cpu, bus| {
+            bus.pending = 1 << 3;
+            [cpu.r[16], cpu.r[18]] = cpu.sp.to_le_bytes();
+        });
+        assert_eq!(bus.log, [1 << 3], "the handler ran");
+        cpu.r[19]
+    }
+
+    #[test]
+    fn a_write_to_spl_holds_interrupts_off_for_four_instructions() {
+        // sei's own hold covers the `out`, which starts the four.
+        assert_eq!(
+            incs_before_the_handler(&[SEI, OUT_SPL, INC_R17, INC_R17, INC_R17, INC_R17, INC_R17]),
+            4
+        );
+    }
+
+    #[test]
+    fn the_next_io_write_ends_spls_hold() {
+        assert_eq!(
+            incs_before_the_handler(&[SEI, OUT_SPL, INC_R17, OUT_SPH, INC_R17, INC_R17]),
+            1,
+            "SPH"
+        );
+        // sts 0x001C, r18
+        let main = [SEI, OUT_SPL, 0x9320, 0x001C, INC_R17, INC_R17];
+        assert_eq!(incs_before_the_handler(&main), 0, "any I/O register");
+        // sts 0x3800, r18 is data memory, so it only uses up one of the four.
+        let main = [
+            SEI, OUT_SPL, 0x9320, 0x3800, INC_R17, INC_R17, INC_R17, INC_R17,
+        ];
+        assert_eq!(incs_before_the_handler(&main), 3, "SRAM isn't I/O");
+    }
+
+    #[test]
+    fn writing_spl_again_starts_the_hold_again() {
+        let main = [
+            SEI, OUT_SPL, INC_R17, INC_R17, OUT_SPL, INC_R17, INC_R17, INC_R17, INC_R17, INC_R17,
+        ];
+        assert_eq!(incs_before_the_handler(&main), 6);
+    }
+
+    /// `out SREG` isn't `sei`: only `sei` promises the next instruction.
+    #[test]
+    fn setting_i_through_sreg_takes_a_pending_interrupt_straight_away() {
+        // ldi r20, 0x80; out SREG, r20
+        let main = [ldi(20, 0x80), 0xBF4F, INC_R17, INC_R17];
+        assert_eq!(incs_before_the_handler(&main), 0);
+    }
+
+    /// Flags vector 3 through `RAISE`, then runs `body`.
+    fn raises(body: &[u16]) -> Vec<u16> {
+        // sts RAISE, r20
+        let mut words = vec![ldi(20, 1 << 3), 0x9340, RAISE];
+        words.extend_from_slice(body);
+        words
+    }
+
+    /// Mid-program, with the CPU awake, the handler lands between two
+    /// instructions and the program carries on from where it was.
+    #[test]
+    fn an_interrupt_lands_between_two_instructions_awake() {
+        let main = [&[SEI, INC_R17][..], &raises(&[INC_R17, INC_R17])].concat();
+        assert_eq!(incs_before_the_handler_raised(&main), (1, 3));
+    }
+
+    #[test]
+    fn an_interrupt_flagged_with_sreg_i_clear_waits_for_sei_and_one_more() {
+        let main = [
+            &[SEI, CLI][..],
+            &raises(&[INC_R17, INC_R17, SEI, INC_R17, INC_R17, INC_R17]),
+        ]
+        .concat();
+        assert_eq!(incs_before_the_handler_raised(&main), (3, 5));
+    }
+
+    /// Like `incs_before_the_handler`, with nothing pending until `main`
+    /// raises it. Also says how many `inc`s ran in all.
+    fn incs_before_the_handler_raised(main: &[u16]) -> (u8, u8) {
+        let mut handler = vec![0x2F31]; // mov r19, r17
+        handler.extend(clears(1 << 3));
+        let (cpu, bus) = run(&program(&[(3, &handler)], main), |_, _| {});
+        assert_eq!(bus.log, [1 << 3], "the handler ran");
+        (cpu.r[19], cpu.r[17])
+    }
+
+    #[test]
+    fn the_bus_can_hold_interrupts_off() {
+        let mut handler = vec![0x2F31]; // mov r19, r17
+        handler.extend(clears(1 << 3));
+        // Words: sei, nop, inc, inc, then the bus lets go.
+        let image = program(&[(3, &handler)], &[SEI, NOP, INC_R17, INC_R17, NOP, NOP]);
+        let mut bus = TestBus::new(&image);
+        let mut cpu = Cpu::new(&RAM);
+        bus.pending = 1 << 3;
+        bus.held = true;
+        for _ in 0..5 {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(cpu.handling, None, "still pending");
+        assert_eq!(cpu.r[17], 2);
+        bus.held = false;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.handling, Some(3));
     }
 
     #[test]
