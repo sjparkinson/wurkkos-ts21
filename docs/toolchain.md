@@ -54,7 +54,7 @@ Each has a comment where it lives. Remove it when a nightly makes it unnecessary
 | Where | What | Why |
 |---|---|---|
 | `src/main.rs` | `#![feature(asm_experimental_arch)]` | `asm!` and `global_asm!` on AVR aren't stable. |
-| `src/main.rs`, `src/bin/link_probe.rs` | `#![feature(abi_avr_interrupt)]` | `extern "avr-interrupt"`, which the handler in `src/hw.rs` uses, isn't stable. It saves SREG and r0 in every handler whether the body touches them or not, which costs `rtc_pit` 6 of its 12 instructions. |
+| `src/main.rs`, `src/bin/link_probe.rs`, `src/bin/pwm_probe.rs` | `#![feature(abi_avr_interrupt)]` | `extern "avr-interrupt"`, which the handlers in `src/hw.rs` use, isn't stable. It saves SREG and r0 in every handler whether the body touches them or not, which costs `rtc_pit` 6 of its 12 instructions. |
 | `Cargo.toml` | `panic = "abort"` in both profiles | AVR can't unwind. |
 | Library code | No runtime `u32`/`u64` multiplication, and no `u16` division by a constant that isn't a power of two | There's no `__mulsi3` without libgcc. See above. |
 | `xtask` | Its own ELF-to-HEX conversion | The `rust-objcopy` in the toolchain directory is rustc's private copy and won't run on its own. `llvm-tools` has a working `llvm-objcopy`, but that's one more thing to install for every flash, and `xtask` needs to parse the ELF to program it anyway. |
