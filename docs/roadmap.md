@@ -1,6 +1,6 @@
 # Roadmap
 
-Roughly in order. Each step should leave a torch that's no worse than the step before. Tick things off here in the commit that does them.
+Roughly in order. Each step should leave a torch that's no worse than the step before. Tick things off here in the commit that does them. [bench-plan.md](bench-plan.md) gathers every "still to check on a real light" below into one run.
 
 ## 1. It lights up
 
