@@ -6,8 +6,10 @@
 //! one down to level 1, since a tear shows best where the FET's compare
 //! changes along with the period. It calls `pwm_probe_landed` after every
 //! write with the level in `PWM_PROBE_LEVEL`. xtask/src/sim.rs stops there,
-//! brings on a BOTTOM and checks that row went live whole. It's never
-//! flashed.
+//! brings on a BOTTOM and checks that row went live whole. Then it runs the
+//! real `hw::count_tick` on the longest and shortest cycles and around the
+//! jumps between them, for sim.rs to check against the clocks it set. It's
+//! never flashed.
 
 #![cfg_attr(target_arch = "avr", no_std, no_main)]
 #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
@@ -43,6 +45,16 @@ mod probe {
         pwm_probe_landed();
     }
 
+    /// What the firmware does around a count: a tick, a pass that sets the
+    /// output, then the counted wait for the next tick, so the first cycle
+    /// counted can still be the last level's.
+    fn count(level: u8) {
+        hw::wait_for_tick(false);
+        hw::set_output(ramp::output(level));
+        pwm_probe_counting(level);
+        pwm_probe_counted(hw::count_tick(), level);
+    }
+
     // src/rt.rs calls `main` by name once memory is set up.
     #[allow(unsafe_code)]
     #[unsafe(no_mangle)]
@@ -54,7 +66,42 @@ mod probe {
             set(level);
             set(1);
         }
+        // The longest cycle, then 16 times shorter straight after it, and back.
+        for level in [1, 50, 1, ramp::LEVELS, 1, 0] {
+            count(level);
+        }
         pwm_probe_done()
+    }
+
+    /// Where sim.rs notes when the count starts, and how long a cycle was
+    /// live going into it. `level` is in r24.
+    #[allow(unsafe_code)]
+    #[unsafe(no_mangle)]
+    #[inline(never)]
+    extern "C" fn pwm_probe_counting(level: u8) {
+        // SAFETY: as in `pwm_probe_landed`, with the argument kept live.
+        unsafe { core::arch::asm!("", in("r24") level, options(nostack, preserves_flags)) }
+    }
+
+    /// Where sim.rs reads what a count came to: `clocks` in r22 to r25 and
+    /// `level` in r20.
+    #[allow(unsafe_code)]
+    #[unsafe(no_mangle)]
+    #[inline(never)]
+    extern "C" fn pwm_probe_counted(clocks: u32, level: u8) {
+        let [a, b, c, d] = clocks.to_le_bytes();
+        // SAFETY: as in `pwm_probe_landed`, with the arguments kept live.
+        unsafe {
+            core::arch::asm!(
+                "",
+                in("r22") a,
+                in("r23") b,
+                in("r24") c,
+                in("r25") d,
+                in("r20") level,
+                options(nostack, preserves_flags),
+            );
+        }
     }
 
     /// Where sim.rs stops after each write.
