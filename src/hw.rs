@@ -239,7 +239,9 @@ pub fn init(watchdog: u8) -> bool {
     write16(reg::TCA0_PER, PWM_TOP - 1);
     write16(reg::TCA0_CMP0BUF, 0);
     write16(reg::TCA0_CMP1BUF, 0);
-    write(reg::TCA0_CTRLB, TCA_DRIVING);
+    // The light's off, so the pins stay PORT's until `set_output` asks for a
+    // level.
+    write(reg::TCA0_CTRLB, regs::TCA_WGMODE_SINGLESLOPE);
     write(reg::TCA0_CTRLA, regs::TCA_CLKSEL_DIV1 | regs::TCA_ENABLE);
 
     // ADC0 in single-conversion mode at 625 kHz, with the delays the
@@ -311,10 +313,9 @@ fn output_settled() -> bool {
 /// `Torch::resting`.
 ///
 /// Power-down stops TCA0 where it is, so it waits until the output's settled,
-/// which `set_output` sees to as it goes off. The datasheet doesn't say what
-/// level a waveform output holds in sleep, so CMPnEN goes off too,
-/// handing the pins to PORT, whose OUT is 0: the FET can't freeze on. They
-/// come back only while the compares are 0, or they'd glitch the old duty.
+/// which `set_output` sees to as it goes off. The pins are PORT's by then:
+/// CMPnEN goes with the output, so the datasheet not saying what level a
+/// waveform output holds in sleep can't matter.
 /// It also turns the ADC and its forced reference off. The datasheet gives
 /// no current for either left on in power-down, and Anduril's
 /// `sleep_until_eswitch_pressed` does the same. `adc_start` turns them back
@@ -329,15 +330,11 @@ fn prepare_sleep(rest: bool) {
     if rest && output_settled() {
         write(reg::ADC0_CTRLA, 0);
         write(reg::VREF_CTRLB, 0);
-        write(reg::TCA0_CTRLB, regs::TCA_WGMODE_SINGLESLOPE);
         write(
             reg::SLPCTRL_CTRLA,
             regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN,
         );
     } else {
-        if read(reg::TCA0_CTRLB) != TCA_DRIVING {
-            write(reg::TCA0_CTRLB, TCA_DRIVING);
-        }
         write(
             reg::SLPCTRL_CTRLA,
             regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN,
@@ -636,16 +633,28 @@ pub fn switch_pressed() -> bool {
 /// locked BOTTOM is likely, not stated: section 20.5.2's ALUPD can't work
 /// otherwise. LUPD clears before CNT's written, in case that counts as BOTTOM.
 ///
-/// Going off doesn't wait for BOTTOM. An UPDATE command lands the whole row at
-/// once, LUPD or no LUPD (section 20.3.3.5), which empties the buffers, so
-/// `prepare_sleep` can power down on this pass, and that takes the pins off
-/// TCA0 and leaves them low. Every level but off still waits for BOTTOM, so a
-/// cycle's never cut short with the light on. The compares get a direct write
-/// too, for a stopped TCA0, which never reaches BOTTOM and which the datasheet
-/// doesn't promise takes a command either. That write is always 0, so it can't
-/// go over PER, whichever row PER's still in.
+/// Going off starts by handing the pins to PORT, whose OUT is 0, by clearing
+/// CMPnEN. That's what really turns the light off. A waveform output is a
+/// latch, set at BOTTOM and cleared on a compare match (section 20.3.3.4.3),
+/// and CMPnEN overrides PORT (section 20.3.3.4.5), so a TCA0 that's stopped
+/// with its output high holds the pin high whatever's written to CMPn. The
+/// channels only come back with a level asked for, so a press can't bring
+/// that back while the torch is off. That a stopped TCA0 holds its output like
+/// this is likely, not stated.
+///
+/// Off doesn't wait for BOTTOM either. An UPDATE command lands the whole row
+/// at once, LUPD or no LUPD (section 20.3.3.5), and BV clears on it, so
+/// `prepare_sleep` can power down on this pass. Every level but off still
+/// waits for BOTTOM, so a cycle's never cut short with the light on. The
+/// compares get a direct write too, for a stopped TCA0, which never reaches
+/// BOTTOM and which the datasheet doesn't promise takes a command either.
+/// That write is always 0, so it can't go over PER, whichever row PER's still
+/// in.
 pub fn set_output(output: Output) {
     let off = output == Output::OFF;
+    if off {
+        write(reg::TCA0_CTRLB, regs::TCA_WGMODE_SINGLESLOPE);
+    }
     write(reg::TCA0_CTRLESET, regs::TCA_LUPD);
     write16(reg::TCA0_PERBUF, output.top - 1);
     write16(reg::TCA0_CMP1BUF, output.linear);
@@ -659,5 +668,7 @@ pub fn set_output(output: Output) {
         write16(reg::TCA0_CNT, 0);
         write16(reg::TCA0_CMP0, 0);
         write16(reg::TCA0_CMP1, 0);
+    } else {
+        write(reg::TCA0_CTRLB, TCA_DRIVING);
     }
 }
