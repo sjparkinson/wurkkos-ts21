@@ -2009,6 +2009,12 @@ fn in_step(
             0
         };
         let settling = (1..=OVERDUE_GRACE_TICKS).contains(&overdue);
+        // A lost off row has to be reissued before the chip can power down.
+        let lost_row_grace = if sim.chip.bv_adverse {
+            LOST_ROW_TICKS
+        } else {
+            0
+        };
         // With no tick to wake it, a chip that's powered down doesn't run
         // `sleep` again, so look for it asleep instead. Awake there means
         // it's hung, with no watchdog to rescue it.
@@ -2019,7 +2025,7 @@ fn in_step(
                      isn't powered down"
                 ));
             }
-        } else if resting > REST_GRACE_TICKS
+        } else if resting > REST_GRACE_TICKS + lost_row_grace
             && !powered_down
             && !sim.counted
             && !settling
@@ -3252,9 +3258,10 @@ impl Chip {
 
     /// Under `Chip::bv_adverse`, a BOTTOM lands at each place in the lock in
     /// turn, one lock at a time, since a real one would only be there now and
-    /// then. `at` is how many buffers have been written in this lock, or 4
-    /// with the lock about to clear, after the firmware's looked at the flags,
-    /// which is the one that loses a whole row.
+    /// then. `at` is how many buffers have been written in this lock, 4 with
+    /// the lock about to clear, after the firmware's looked at the flags, which
+    /// is the one that loses a whole row, or 5 just before the UPDATE command
+    /// of a turn-off, which comes before that.
     fn adverse_bottom(&mut self, at: u8) {
         if self.bv_adverse && self.lupd && at == self.adverse_at {
             self.locked_bottom();
@@ -3326,6 +3333,7 @@ impl Chip {
     fn tca_lock(&mut self, a: usize, value: u8) -> Result<(), String> {
         if a == reg::TCA0_CTRLESET && value == regs::TCA_CMD_UPDATE {
             if !self.tca_deaf {
+                self.adverse_bottom(5);
                 let locked = mem::replace(&mut self.lupd, false);
                 self.tca_update()?;
                 self.lupd = locked;
@@ -3344,9 +3352,10 @@ impl Chip {
             self.lock_writes = 0;
         } else {
             self.adverse_bottom(4);
-            self.adverse_at = self.adverse_at % 4 + 1;
+            self.adverse_at = self.adverse_at % 5 + 1;
             self.lupd = false;
-            if self.tca_running() {
+            // Nothing lands with no BV set (table 20-1, section 20.3.3.2).
+            if self.tca_running() && self.buffer_valid != [false; 3] {
                 self.tca_check_update()?;
             }
         }
@@ -4972,6 +4981,39 @@ mod tests {
             assert_eq!(c.buffer_valid, want, "adverse {adverse}");
             assert_eq!(c.wide(reg::TCA0_PER), ramp::output(1).top - 1, "not copied");
         }
+    }
+
+    #[test]
+    fn a_row_that_loses_bv_twice_lands_nothing_at_the_end_of_the_lock() {
+        let mut c = pwm_at(1);
+        c.bv_adverse = true;
+        c.adverse_at = 4;
+        c.wide[1] = 257;
+        c.compare = [0, 0];
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        for _ in 0..2 {
+            write_wide(&mut c, reg::TCA0_PERBUF, 254);
+            let bottom = c.next_bottom;
+            c.advance_to(bottom).unwrap();
+            assert_eq!(c.buffer_valid, [false; 3]);
+        }
+        // (257, 0, 0) is no level's output, but nothing's about to land.
+        c.write(reg::TCA0_CTRLECLR as u16, regs::TCA_LUPD).unwrap();
+        assert_eq!((c.wide[1], c.compare), (257, [0, 0]));
+    }
+
+    #[test]
+    fn a_bottom_just_before_the_update_command_loses_the_row() {
+        let mut c = pwm_at(1);
+        c.bv_adverse = true;
+        c.adverse_at = 5;
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+        write_wide(&mut c, reg::TCA0_PERBUF, 254);
+        let per = c.wide(reg::TCA0_PER);
+        c.write(reg::TCA0_CTRLESET as u16, regs::TCA_CMD_UPDATE)
+            .unwrap();
+        assert_eq!(c.buffer_valid, [false; 3]);
+        assert_eq!(c.wide(reg::TCA0_PER), per, "nothing landed");
     }
 
     #[test]
