@@ -538,18 +538,26 @@ fn adverse_bv(
     out: &mut Report,
 ) -> Result<(), String> {
     let mut report = Report::default();
-    for example in spec::examples(spec::UI_MD)? {
-        let samples = simulate::samples(&example.actions);
-        let world = samples.first().map_or(World::NORMAL, |s| s.world);
-        let (mut sim, boot) =
-            power_on(&world).map_err(|e| format!("{}: startup: {e}", example.row))?;
-        sim.chip.bv_adverse = true;
-        ui_example(sim, boot, samples, &example, &mut report)
-            .map_err(|e| format!("{}: {e}", example.row))?;
+    // Then again with interrupts mid-pass, since the two can meet.
+    for landing in [false, true] {
+        let adverse = |sim: &mut Sim| {
+            sim.chip.bv_adverse = true;
+            sim.landings = landing.then(Landings::new);
+        };
+        let at = |e: String| format!("landing {landing}: {e}");
+        for example in spec::examples(spec::UI_MD)? {
+            let samples = simulate::samples(&example.actions);
+            let world = samples.first().map_or(World::NORMAL, |s| s.world);
+            let (mut sim, boot) =
+                power_on(&world).map_err(|e| format!("{}: startup: {e}", example.row))?;
+            adverse(&mut sim);
+            ui_example(sim, boot, samples, &example, &mut report)
+                .map_err(|e| at(format!("{}: {e}", example.row)))?;
+        }
+        let (mut sim, _) = power_on(&World::NORMAL)?;
+        adverse(&mut sim);
+        against_the_library(sim, &mut report).map_err(|e| at(format!("random switching: {e}")))?;
     }
-    let (mut sim, _) = power_on(&World::NORMAL)?;
-    sim.chip.bv_adverse = true;
-    against_the_library(sim, &mut report).map_err(|e| format!("random switching: {e}"))?;
     out.worst_pass = out.worst_pass.max(report.loop_instructions);
     match report.bv_cleared {
         0 => Err("no BOTTOM ever landed under LUPD".into()),
