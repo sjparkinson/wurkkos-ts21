@@ -374,10 +374,11 @@ pub fn set_marker(marker: [u8; 2]) {
 }
 
 /// What caused this reset, from `RSTCTRL.RSTFR`, leaving it clear for the
-/// next one. The flags are sticky, and only a power-on reset clears them
-/// (section 12.5.1), so this has to run on every boot before anything could
-/// reset the chip. Left up, PORF would make the next bite look like another
-/// power-on, and the proof would start over, forever.
+/// next one. The flags are sticky: writing 1 clears any of them, and a
+/// power-on reset clears them all but PORF (section 12.5.1). No other reset
+/// does, so this has to run on every boot before anything could reset the
+/// chip. Left up, PORF would make the next bite look like another power-on,
+/// and the proof would start over, forever.
 pub fn take_reset_flags() -> u8 {
     let flags = read(reg::RSTCTRL_RSTFR);
     write(reg::RSTCTRL_RSTFR, flags);
