@@ -21,7 +21,7 @@ src/lib.rs        the no_std library: everything testable, nothing hardware
 src/button.rs     switch samples in, clicks and holds out
 src/gradual.rs    a level that fades towards a target, at most a level a tick
 src/ramp.rs       brightness levels to PWM duty cycles
-src/temp.rs       temperature sensor readings to kelvin
+src/temp.rs       temperature sensor readings to sixteenths of a kelvin
 src/battery.rs    battery readings to centivolts, and low-voltage protection
 src/thermal.rs    temperatures in, a ceiling on the level out
 src/sensors.rs    which ADC channel to read each tick, and when a reading's due

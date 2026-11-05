@@ -1,6 +1,6 @@
 //! Thermal regulation: temperature readings in, a ceiling on the level out.
 //!
-//! Feed it a reading from `temp::kelvin` every [`SAMPLE_TICKS`] ticks with
+//! Feed it a reading from `temp::sixteenths` every [`SAMPLE_TICKS`] ticks with
 //! [`Thermal::sample`], call [`Thermal::tick`] every tick, and run the light
 //! at whichever is lower, the UI's level or the ceiling. The ceiling moves
 //! through a [`Gradual`], so a step-down is a fade of at most one level every
@@ -73,7 +73,8 @@ impl Default for Config {
     }
 }
 
-/// The smoothed temperature is kept in sixteenths of a kelvin.
+/// Readings and the smoothed temperature are in sixteenths of a kelvin, which
+/// is what `temp::sixteenths` hands over.
 const FRACTION: i16 = 16;
 /// Samples of history to measure the trend over.
 const HISTORY: usize = 8;
@@ -99,17 +100,19 @@ const MAX_STEP_DOWN: u8 = 8;
 const DOWN_EVERY: u8 = 2;
 const UP_EVERY: u8 = 4;
 /// Readings outside -40 °C to 150 °C can't be real. The part is rated to
-/// 125 °C at most, so the top leaves some slack.
+/// 125 °C at most, so the top leaves some slack. In kelvin.
 const PLAUSIBLE: core::ops::RangeInclusive<u16> = 233..=423;
 
-/// Whether a reading in kelvin could be real. Anything else is a broken
-/// sensor or a bad ADC setup.
-pub fn plausible(kelvin: u16) -> bool {
-    PLAUSIBLE.contains(&kelvin)
+/// Whether a reading in sixteenths of a kelvin could be real. Anything else
+/// is a broken sensor or a bad ADC setup.
+pub fn plausible(sixteenths: u16) -> bool {
+    let unit = FRACTION as u16;
+    (*PLAUSIBLE.start() * unit..=*PLAUSIBLE.end() * unit).contains(&sixteenths)
 }
-/// A reading further than this from the last good one is a glitch, unless
-/// more than `GLITCHES` in a row agree, and then it's believed.
-const JUMP: u16 = 6;
+/// A reading further than this from the last good one, in sixteenths of a
+/// kelvin, is a glitch, unless more than `GLITCHES` in a row agree, and then
+/// it's believed.
+const JUMP: u16 = 6 * FRACTION as u16;
 const GLITCHES: u8 = 3;
 
 const _: () = assert!(MAX_STEP_DOWN as u16 * DOWN_EVERY as u16 <= SAMPLE_TICKS);
@@ -173,11 +176,12 @@ impl Thermal {
         self.ceiling.tick(self.target)
     }
 
-    /// One temperature reading in kelvin, taken every [`SAMPLE_TICKS`]
-    /// ticks while the light's on, and the level it's at right now.
-    pub fn sample(&mut self, kelvin: u16, level: u8) {
+    /// One temperature reading in sixteenths of a kelvin, taken every
+    /// [`SAMPLE_TICKS`] ticks while the light's on, and the level it's at
+    /// right now.
+    pub fn sample(&mut self, reading: u16, level: u8) {
         let smooth = match self.smooth {
-            _ if !plausible(kelvin) => {
+            _ if !plausible(reading) => {
                 self.rejected = self.rejected.saturating_add(1);
                 if self.rejected > GLITCHES {
                     // The sensor's broken. Assume the worst.
@@ -185,12 +189,12 @@ impl Thermal {
                 }
                 return;
             }
-            Some(smooth) if kelvin.abs_diff(self.last) <= JUMP => {
+            Some(smooth) if reading.abs_diff(self.last) <= JUMP => {
                 self.rejected = 0;
-                self.last = kelvin;
+                self.last = reading;
                 // An eighth of the way there, but always at least a
                 // sixteenth, so a steady reading is reached exactly.
-                let difference = to_fraction(kelvin) - smooth;
+                let difference = reading as i16 - smooth;
                 let step = match difference / 8 {
                     0 => difference.signum(),
                     step => step,
@@ -203,7 +207,7 @@ impl Thermal {
             }
             // The first reading, or a jump that's lasted long enough to be
             // real.
-            _ => self.start(kelvin),
+            _ => self.start(reading),
         };
         self.smooth = Some(smooth);
 
@@ -215,7 +219,7 @@ impl Thermal {
         let trend = (smooth - oldest).clamp(-MAX_TREND, MAX_TREND);
         let predicted = smooth + trend * LOOKAHEAD;
 
-        let limit = to_fraction(self.config.limit.min(*PLAUSIBLE.end()));
+        let limit = self.config.limit.min(*PLAUSIBLE.end()) as i16 * FRACTION;
         let over = predicted - limit;
         if over > 0 && (trend >= 0 || smooth > limit + WINDOW) {
             // Each step down costs `DOWN_PRESSURE`, so the rate follows how
@@ -248,11 +252,12 @@ impl Thermal {
         // for if it turns.
     }
 
-    /// Starts smoothing over from `kelvin`, as if it had always been there.
-    fn start(&mut self, kelvin: u16) -> i16 {
-        let smooth = to_fraction(kelvin);
+    /// Starts smoothing over from `reading`, as if it had always been there.
+    /// Only for plausible readings, which keep it well inside an `i16`.
+    fn start(&mut self, reading: u16) -> i16 {
+        let smooth = reading as i16;
         self.history = [smooth; HISTORY];
-        self.last = kelvin;
+        self.last = reading;
         self.rejected = 0;
         smooth
     }
@@ -269,12 +274,6 @@ impl Thermal {
         }
         self.target = self.target.saturating_sub(steps).max(floor);
     }
-}
-
-/// Kelvin to sixteenths of a kelvin. Only for plausible readings, which keep
-/// it well inside an `i16`.
-fn to_fraction(kelvin: u16) -> i16 {
-    kelvin as i16 * FRACTION
 }
 
 #[cfg(test)]
@@ -304,9 +303,15 @@ mod tests {
             }
         }
 
-        /// One reading and the ticks up to the next. Returns the output.
+        /// One reading in whole kelvin and the ticks up to the next. Returns
+        /// the output.
         fn sample(&mut self, kelvin: u16, ui: u8) -> u8 {
-            self.thermal.sample(kelvin, self.output);
+            self.sample_fraction(fraction(kelvin), ui)
+        }
+
+        /// The same for a reading in sixteenths of a kelvin.
+        fn sample_fraction(&mut self, reading: u16, ui: u8) -> u8 {
+            self.thermal.sample(reading, self.output);
             for _ in 0..SAMPLE_TICKS {
                 self.tick(ui);
             }
@@ -348,6 +353,11 @@ mod tests {
 
     fn noisy(kelvin: u16, noise: &mut Noise, spread: i16) -> u16 {
         kelvin.saturating_add_signed(noise.next(spread))
+    }
+
+    /// A whole number of kelvin as a reading, keeping junk well out of range.
+    fn fraction(kelvin: u16) -> u16 {
+        kelvin.saturating_mul(FRACTION as u16)
     }
 
     /// A rough head: heat in from the LEDs, out to the air, and the MCU a
@@ -392,6 +402,11 @@ mod tests {
         fn kelvin(&self) -> u16 {
             ((self.mcu + 500) / 1000) as u16
         }
+
+        /// What the sensor reads, to the sixteenth.
+        fn reading(&self) -> u16 {
+            ((self.mcu * i32::from(FRACTION) + 500) / 1000) as u16
+        }
     }
 
     /// What a stretch of [`closed_loop`] did.
@@ -424,7 +439,8 @@ mod tests {
         };
         let (mut last, mut falling) = (run.output, None);
         for _ in 0..samples {
-            let reading = noisy(head.kelvin(), noise, spread);
+            let off = noise.next(spread) * FRACTION;
+            let reading = head.reading().saturating_add_signed(off);
             run.thermal.sample(reading, run.output);
             for _ in 0..SAMPLE_TICKS {
                 run.tick(ui);
@@ -570,6 +586,69 @@ mod tests {
             run.sample(noisy(LIMIT + 8, &mut noise, 2), LEVELS);
         }
         assert_eq!(run.output, FLOOR);
+    }
+
+    #[test]
+    fn a_steady_reading_between_two_kelvin_is_reached_exactly() {
+        let mut thermal = Thermal::default();
+        thermal.sample(fraction(celsius(30)), LEVELS);
+        let reading = fraction(celsius(30)) + 5;
+        for _ in 0..8 {
+            thermal.sample(reading, LEVELS);
+        }
+        assert_eq!(thermal.smooth, Some(reading as i16));
+    }
+
+    #[test]
+    fn a_fraction_of_a_kelvin_over_the_limit_steps_down() {
+        // Rounded to whole kelvin this would be the limit exactly, and hold.
+        let (mut at, mut over) = (Run::new(), Run::new());
+        for _ in 0..4 * 60 {
+            at.sample_fraction(fraction(LIMIT), LEVELS);
+            over.sample_fraction(fraction(LIMIT) + 7, LEVELS);
+        }
+        assert_eq!(at.output, LEVELS);
+        assert!(over.output < LEVELS);
+    }
+
+    #[test]
+    fn a_slow_rise_moves_the_prediction_steadily() {
+        // Warming a sixteenth a reading, the trend should stay the same from
+        // one reading to the next once it's filled. Whole kelvin would show
+        // a kelvin's step every sixteen readings, and predict from that.
+        let mut thermal = Thermal::default();
+        let start = fraction(celsius(30));
+        let mut trends = std::vec::Vec::new();
+        for step in 0..64 {
+            thermal.sample(start + step, LEVELS);
+            let smooth = thermal.smooth.unwrap();
+            let oldest = thermal.history[usize::from(thermal.next)];
+            trends.push(smooth - oldest);
+        }
+        let settled = &trends[32..];
+        assert!(
+            settled.iter().all(|&trend| trend == settled[0]),
+            "{trends:?}"
+        );
+        assert!(settled[0] > 0, "{trends:?}");
+    }
+
+    #[test]
+    fn the_plausible_range_and_the_jump_are_the_ones_they_always_were() {
+        assert!(!plausible(fraction(233) - 1));
+        assert!(plausible(fraction(233)));
+        assert!(plausible(fraction(423)));
+        assert!(!plausible(fraction(423) + 1));
+
+        let mut thermal = Thermal::default();
+        let start = fraction(celsius(30));
+        thermal.sample(start, LEVELS);
+        // Six kelvin away is believed straight off, and a sixteenth more
+        // waits for the readings after it.
+        thermal.sample(start + JUMP, LEVELS);
+        assert_eq!(thermal.rejected, 0);
+        thermal.sample(start + 2 * JUMP + 1, LEVELS);
+        assert_eq!(thermal.rejected, 1);
     }
 
     #[test]
