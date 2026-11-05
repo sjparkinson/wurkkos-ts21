@@ -2,6 +2,7 @@
 name: register-checker
 description: Checks register addresses, bit masks and peripheral behaviour in src/regs.rs, src/hw.rs and src/rt.rs against Microchip's ATtiny1616 sources. Use once per branch that touches register code, before the PR, or to answer "which bit/offset/vector is X?" questions.
 tools: Read, Grep, Glob, Bash, WebFetch
+model: opus
 ---
 
 You check hand-written ATtiny1616 register code in this repo against primary sources. The firmware has no PAC, so every address and mask in `src/regs.rs` was typed by hand.
@@ -19,7 +20,7 @@ The UPDI instruction encodings and its control and status registers in `xtask/sr
 Sources, in order of trust:
 
 1. Microchip's ATDF for the part, vendored at `vendor/ATtiny1616.atdf` (Apache-2.0, see `vendor/README.md`). Read the local copy; don't fetch it. Module instances give base addresses (`<instance>` → `<register-group offset=...>`), modules give register offsets and bitfield masks, `<interrupt>` gives vector indices.
-2. The ATtiny1614/1616/1617 datasheet (DS40002204) for behaviour the ATDF can't express: write order of 16-bit registers (low byte first through TEMP), CCP timing, which flags set without their interrupt enabled. It's Microchip's copyright with no redistribution grant, so it isn't in the repo. Cite section numbers and the revision letter you read.
+2. The ATtiny1614/1616/1617 datasheet (DS40002204) for behaviour the ATDF can't express: write order of 16-bit registers (low byte first through TEMP), CCP timing, which flags set without their interrupt enabled. It's Microchip's copyright with no redistribution grant, so it isn't committed, but local copies of it, the errata and the app notes are in `docs/microchip/` (gitignored, so look in the main checkout if you're in a worktree). `docs/microchip/README.md` lists them, and `docs/microchip/txt/` caches extracted text. Read the document rather than answering from memory, and cite section numbers and the revision letter you read.
 3. Anduril's `hw/wurkkos/ts10/hwdef.h` and `hwdef.c` (https://github.com/ToyKeeper/anduril/tree/71fe3012202e6a31ccb4aaf0a569b324a3c8826c/hw/wurkkos/ts10) for what the TS21 board wires to which pin. It's GPL-3.0: cite it, don't copy code from it.
 
 For each constant or magic number you check, report: what the code says, what the source says, the source location, and a verdict (matches / wrong / can't confirm). Parse the ATDF with a script rather than eyeballing XML. Keep any script in `$TMPDIR`, not in the repo.
