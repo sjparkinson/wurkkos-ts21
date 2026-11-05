@@ -421,7 +421,31 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         ));
     }
     lock_taken_out(&power_on)?;
+    off_with_tca0_dead(&power_on).map_err(|e| format!("off with TCA0 dead: {e}"))?;
     Ok(report)
+}
+
+/// A torch that's on when TCA0 stops, never reaches BOTTOM again and ignores
+/// the UPDATE command as well, then gets clicked off. The light has to go out
+/// anyway, which leaves only `hw::set_output`'s direct writes to do it. With
+/// the buffers stuck full it can't power down, so that's all this asks for.
+fn off_with_tca0_dead(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+) -> Result<(), String> {
+    let mut sim = switched_on(power_on)?;
+    let world = World {
+        tca_stopped: true,
+        ..sim.chip.world
+    };
+    sim.chip.set_world(world);
+    sim.chip.tca_deaf = true;
+    for sample in simulate::samples(&simulate::parse(&["1C", "wait:1s"])?) {
+        sim.tick(sample.pressed)?;
+    }
+    match sim.chip.leds() {
+        (0, 0) => Ok(()),
+        leds => Err(format!("the light's still at {leds:?}")),
+    }
 }
 
 /// Runs the same random switching on a chip that drops every write to set
@@ -494,7 +518,32 @@ pub fn probe(elf: &Elf) -> Result<(), String> {
 /// BOTTOM, without moving time on so the watchdog doesn't need feeding, and
 /// checks the pins show that level whole. The firmware's own runs only reach
 /// the UI's level 50, so this is the only run where the FET's compare moves.
+///
+/// Then it checks what the real `hw::count_tick` makes of a good chip at the
+/// longest and shortest cycles, around the jumps between them and at both
+/// ends of the clocks' spread. Each count has to match the clocks that really
+/// went by, to within the whole cycles at each end, and has to pass, or a good
+/// chip would turn itself off for good.
 pub fn pwm_probe(elf: &Elf) -> Result<(), String> {
+    for (osc32k, main_clock) in [(100, 100), (130, 95), (70, 105)] {
+        let world = World {
+            osc32k,
+            main_clock,
+            ..World::NORMAL
+        };
+        pwm_probe_in(elf, world)
+            .map_err(|e| format!("with the clocks at {osc32k}% and {main_clock}%: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Instructions `hw::count_tick` takes to start counting, which the count
+/// misses as well as the pass before it.
+const COUNT_SETUP: u64 = 64;
+/// Instructions a run of the probe may take: a count polls for most of a tick.
+const PROBE_BUDGET: u64 = 2_000_000;
+
+fn pwm_probe_in(elf: &Elf, world: World) -> Result<(), String> {
     let symbol = |name| {
         elf.symbol(name)
             .ok_or_else(|| format!("no `{name}` symbol"))
@@ -503,6 +552,10 @@ pub fn pwm_probe(elf: &Elf) -> Result<(), String> {
     let (landed, done) = (
         symbol("pwm_probe_landed")? / 2,
         symbol("pwm_probe_done")? / 2,
+    );
+    let (counting, counted) = (
+        symbol("pwm_probe_counting")? / 2,
+        symbol("pwm_probe_counted")? / 2,
     );
     let level_at = sram("PWM_PROBE_LEVEL")?;
     let mut sim = Sim::new(
@@ -513,14 +566,51 @@ pub fn pwm_probe(elf: &Elf) -> Result<(), String> {
     .testing_until(symbol("__ram_tested")?);
     sim.run_to(symbol("main")? / 2, BOOT_BUDGET)
         .map_err(|e| format!("startup: {e}"))?;
+    sim.chip.set_world(world);
 
     let mut seen = [false; ramp::LEVELS as usize + 1];
-    for _ in 0..BOOT_BUDGET {
+    let mut counts = 0;
+    // The clocks to the next tick when a count starts, and the live cycle.
+    let mut count_from = None;
+    for _ in 0..PROBE_BUDGET {
         if sim.cpu.pc == done {
+            if counts == 0 {
+                return Err("never counted a tick".into());
+            }
             return match seen.iter().position(|&seen| !seen) {
                 Some(level) => Err(format!("never set level {level}")),
                 None => Ok(()),
             };
+        }
+        if sim.cpu.pc == counting {
+            count_from = Some((sim.chip.next_pit - sim.chip.now, sim.chip.tca_cycle()));
+        }
+        if sim.cpu.pc == counted {
+            let r = &sim.cpu.r;
+            let clocks = u32::from_le_bytes([r[22], r[23], r[24], r[25]]);
+            let level = r[20];
+            let top = ramp::output(level).top;
+            let (window, was) = count_from
+                .take()
+                .ok_or("a count ended that never started")?;
+            // A part-cycle lost at the end, and one gained at the start, of
+            // whichever cycle was running by the time the count read PER.
+            let least = window.saturating_sub(COUNT_SETUP + u64::from(top));
+            let most = window + was.max(top.into());
+            if !(least..=most).contains(&u64::from(clocks)) {
+                return Err(format!(
+                    "level {level} counted {clocks} clocks in a window of {window}, \
+                     with cycles of {was} then {top}"
+                ));
+            }
+            let mut check = selftest::ClockCheck::new();
+            check.result(clocks, top);
+            if check.failed() {
+                return Err(format!(
+                    "a good chip failed the clock check at level {level}, on {clocks} clocks"
+                ));
+            }
+            counts += 1;
         }
         if sim.cpu.pc == landed {
             sim.chip.next_bottom = sim.chip.now;
@@ -539,7 +629,7 @@ pub fn pwm_probe(elf: &Elf) -> Result<(), String> {
         sim.step()?;
     }
     Err(format!(
-        "didn't reach pwm_probe_done within {BOOT_BUDGET} instructions"
+        "didn't reach pwm_probe_done within {PROBE_BUDGET} instructions"
     ))
 }
 
@@ -2130,6 +2220,9 @@ struct Chip {
     tcb: Tcb,
     /// TCA0.INTFLAGS.OVF.
     tca_ovf: bool,
+    /// TCA0 ignores commands too, which a stopped one might, for all the
+    /// datasheet says.
+    tca_deaf: bool,
     /// Whether anything's read TCA0.INTFLAGS, which only a counted wait does.
     tca_polled: bool,
 }
@@ -2280,6 +2373,7 @@ impl Chip {
             stuck: false,
             tcb: Tcb::default(),
             tca_ovf: false,
+            tca_deaf: false,
             tca_polled: false,
         }
     }
@@ -2984,9 +3078,11 @@ impl Chip {
     /// from the counter. `hw::set_output` doesn't lean on it to turn off.
     fn tca_lock(&mut self, a: usize, value: u8) -> Result<(), String> {
         if a == reg::TCA0_CTRLESET && value == regs::TCA_CMD_UPDATE {
-            let locked = mem::replace(&mut self.lupd, false);
-            self.tca_update()?;
-            self.lupd = locked;
+            if !self.tca_deaf {
+                let locked = mem::replace(&mut self.lupd, false);
+                self.tca_update()?;
+                self.lupd = locked;
+            }
             return Ok(());
         }
         if value != regs::TCA_LUPD {
