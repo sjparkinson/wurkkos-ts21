@@ -31,8 +31,16 @@ extern "C" fn main() -> ! {
 
     // What this reset means comes first, so the flags are clear and the
     // marker's right before anything can reset the chip again.
-    let proof = Proof::after_reset(hw::take_reset_flags(), hw::marker());
+    let flags = hw::take_reset_flags();
+    let proof = Proof::after_reset(flags, hw::marker());
     hw::set_marker(proof.marker());
+    // No flag means a jump to the reset vector, so nothing's been reset: a
+    // stale tick or deadline would fail the clock check, for good, and
+    // `hw::init` would write PER with the timer running. The marker now says
+    // it hung, or failed, and a software reset keeps that, so make it real.
+    if flags == 0 {
+        hw::software_reset();
+    }
     if proof.proving() {
         prove(proof);
     }
