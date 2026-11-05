@@ -82,29 +82,11 @@ jobs:
         with:
           subject-path: dist/wurkkos-ts21-0614-*
 
-      - name: release notes
-        run: |
-          cat > "$RUNNER_TEMP/notes.md" <<EOF
-          ## Flash
-
-          From a checkout of this repo:
-
-          \`\`\`sh
-          gh release download v$VERSION -R $GITHUB_REPOSITORY -p wurkkos-ts21-0614-$VERSION.hex
-          gh attestation verify wurkkos-ts21-0614-$VERSION.hex -R $GITHUB_REPOSITORY
-          cargo xtask flash /dev/cu.usbserial-XXXX wurkkos-ts21-0614-$VERSION.hex
-          \`\`\`
-
-          See [docs/flashing.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/flashing.md) for information on programmers, and pad order.
-
-          EOF
-
       - name: gh release
         run: |
           gh release create "v$VERSION" dist/wurkkos-ts21-0614-* \
             --target "$GITHUB_SHA" \
             --title "$VERSION+$(git rev-parse --short HEAD)" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
             --generate-notes
         env:
           GITHUB_TOKEN: ${{ github.token }}
