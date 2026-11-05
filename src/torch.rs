@@ -5,6 +5,7 @@
 
 use crate::button::{Clicks, Event};
 use crate::limits::Limits;
+use crate::ramp::PWM_TOP;
 use crate::selftest::{ClockCheck, Faults};
 use crate::sensors::Convert;
 use crate::temp::Calibration;
@@ -67,16 +68,16 @@ impl Torch {
             || self.clicks.idle() && self.ui.output_level() == 0 && self.limits.level() == 0
     }
 
-    /// Whether the wait for the next tick should count TCA0's overflows
-    /// and hand them to [`Torch::clock`].
+    /// Whether the wait for the next tick should count TCA0's clocks and hand
+    /// them to [`Torch::clock`].
     pub fn clock_due(&self) -> bool {
         self.clock.due()
     }
 
     /// What the wait for a tick counted, or `selftest::NO_TICK` if the tick
     /// never came.
-    pub fn clock(&mut self, overflows: u16) {
-        self.clock.result(overflows);
+    pub fn clock(&mut self, clocks: u32) {
+        self.clock.result(clocks, PWM_TOP);
     }
 
     /// Whether the clock check has failed, so the light's off for good.
@@ -131,7 +132,7 @@ mod tests {
     use super::*;
     use crate::button::RELEASE_TICKS;
     use crate::ramp::{LEVELS, LINEAR_MAX, Output, output};
-    use crate::selftest::{NO_TICK, OVERFLOWS_MAX, OVERFLOWS_MIN};
+    use crate::selftest::{CLOCKS_MAX, CLOCKS_MIN, NO_TICK};
     use crate::sensors::Channel;
     use crate::testing::{Adc, CALIBRATION, voltage_reading};
     use crate::ui::LEVEL;
@@ -329,44 +330,44 @@ mod tests {
 
     #[test]
     fn a_bad_clock_turns_the_light_off_on_the_next_tick_and_clicks_do_nothing() {
-        for overflows in [0, OVERFLOWS_MIN - 1, OVERFLOWS_MAX + 1, NO_TICK] {
+        for clocks in [0, CLOCKS_MIN / 2, CLOCKS_MAX + 1, NO_TICK] {
             let mut rig = Rig::new();
             rig.click();
             assert_eq!(rig.level(), LEVEL);
-            rig.torch.clock(overflows);
+            rig.torch.clock(clocks);
             rig.tick(false);
-            assert_eq!(rig.level(), 0, "{overflows}");
-            assert!(rig.torch.resting(), "{overflows}");
-            assert_eq!(rig.torch.convert(), None, "{overflows}");
+            assert_eq!(rig.level(), 0, "{clocks}");
+            assert!(rig.torch.resting(), "{clocks}");
+            assert_eq!(rig.torch.convert(), None, "{clocks}");
             for _ in 0..3 {
                 rig.click();
-                assert_eq!(rig.level(), 0, "{overflows}");
-                assert!(rig.torch.resting(), "{overflows}");
+                assert_eq!(rig.level(), 0, "{clocks}");
+                assert!(rig.torch.resting(), "{clocks}");
             }
             rig.run(true, 3 * 64);
-            assert_eq!(rig.level(), 0, "{overflows}");
+            assert_eq!(rig.level(), 0, "{clocks}");
         }
     }
 
     #[test]
     fn a_failed_power_on_count_beats_the_first_click() {
-        for overflows in [0, OVERFLOWS_MIN - 1, OVERFLOWS_MAX + 1, NO_TICK] {
+        for clocks in [0, CLOCKS_MIN / 2, CLOCKS_MAX + 1, NO_TICK] {
             let mut rig = Rig::new();
             rig.tick(false);
             assert!(rig.torch.clock_due());
-            rig.torch.clock(overflows);
+            rig.torch.clock(clocks);
             rig.click();
-            assert_eq!(rig.level(), 0, "{overflows}");
-            assert!(rig.torch.resting(), "{overflows}");
+            assert_eq!(rig.level(), 0, "{clocks}");
+            assert!(rig.torch.resting(), "{clocks}");
         }
     }
 
     #[test]
     fn a_clock_on_the_edge_of_its_window_leaves_the_light_alone() {
-        for overflows in [OVERFLOWS_MIN, OVERFLOWS_MAX] {
+        for clocks in [CLOCKS_MIN, CLOCKS_MAX] {
             let mut rig = Rig::new();
             rig.click();
-            rig.torch.clock(overflows);
+            rig.torch.clock(clocks);
             rig.tick(false);
             assert_eq!(rig.level(), LEVEL);
             assert!(!rig.torch.clock_failed());
@@ -377,7 +378,7 @@ mod tests {
     fn a_stopped_timer_fails_at_the_next_count_while_its_on_and_for_good() {
         let mut rig = Rig::new();
         rig.tick(false);
-        rig.torch.clock(306);
+        rig.torch.clock(306 * 255);
         rig.click();
         assert_eq!(rig.level(), LEVEL);
         // TCA0 stops here. Off is as usual, and nothing's counted at rest.
@@ -405,7 +406,7 @@ mod tests {
         assert!(!rig.torch.clock_due());
         rig.tick(false);
         assert!(rig.torch.clock_due());
-        rig.torch.clock(306);
+        rig.torch.clock(306 * 255);
         rig.run(false, 3 * 64);
         assert!(!rig.torch.clock_due(), "at rest");
         rig.click();

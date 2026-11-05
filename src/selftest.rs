@@ -130,64 +130,66 @@ impl RamSweep {
 
 /// `hw::init` runs the core at this. It's the 20 MHz oscillator divided by 4.
 const CLK_PER_HZ: u32 = 5_000_000;
-/// TCA0 overflows in a tick with both oscillators spot on: 5 MHz / 255 / 64
-/// is 306.4, which this rounds down.
-const NOMINAL_OVERFLOWS: u32 = CLK_PER_HZ / PWM_TOP as u32 / TICKS_PER_SECOND as u32;
-/// The most a good chip can count, with the 32 kHz oscillator 30% slow (DS
-/// table 36-13, full range) and the 20 MHz one 5% fast (table 36-12): 306.4 x
-/// 1.05 / 0.70 = 459.6.
-const MOST_OVERFLOWS: u32 = NOMINAL_OVERFLOWS * 105 / 70;
-/// The least, the other way round: 306.4 x 0.95 / 1.30 = 223.9.
-const LEAST_OVERFLOWS: u32 = NOMINAL_OVERFLOWS * 95 / 130;
+/// Main clocks in a tick with both oscillators spot on: 5 MHz / 64.
+const NOMINAL_CLOCKS: u32 = CLK_PER_HZ / TICKS_PER_SECOND as u32;
+/// The most a tick can take on a good chip, with the 32 kHz oscillator 30%
+/// slow (DS table 36-13, full range) and the 20 MHz one 5% fast (table 36-12):
+/// 78,125 x 1.05 / 0.70 = 117,187.
+const MOST_CLOCKS: u32 = NOMINAL_CLOCKS * 105 / 70;
+/// The least, the other way round: 78,125 x 0.95 / 1.30 = 57,091.
+const LEAST_CLOCKS: u32 = NOMINAL_CLOCKS * 95 / 130;
 /// The longest pass of the main loop the sums here allow for. `cargo xtask hex`
 /// fails if it measures one longer, so raising this means rechecking
-/// [`OVERFLOWS_MIN`], which the assert below does.
+/// [`CLOCKS_MIN`], which the assert below does.
 pub const PASS_INSTRUCTIONS: u32 = 3_500;
-/// Overflows the count can miss. It starts when the pass before it ends, not
-/// on the tick. A pass is at most 14,000 cycles if every instruction took
-/// four, so 55 overflows. Most take one or two, so that's pessimistic by about
-/// a factor of three. It leaves 168.9 as the least a good chip can count.
-const PASS_OVERFLOWS: u32 = (PASS_INSTRUCTIONS * 4).div_ceil(PWM_TOP as u32);
+/// Clocks the count can miss. It starts when the pass before it ends, not on
+/// the tick, and a pass is at most this if every instruction took four. Most
+/// take one or two, so that's pessimistic by about a factor of three. It
+/// leaves 43,091 as the least a good chip can count, whole cycles aside.
+const PASS_CLOCKS: u32 = PASS_INSTRUCTIONS * 4;
 
-/// The fewest overflows that pass: 14 under that 168.9, or 9%, and one over
-/// T/2 below, so a tick at twice its rate still fails.
-pub const OVERFLOWS_MIN: u16 = 154;
-/// The most that pass: 52 over the 459.6 above, or 11%. Both margins are on
-/// top of every worst case at once, because the table figures are
-/// characterised, not production tested, and a false trip turns a working
-/// torch off for good.
+/// The fewest clocks that pass, give or take the cycle in use: see
+/// [`ClockCheck::result`]. It's 3,566 under that 43,091, or 8%. A count at the
+/// shortest cycle has to reach 154 of them, which is one over T/2 below, so
+/// a tick at twice its rate fails at power-on, when the cycle's short.
+pub const CLOCKS_MIN: u32 = 155 * PWM_TOP as u32;
+/// The most that pass: 13,373 over the 117,187 above, or 11%, and still 7%
+/// with a whole cycle of the longest PWM on top. Both margins come on top of
+/// every worst case at once, because the table figures are characterised, not
+/// production tested, and a false trip turns a working torch off for good.
 ///
 /// So the window is 0.50 to 1.67 of nominal, and only a clock out by about a
-/// half or more fails. It can't tell 16 MHz from 20 MHz (245 overflows),
-/// which is what the fuse check is for, or spot a prescaler that never got
-/// set, which leaves 3.3 MHz and 204.
+/// half or more fails. It can't tell 16 MHz from 20 MHz (62,500 clocks), which
+/// is what the fuse check is for, or spot a prescaler that never got set,
+/// which leaves 3.3 MHz and 52,083.
 ///
 /// The WDT runs off the same oscillator as the tick, so this bounds the
 /// WDT's clock too. AN2632 §6 wants its period within T/2 to 3T/2 by TCA0,
-/// which is 153 to 460 overflows here. The floor sits on T/2. The ceiling
-/// doesn't, since 3T/2 falls right on the 459.6 a good chip can reach.
-pub const OVERFLOWS_MAX: u16 = 512;
-/// What a count comes to when no tick ended it. Over [`OVERFLOWS_MAX`], so it
+/// which is 39,062 to 117,187 clocks here. The floor sits on T/2. The ceiling
+/// doesn't, since 3T/2 falls right on what a good chip can reach.
+pub const CLOCKS_MAX: u32 = 512 * PWM_TOP as u32;
+/// What a count comes to when no tick ended it. Over [`CLOCKS_MAX`], so it
 /// fails like any other count.
-pub const NO_TICK: u16 = u16::MAX;
+pub const NO_TICK: u32 = u32::MAX;
 /// How often the count runs while the light's on: once a second. Each one
 /// keeps the CPU awake for a tick, so this is 1.6% of the time.
 pub const CLOCK_CHECK_TICKS: u8 = TICKS_PER_SECOND as u8;
 
-// `src/hw.rs` counts overflows of a fixed PER, and the sums above need it.
 const _: () = {
-    assert!(PWM_TOP == 255);
-    assert!(NOMINAL_OVERFLOWS == 306);
-    assert!((OVERFLOWS_MIN as u32) < LEAST_OVERFLOWS - PASS_OVERFLOWS);
-    assert!(OVERFLOWS_MAX as u32 > MOST_OVERFLOWS);
+    assert!(NOMINAL_CLOCKS == 78_125);
+    assert!(CLOCKS_MIN < LEAST_CLOCKS - PASS_CLOCKS);
+    assert!(CLOCKS_MIN - PWM_TOP as u32 > NOMINAL_CLOCKS / 2);
+    assert!(CLOCKS_MAX > MOST_CLOCKS + PWM_TOP as u32);
     assert!(TICKS_PER_SECOND <= u8::MAX as u16);
 };
 
 /// The main clock against the RTC, after AN2632 §8: TCA0 runs off the main
-/// clock and the tick off the 32 kHz oscillator, so the number of TCA0
-/// overflows between two ticks is the ratio of the two. A count outside
-/// [`OVERFLOWS_MIN`] to [`OVERFLOWS_MAX`] means one of them, the PIT or TCA0
-/// is broken, and the torch turns off and stays off until the cell comes out.
+/// clock and the tick off the 32 kHz oscillator, so how many clocks of TCA0's
+/// go by between two ticks is the ratio of the two. `hw::count_tick` adds up
+/// the cycles that end in that time, so it's addition only, whatever the
+/// cycle's length. A count outside [`CLOCKS_MIN`] to [`CLOCKS_MAX`] means one
+/// of them, the PIT or TCA0 is broken, and the torch turns off and stays off
+/// until the cell comes out.
 ///
 /// The firmware counts once at power-on and then every
 /// [`CLOCK_CHECK_TICKS`] while the light's on. It doesn't count at rest, since
@@ -229,12 +231,21 @@ impl ClockCheck {
         self.due = running && self.wait == 0 && !self.failed;
     }
 
-    /// The overflows counted between two ticks, or [`NO_TICK`].
-    pub fn result(&mut self, overflows: u16) {
+    /// The clocks counted between two ticks, or [`NO_TICK`], with `top` the
+    /// cycle in use, in clocks.
+    ///
+    /// The count is whole cycles, so it can be a part-cycle out at each end:
+    /// the last cycle hadn't finished when the tick came, and the first had
+    /// already started when the count did. That's a cycle low at most, so the
+    /// floor comes down by `top`, which keeps the margin on [`CLOCKS_MIN`] the
+    /// same at any level. It's 16 of the shortest cycles at the longest PWM.
+    /// The ceiling doesn't move, since it already has a longest cycle to
+    /// spare, and a good chip is nowhere near it.
+    pub fn result(&mut self, clocks: u32, top: u16) {
         self.counted = true;
         self.due = false;
         self.wait = CLOCK_CHECK_TICKS;
-        self.failed |= !(OVERFLOWS_MIN..=OVERFLOWS_MAX).contains(&overflows);
+        self.failed |= clocks > CLOCKS_MAX || clocks + u32::from(top) < CLOCKS_MIN;
     }
 
     /// Whether any count has failed. It never clears.
@@ -378,28 +389,52 @@ mod tests {
         assert!(fuses.any() && flash.any() && watchdog.any());
     }
 
-    /// Whether a fresh check passes this count.
-    fn passes(overflows: u16) -> bool {
+    /// The shortest and longest cycles, in clocks.
+    const SHORT: u16 = 255;
+    const LONG: u16 = 4095;
+    /// What a good chip's count comes to with nothing wrong.
+    const GOOD_COUNT: u32 = 306 * SHORT as u32;
+
+    /// Whether a fresh check passes this count, with cycles of `top` clocks.
+    fn passes(clocks: u32, top: u16) -> bool {
         let mut check = ClockCheck::new();
-        check.result(overflows);
+        check.result(clocks, top);
         !check.failed()
     }
 
     #[test]
     fn the_clock_window_passes_on_each_edge_and_fails_just_past_it() {
-        assert!(passes(OVERFLOWS_MIN));
-        assert!(!passes(OVERFLOWS_MIN - 1));
-        assert!(passes(OVERFLOWS_MAX));
-        assert!(!passes(OVERFLOWS_MAX + 1));
+        for top in [SHORT, LONG] {
+            let floor = CLOCKS_MIN - u32::from(top);
+            assert!(passes(floor, top), "{top}");
+            assert!(!passes(floor - 1, top), "{top}");
+            assert!(passes(CLOCKS_MAX, top), "{top}");
+            assert!(!passes(CLOCKS_MAX + 1, top), "{top}");
+        }
     }
 
     #[test]
-    fn every_clock_a_good_chip_can_have_passes() {
-        // Nominal, then the two worst corners of tables 36-12 and 36-13,
-        // and the low one again with the longest pass before the count taken
-        // off.
-        for overflows in [306, 459, 460, 223, 224, 169, 168] {
-            assert!(passes(overflows), "{overflows}");
+    fn a_long_cycle_is_counted_in_a_few_big_steps() {
+        let long = u32::from(LONG);
+        // 8.65 cycles is the floor, and 31.88 the ceiling.
+        assert!(!passes(8 * long, LONG));
+        assert!(passes(9 * long, LONG));
+        assert!(passes(31 * long, LONG));
+        assert!(!passes(32 * long, LONG));
+    }
+
+    #[test]
+    fn every_clock_a_good_chip_can_have_passes_whatever_the_cycle() {
+        // Nominal, then the two worst corners of tables 36-12 and 36-13, and
+        // the low one again with the longest pass before the count taken off.
+        for tick in [78_125, 117_187, 57_091, 57_091 - PASS_CLOCKS] {
+            for top in [SHORT, 1000, LONG] {
+                let cycle = u32::from(top);
+                // A part-cycle's lost at the end, or gained at the start.
+                let (least, most) = (tick / cycle * cycle, (tick / cycle + 1) * cycle);
+                assert!(passes(least, top), "{tick} at {top}");
+                assert!(passes(most, top), "{tick} at {top}");
+            }
         }
     }
 
@@ -407,9 +442,12 @@ mod tests {
     fn a_clock_thats_badly_wrong_fails() {
         // What's left of 5 MHz with TCA0 stopped, with the prescaler at 2
         // and at 1, the PIT at twice its rate, and no tick at all.
-        for overflows in [0, 613, 1225, 153, NO_TICK] {
-            assert!(!passes(overflows), "{overflows}");
+        for clocks in [0, 613, 1225, 153].map(|c| c * u32::from(SHORT)) {
+            assert!(!passes(clocks, SHORT), "{clocks}");
         }
+        assert!(!passes(NO_TICK, SHORT));
+        assert!(!passes(NO_TICK, LONG));
+        assert!(!passes(0, LONG));
     }
 
     #[test]
@@ -418,7 +456,7 @@ mod tests {
         assert!(!check.due(), "the first PIT period can be short");
         check.tick(true);
         assert!(check.due());
-        check.result(306);
+        check.result(GOOD_COUNT, SHORT);
         assert!(!check.due());
         for _ in 0..3 * u16::from(CLOCK_CHECK_TICKS) {
             check.tick(true);
@@ -438,12 +476,12 @@ mod tests {
     fn a_failed_clock_stays_failed_and_stops_counting() {
         let mut check = ClockCheck::new();
         check.tick(true);
-        check.result(0);
+        check.result(0, SHORT);
         for _ in 0..2 * u16::from(CLOCK_CHECK_TICKS) {
             check.tick(false);
             assert!(!check.due());
         }
-        check.result(306);
+        check.result(GOOD_COUNT, SHORT);
         assert!(check.failed());
     }
 }

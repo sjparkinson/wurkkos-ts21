@@ -3339,13 +3339,16 @@ impl Bus for Chip {
                  so it gets whatever ADC0.TEMP held"
                     .into()
             }),
-            reg::TCA0_CMP0 | reg::TCA0_CMP1 => {
-                let i = usize::from(a == reg::TCA0_CMP1);
-                let [lo, hi] = self.compare[i].to_le_bytes();
+            reg::TCA0_CMP0 | reg::TCA0_CMP1 | reg::TCA0_PER => {
+                let [lo, hi] = match a {
+                    reg::TCA0_PER => self.tca_per,
+                    _ => self.compare[usize::from(a == reg::TCA0_CMP1)],
+                }
+                .to_le_bytes();
                 self.compare_temp = Some((a, hi));
                 Ok(lo)
             }
-            _ if a == reg::TCA0_CMP0 + 1 || a == reg::TCA0_CMP1 + 1 => {
+            _ if [reg::TCA0_PER, reg::TCA0_CMP0, reg::TCA0_CMP1].contains(&a.wrapping_sub(1)) => {
                 match self.compare_temp.take() {
                     Some((low, hi)) if low == a - 1 => Ok(hi),
                     _ => Err(format!(

@@ -18,7 +18,7 @@ use core::mem::MaybeUninit;
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use ts21::ramp::{Output, PWM_TOP};
-use ts21::selftest::{Fuses, NO_TICK, OVERFLOWS_MAX};
+use ts21::selftest::{CLOCKS_MAX, Fuses, NO_TICK};
 use ts21::sensors::{Channel, Convert};
 use ts21::temp::Calibration;
 
@@ -162,7 +162,7 @@ const TICK_DEADLINE: u16 = u16::MAX;
 
 // A counted wait restarts the deadline, and hits its ceiling before that
 // goes off, so the deadline only ends one with TCA0 stopped as well.
-const _: () = assert!(OVERFLOWS_MAX as u32 * (PWM_TOP as u32) < 2 * (TICK_DEADLINE as u32));
+const _: () = assert!(CLOCKS_MAX < 2 * (TICK_DEADLINE as u32));
 
 /// Whether `mask` in `addr` clears soon enough. Everything that syncs to the
 /// 32 kHz oscillator waits here, since with that oscillator dead nothing
@@ -378,10 +378,17 @@ pub fn wait_for_tick(rest: bool) -> bool {
 }
 
 /// Waits for the next tick like [`wait_for_tick`], awake, and counts TCA0's
-/// overflows on the way (`selftest::ClockCheck`). The firmware has no use for
-/// a 19.6 kHz interrupt, so this polls, with interrupts off so the PIT's flag
-/// stays up for it to see, and returns as soon as it's seen it. It never
+/// clocks on the way (`selftest::ClockCheck`). The firmware has no use for an
+/// interrupt every PWM cycle, so this polls, with interrupts off so the PIT's
+/// flag stays up for it to see, and returns as soon as it's seen it. It never
 /// sleeps, so TCA0 keeps running even if the torch is resting.
+///
+/// Each overflow adds the cycle that just ended, so it's addition only, with
+/// no 32-bit multiply. That length comes from PER, not from the level: read
+/// after an overflow, PER is already the next cycle's, so `cycle` holds it
+/// back until that cycle ends. The pass before this can have changed the
+/// output, and a new period only lands at BOTTOM, so the first cycle here can
+/// still be the old one, up to 16 times the length of the new.
 ///
 /// The count starts where the last pass ended, not on the tick, so it's short
 /// by that pass. RTC.CTRLA stays out of it: the PIT's flag is the RTC tick
@@ -390,32 +397,34 @@ pub fn wait_for_tick(rest: bool) -> bool {
 /// oscillator can't hold it, and returns [`NO_TICK`]. The deadline restarts
 /// with the count, so it can't cut a good one short, and it's what ends this
 /// if TCA0 has stopped too.
-pub fn count_tick() -> u16 {
+pub fn count_tick() -> u32 {
     prepare_sleep(false);
     // SAFETY: `cli` only clears SREG.I. With no `nomem`, it's also a compiler
     // barrier, so nothing below can move above it.
     unsafe { asm!("cli", options(nostack)) };
     write(reg::TCA0_INTFLAGS, regs::TCA_OVF);
     write16(reg::TCB0_CNT, 0);
-    let mut overflows = 0;
-    while read(reg::RTC_PITINTFLAGS) & regs::RTC_PI == 0 && overflows != NO_TICK {
+    let mut cycle = u32::from(read16(reg::TCA0_PER)) + 1;
+    let mut clocks = 0;
+    while read(reg::RTC_PITINTFLAGS) & regs::RTC_PI == 0 && clocks != NO_TICK {
         if read(reg::TCB0_INTFLAGS) & regs::TCB_CAPT != 0 {
-            overflows = NO_TICK;
+            clocks = NO_TICK;
         } else if read(reg::TCA0_INTFLAGS) & regs::TCA_OVF != 0 {
             write(reg::TCA0_INTFLAGS, regs::TCA_OVF);
-            overflows += 1;
-            if overflows > OVERFLOWS_MAX {
-                overflows = NO_TICK;
+            clocks += cycle;
+            cycle = u32::from(read16(reg::TCA0_PER)) + 1;
+            if clocks > CLOCKS_MAX {
+                clocks = NO_TICK;
             }
         }
     }
-    if overflows != NO_TICK {
+    if clocks != NO_TICK {
         write(reg::RTC_PITINTFLAGS, regs::RTC_PI);
         write16(reg::TCB0_CNT, 0);
     }
     // SAFETY: `sei` only sets SREG.I.
     unsafe { asm!("sei", options(nostack)) };
-    overflows
+    clocks
 }
 
 /// TCB0_INT, vector 13: the tick's more than 26 ms late. Like [`rtc_pit`] it
