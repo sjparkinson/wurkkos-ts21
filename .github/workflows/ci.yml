@@ -72,7 +72,8 @@ jobs:
           name: wurkkos-ts21-0614
           path: dist
 
-      - run: |
+      - name: version
+        run: |
           version="0.1.$(git rev-list --count HEAD)"
           echo "VERSION=$version" >> "$GITHUB_ENV"
           mv dist/wurkkos-ts21-0614.hex "dist/wurkkos-ts21-0614-$version.hex"
