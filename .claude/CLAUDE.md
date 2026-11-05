@@ -29,7 +29,7 @@ Agents in `.claude/agents/` report back and never edit. Use them rather than doi
 
 ## Working in this repo
 
-- **Edit `.rs` files with Edit or Write**, not `sed -i`, `cp` or a heredoc. The lint hook only runs on Edit and Write.
+- **Edit `.rs` files with Edit or Write**, not `sed -i`, `cp` or a heredoc. The hook that runs rustfmt only fires on Edit and Write. Clippy runs at `git commit`, alongside `cargo fmt --check` and the tests, so a failing commit is where lint problems show up.
 - **Parallel agents get their own worktree and their own files.** Two agents in one checkout broke each other's builds mid-edit. Never `git stash` to compare before and after; use a WIP commit or a second worktree.
 - **The sandbox can't write `.git/config`**, so `git push -u` pushes but can't record the upstream. Push with `git push origin <branch>`, pass `--head <branch>` to `gh pr create`, and don't try to fix the tracking.
 - **PRs merge by rebase only**, so every commit on a branch lands on main as written. Keep each one single-line and passing.

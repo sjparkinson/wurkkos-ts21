@@ -1,10 +1,18 @@
 #!/usr/bin/env ruby
 # PreToolUse hook on Bash. When the command is a `git commit`, it checks the
-# message is a Conventional Commit and runs the host tests first. Exit 2 blocks
+# message is a Conventional Commit, then runs formatting, the host tests and both
+# clippy passes (the AVR one is the only lint hw.rs and rt.rs get). Exit 2 blocks
 # the commit and hands stderr back to Claude.
 
 require "json"
 require "open3"
+
+CHECKS = [
+  %w[cargo fmt --check],
+  %w[cargo test --workspace --locked -q],
+  %w[cargo clippy --workspace --all-targets --locked -q -- -D warnings],
+  %w[cargo clippy -q --package ts21 --release --target avr-none -Zbuild-std=core -- -D warnings]
+].freeze
 
 TYPES = %w[feat fix docs refactor test ci build perf style chore revert].freeze
 CONVENTIONAL = /\A(?:#{TYPES.join('|')})(?:\([a-z0-9._\/-]+\))?!?: \S/
@@ -52,5 +60,7 @@ end
 # The checkout the session is in, which may be a worktree rather than CLAUDE_PROJECT_DIR.
 top, status = Open3.capture2("git", "rev-parse", "--show-toplevel")
 dir = status.success? ? top.chomp : Dir.pwd
-out, status = Open3.capture2e("cargo", "test", "--workspace", "--locked", "-q", chdir: dir)
-block("cargo test --workspace --locked -q failed, so the commit is blocked:\n#{out.lines.last(60).join}") unless status.success?
+CHECKS.each do |check|
+  out, status = Open3.capture2e(*check, chdir: dir)
+  block("#{check.join(' ')} failed, so the commit is blocked:\n#{out.lines.last(60).join}") unless status.success?
+end
