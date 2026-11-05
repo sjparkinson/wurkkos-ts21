@@ -14,6 +14,8 @@ Watch the pad spacing before you rely on a fixed probe. gchart's standard three-
 
 Use a short USB cable. JLHawaii808 notes failures with 1 m ones.
 
+Adafruit's High Voltage UPDI Friend is a serial UPDI adapter too, but it puts a 12 V pulse on the UPDI line on every falling edge of RTS, which probably means every time a tool opens the port. Nothing turns that off. [bench-plan.md](bench-plan.md#the-high-voltage-updi-friends-12-v-pulse) has the details, and they matter before you press one onto a torch. With that adapter, the "changes nothing" below about `ping` is unproven.
+
 ## Getting to the pads
 
 Unscrew the head from the body. The driver's on the back of the head and the R, G, V pads are on it. Take the cell out, since the programmer powers the MCU through V (anything from 3.3 V to 5 V depending on the programmer, and the MCU's rated to 5.5 V). Before anything touches R, check with a multimeter that G connects to the battery negative contact, because pad order isn't the same on every light.

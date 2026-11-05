@@ -1,6 +1,6 @@
 # Bench plan
 
-Every hardware check the roadmap is waiting on, in one place and in the order to do them, for a bench with three things on it: the torch, a Fluke 107 and a UPDI programmer. Nothing here has run on a real light yet, so treat each expected result as a prediction. [flashing.md](flashing.md) has how to reach the pads and use the programmer.
+Every hardware check the roadmap is waiting on, in one place and in the order to do them, for a bench with the torch, a Fluke 107, a UPDI programmer, and the [spare chip kit](#the-spare-chip-kit): an Adafruit ATtiny1616 breakout, an Adafruit High Voltage UPDI Friend, a breadboard, jumpers, tactile switches and blue LEDs. Nothing here has run on a real light yet, so treat each expected result as a prediction. [flashing.md](flashing.md) has how to reach the pads and use the programmer.
 
 Each check says what it needs:
 
@@ -29,19 +29,87 @@ The programmer reads flash, EEPROM and fuses, and writes flash and EEPROM. It ca
 
 Your eyes are the third instrument. A dark room shows a millisecond flash from the FET far better than any of the above.
 
+## The spare chip kit
+
+The breakout is the same chip as the torch with nothing expensive attached, so everything risky happens there first. Its pins are also the one place the meter gets a clean logic signal: on the torch the PWM is buried in the driver, and here it's a header pin.
+
+From [the breakout's schematic](https://github.com/adafruit/Adafruit-ATtinyx16-Breakouts-PCB), read net by net. The labels are the schematic's net names, so check them against the silkscreen:
+
+| Torch | Chip pin | Breakout header | What's different |
+|---|---|---|---|
+| Linear channel | PB1 | SDA | 10 kΩ pull-up to VCC, and a STEMMA QT socket |
+| FET channel | PB0 | SCL | The same |
+| Side switch | PA5 | 1 | Nothing else on it |
+| Button LED | PB5 | 4 | Nothing else on it |
+| R pad | PA0 | UPDI | 10 kΩ pull-up to VCC |
+| V pad | VCC | VIN | VCC is VIN unless the jumper on the back's been changed. There's no VCC pin as such. 3V is a regulator output, so don't feed it |
+| G pad | GND | GND | |
+
+Wiring, with the Friend's slide switch on 3 V:
+
+- Friend's UPDI, power and GND (on its JST lead or 0.1" holes, in that order on the schematic) to the breakout's UPDI, VIN and GND.
+- A tactile switch from pin 1 to GND. Mind which legs are joined: the 12 mm ones have four.
+- A blue LED from SDA to GND, a second from SCL to GND, cathodes to GND.
+
+Nothing on the order list limits an LED's current. At 3.3 V a blue LED's forward voltage does most of the job, so it's fine straight on a pin for this. At 5 V only the pin's own drive limits it, which could pass the 40 mA absolute maximum (DS40002204A table 36-1), so **keep the switch on 3 V** or add 1 kΩ in series. Some 1 kΩ resistors are worth having anyway (see [what this kit can't do](#what-this-kit-cant-do)). The header strips come with the board and need soldering.
+
+What the breakout can't tell you: anything about the driver. There's no cell, no gates and no regulator to light. The pull-ups mean PB0 and PB1 go high through a reset, where the torch's float, so a glow on those LEDs at power-on is expected here and says nothing about 3.1. The green power LED is always on, so the board's supply current says nothing about sleep. And it's a different chip from the torch's, possibly another silicon revision, so a pass here makes a torch pass likely without closing the roadmap item.
+
+## The High Voltage UPDI Friend's 12 V pulse
+
+Read this before plugging the Friend into anything. It's a good serial UPDI adapter (CH340E, 1 kΩ from TX to RX, and it powers the target at 3.3 V or USB's 5 V), and it has one trick that matters here.
+
+Its [schematic](https://github.com/adafruit/Adafruit-High-Voltage-UPDI-Friend-PCB) has RTS# going through a 10 nF capacitor to the control pin of an analog switch, which a 10 kΩ resistor holds high. High connects the UPDI line to the serial port. Low connects it to the 12 V rail, which is always up. So a falling edge on RTS# puts 12 V on UPDI for roughly 100 µs (my reading of the RC, not a spec), and there's no switch or jumper to stop it. From the feedback resistors the rail should be about 12.4 V, if the MT3608's reference is the usual 0.6 V.
+
+Opening a serial port normally asserts RTS, which is that falling edge. `xtask/src/serial.rs` can't prevent it: the kernel does it during `open`, before `stty` runs. So assume **every `cargo xtask` command fires one pulse as it starts.** Likely, not confirmed: the CH340 driver on macOS might behave differently, and the meter's too slow to see it.
+
+What the datasheet says about that (DS40002204A):
+
+- The pin takes it. The absolute maximum on RESET is 13 V (table 36-1), and detection is 11.5 to 12.5 V (table 36-11). But the same page warns that overshoot past 13 V can latch the pin's ESD protection on, and a 12 V driver can then push enough current through it to do permanent damage. Nothing here has measured this board's overshoot.
+- It only describes the pulse as a way into UPDI from another pin function (§33.3.2.1.3). What it does to a chip already set to UPDI, like these, isn't stated. It says the rising edge resets UPDI, and that UPDI then stays in reset until the line's driven low. That's probably harmless, and the tool's retry with a double break covers it. Whether it disturbs the running firmware is what 0.6 finds out.
+- It's only rated for the RESET pin. On any other pin the limit is VDD + 0.5 V. **Never put the Friend's UPDI line on another pin**, which rules out using it as a serial console on the breakout's TX pin for T2.
+
+The torch adds a question the breakout can't answer: what else is on the R pad. hardware.md doesn't know.
+
 ## Rules
 
 - **Never put the meter in series above the linear channel.** The FET connects the LEDs straight to the cell, which can blow the 11 A fuse and puts the meter's leads in the current path. Measure cell volts across the cell for those levels, never amps.
 - **Cell out before anything touches the pads.** The programmer powers the chip through V. Check G is continuous with the battery negative first, every time you've had it apart.
 - **Stay with it above level 75, in short bursts.** The thermal constants are tuned on a made-up head, and the cell's unprotected. A hand on the head is the only thermometer here, so stop when it's uncomfortable.
 - **Don't take the cell under 2.8 V.** The firmware should turn off at 2.99 V, but that's one of the things being tested.
-- **Nothing here writes fuses.** If a fuse looks wrong, stop and decide with the datasheet open.
+- **Nothing here writes fuses.** If a fuse looks wrong, stop and decide with the datasheet open. Having a high-voltage programmer on the bench doesn't change that: `xtask` still can't write them, and the Friend's rescue for a bad `SYSCFG0` is untested.
+- **Use an adapter without the 12 V pulse on the torch if you have one.** If the Friend is the only programmer, use it on the torch only after Stage 0 has passed, and accept that what's on the R pad is unknown (see [the pulse](#the-high-voltage-updi-friends-12-v-pulse)).
+- **Get the breakout's backup out of `backup/` before Stage 1.** `xtask` always uses that one directory. If it's left there, the torch's backup refuses to run, and a later `restore` would put seesaw on the torch. Stage 0 moves it.
 
 Any firmware problem below is recoverable: flash and EEPROM are all that ever change, so `cargo xtask restore` puts the stock light back whatever state it's in.
 
+## Stage 0: the breakout
+
+Every step of the first flash, rehearsed on a chip that doesn't matter. Wired as in [the spare chip kit](#the-spare-chip-kit), powered by the Friend, with the LEDs off the pins while the meter's on them, since they'd drag the reading. Volts are against GND, and VCC is whatever the meter reads on VIN.
+
+The breakout ships running seesaw, so if the chip's locked, 0.1 or 0.2 will say it didn't enter programming mode. Stop there: the programmer won't unlock a chip.
+
+| # | Do | Needs | Expect | Rehearses |
+|---|---|---|---|---|
+| 0.1 | `cargo xtask ping <port>`, ten times | Now | `found tinyAVR P:0D:1-3` every time. A first attempt that only works on the retry would be the pulse holding UPDI in reset | 1.4 |
+| 0.2 | `cargo xtask backup <port>` | Now | `flash.hex`, `eeprom.hex`, `fuses.hex` | 1.5 |
+| 0.3 | Read `backup/fuses.hex` against `selftest::Fuses::ok`, as 1.6 | Now | Seesaw might not use the factory fuses. If this fails, the firmware refuses the FET here for a good reason, so 0.9 to 0.11 can't work. Don't write the fuses | 1.6 |
+| 0.4 | `cargo xtask flash <port>`, then `restore`, then `flash` again | Now | All verify. Seesaw comes back in the middle, which proves `restore` before the torch needs it | 2.1, and `restore`, which nothing else tests |
+| 0.5 | Move `backup/` out of the repo, somewhere like `~/ts21-breakout-backup` | | `ls backup` finds nothing. Don't skip this | |
+| 0.6 | LED on SDA. 1C on, then `cargo xtask ping <port>` ten times with the light on, then 1C off | Now | Stays on throughout, and clicks still work. `ping` claims to change nothing, so the light going out means the pulse or the port opening resets the chip. It's no danger on this board, but it's the datasheet's gap answered, so write it down | The pulse |
+| 0.7 | Switch and LED, as 3.5: 1C on, 1C off, a few dozen times | Now | Clicks feel right. Power-cycling the Friend brings it up in about half a second. The LED glows through the proof's resets, thanks to the pull-up, which shows they happen | 3.5 |
+| 0.8 | LED off. Level 50: meter on frequency from SDA to GND, then on DC volts | Now | 19.4 kHz, a clean signal, so 3.8's "may not trigger" doesn't apply. A wrong clock is unmistakable: 10 MHz would read double. DC volts should be 29.1% of VCC, 75 / 258, since the meter averages the PWM | 3.6, 3.8, "Check 5 MHz" on silicon |
+| 0.9 | T1 at level 100, right after a flash: DC volts on SCL | T1 | 3.5% of VCC, 9 / 255, about 116 mV at 3.3 V. Zero means capped, so go through the suspects in 4.1 here, where it costs nothing. Covers the CRC, the proof and SRAM surviving a watchdog reset | 4.1 |
+| 0.10 | The same build, left off for an hour, then on | T1 | Still 3.5%. Zero means a `wdr` got lost in power-down | 4.2 |
+| 0.11 | T1 at 75, 76 and 150: DC volts on SCL and SDA | T1 | At 75: SCL 0, SDA VCC. At 76: SCL 0.39% of VCC, about 13 mV, the off-by-one check as a number. At 150: both VCC | 4.3, the duty arithmetic, with no heat to worry about |
+| 0.12 | T1 at level 1: frequency and DC volts on SDA | T1 | 1.22 kHz, and 0.1% of VCC, about 3 mV | 5.5 |
+| 0.13 | Develop T2 here, and compare its voltage against the Fluke on VIN at 3 V and 5 V (LEDs off the pins for the 5 V reading) | T2 | Within 0.1 V. There's no drop from cell to VCC to confuse it, so this checks the ADC sums alone | 6.2 |
+
+Stop at anything unexplained. What goes wrong here would've gone wrong on the torch, except here `flash` puts it right.
+
 ## Stage 1: stock, before flashing
 
-The last chance to measure Anduril, which is what the 5 MHz checks compare against, and the safest place to find out the programmer works.
+The last chance to measure Anduril, which is what the 5 MHz checks compare against, and the first time the programmer meets the torch. Stage 0 goes first.
 
 | # | Do | Expect | Closes |
 |---|---|---|---|
@@ -122,6 +190,8 @@ Needs T1, at the linear channel only, so the meter's fine here.
 
 Neither exists yet, and they should stay on a throwaway branch: they aren't the firmware.
 
+Build and debug both on the breakout first. A T1 that's wrong there costs a reflash, and on the torch it could be a FET running at the wrong duty.
+
 **T1, another level.** Today's `ui::LEVEL` is 50, with an assert holding it to the linear channel. Changing both isn't enough: `cargo xtask hex` runs every docs/ui.md example, the examples expect level 50, and no hex gets written. Changing the examples to match doesn't get there either, since the low-battery rows work in levels too. And a hex made some other way misses the CRC, which would refuse the FET and spoil the test. So T1 needs a small `xtask` change first: build at a given level, skip the spec examples and keep everything else, and write the CRC as usual. `cargo xtask flash <port> <file>` already takes any hex. Bringing back `fancy-ui` would replace T1 altogether.
 
 **T2, a number out.** A build that blinks a value out on the main LED, Anduril's version-check style, at level 50: tens on long blinks, units on short. One build per value is fine: `torch`'s battery reading, the temperature, the last count from `hw::count_tick`. It's the same thing as roadmap section 3's battery check on 3C, so that item could do most of this job for real.
@@ -130,17 +200,17 @@ Neither exists yet, and they should stay on a throwaway branch: they aren't the 
 
 | Check | Why | What would unlock it |
 |---|---|---|
-| Off current against 60 to 75 µA | No mA or µA range | A 1 kΩ resistor in series with the cell: about 70 mV on the 600 mV range |
+| Off current against 60 to 75 µA | No mA or µA range, and the breakout's power LED hides it there | A 1 kΩ resistor in series with the cell: about 70 mV on the 600 mV range |
 | Drop from cell to VCC | V is under the head, and the head has to be on for the light to run | A wire from the body to the head, so the meter can reach V with the head off |
-| FET through a real hang (up to 64 ms) | Too quick for the meter, and needs a hang on demand | A scope, and a T1 that hangs on purpose. Eyes can do part of it: a flash that lingers |
+| FET through a real hang (up to 64 ms) | Too quick for the meter, and needs a hang on demand | A scope, and a T1 that hangs on purpose. Eyes can do part of it: a flash that lingers. The LED on SCL is the safe place to try that build |
 | Clearing CMPnEN mid-pulse, a waveform output on a stopped TCA0 | Needs a scope, and a failure on demand | A scope |
 | Whether a BOTTOM under LUPD clears BV | Inside the chip. Only the blips in 4.6 would hint at it | A T2 counting reissued rows |
 | A dead 32 kHz oscillator, TCB0 waking idle, `SYNC_POLLS` against a real sync | Needs a fault on demand | Nothing cheap. They stay simulator-only |
 | Sensor against a real temperature, thermal retune | No thermometer | Any thermometer on the head |
-| Clock check cold and hot | Needs a controlled range | A freezer gets the cold end |
+| Clock check cold and hot | Needs a controlled range | A freezer gets the cold end, and the breakout can go in without an unprotected cell. Bag it against condensation |
 | 4.2 V to 2.5 V sweep | No bench supply | A bench supply. 6.1 covers the part that matters |
 
-Until those happen, the roadmap's watchdog item stays unticked, and docs/hardware.md's labels stay as they are. Move a fact from likely to confirmed only with a result from here beside it.
+Until those happen, the roadmap's watchdog item stays unticked, and docs/hardware.md's labels stay as they are. Move a fact from likely to confirmed only with a result from here beside it, and say so if the result came from the breakout rather than a TS21.
 
 ## Results
 
