@@ -191,20 +191,23 @@ const _: () = {
 /// of them, the PIT or TCA0 is broken, and the torch turns off and stays off
 /// until the cell comes out.
 ///
-/// A count under the floor gets a second go on the very next tick, and only
-/// two in a row fail. A lost long-to-short row can take up to 4,094 clocks off
-/// one count, which is more than the floor's margin at the worst corner, and
-/// the floor can't drop far enough to cover it without letting a tick at twice
-/// its rate through. A real fault fails both counts, a tick later. A count
-/// over the ceiling, or with no tick at all, fails at once: nothing good
-/// over-counts.
+/// A count under the floor gets a second go on the very next tick, and it
+/// takes two low counts close together to fail. A lost long-to-short row can
+/// take up to 4,094 clocks off one count, which is more than the floor's
+/// margin at the worst corner, and the floor can't drop far enough to cover it
+/// without letting a tick at twice its rate through. So a low count is
+/// [`LOW_STRIKES`] strikes, a good one takes one away, and [`STRIKES_OUT`]
+/// fails: two low counts in a row do it, and so does low, good, low, so a
+/// clock that's only wrong some of the time can't hide behind the good counts
+/// in between. A count over the ceiling, or with no tick at all, fails at
+/// once: nothing good over-counts.
 ///
 /// The firmware counts once at power-on and then every
 /// [`CLOCK_CHECK_TICKS`] while the light's on. It doesn't start a count at
 /// rest, since TCA0 stops in power-down, and a torch that's off isn't doing
-/// anything a bad clock can upset; only a second go finishes there. It waits for the first tick before the power-on count,
-/// because the first PIT period can be anything up to a full one (DS
-/// §23.5.2.2).
+/// anything a bad clock can upset; only a second go finishes there. It waits
+/// for the first tick before the power-on count, because the first PIT period
+/// can be anything up to a full one (DS §23.5.2.2).
 #[derive(Clone, Copy, Debug)]
 pub struct ClockCheck {
     /// Ticks until the next count.
@@ -212,10 +215,15 @@ pub struct ClockCheck {
     /// Whether the power-on count has happened.
     counted: bool,
     due: bool,
-    /// The last count was under the floor, so the next one decides.
-    suspect: bool,
+    /// Low counts not yet worked off by good ones.
+    strikes: u8,
     failed: bool,
 }
+
+/// Strikes for a count under the floor.
+const LOW_STRIKES: u8 = 2;
+/// Strikes that fail the check.
+const STRIKES_OUT: u8 = 3;
 
 impl ClockCheck {
     pub const fn new() -> Self {
@@ -223,7 +231,7 @@ impl ClockCheck {
             wait: 1,
             counted: false,
             due: false,
-            suspect: false,
+            strikes: 0,
             failed: false,
         }
     }
@@ -236,7 +244,7 @@ impl ClockCheck {
     /// Call once a tick, with the torch `resting` or not. A second go runs at
     /// rest too, so a bad power-on count is settled before a click can land.
     pub fn tick(&mut self, resting: bool) {
-        let running = !resting || !self.counted || self.suspect;
+        let running = !resting || !self.counted || self.strikes >= LOW_STRIKES;
         if running {
             self.wait = self.wait.saturating_sub(1);
         }
@@ -263,11 +271,12 @@ impl ClockCheck {
         self.due = false;
         self.wait = CLOCK_CHECK_TICKS;
         if Self::in_window(clocks, top) {
-            self.suspect = false;
-        } else if clocks > CLOCKS_MAX || self.suspect {
+            self.strikes = self.strikes.saturating_sub(1);
+        } else if clocks > CLOCKS_MAX {
             self.failed = true;
         } else {
-            self.suspect = true;
+            self.strikes += LOW_STRIKES;
+            self.failed |= self.strikes >= STRIKES_OUT;
             self.wait = 1;
         }
     }
@@ -545,8 +554,25 @@ mod tests {
         }
         check.tick(false);
         assert!(check.due());
-        // So a later low count is a first one again, not a second.
-        check.result(CLOCKS_MIN / 2, SHORT);
+    }
+
+    #[test]
+    fn low_good_low_fails_so_a_clock_cant_hide_behind_its_good_counts() {
+        let mut check = ClockCheck::new();
+        for clocks in [CLOCKS_MIN / 2, GOOD_COUNT, CLOCKS_MIN / 2] {
+            check.tick(false);
+            check.result(clocks, SHORT);
+        }
+        assert!(check.failed());
+    }
+
+    #[test]
+    fn two_good_counts_work_off_a_low_one() {
+        let mut check = ClockCheck::new();
+        for clocks in [CLOCKS_MIN / 2, GOOD_COUNT, GOOD_COUNT, CLOCKS_MIN / 2] {
+            check.tick(false);
+            check.result(clocks, SHORT);
+        }
         assert!(!check.failed());
     }
 
@@ -557,6 +583,27 @@ mod tests {
             check.tick(false);
             check.result(clocks, SHORT);
             assert!(check.failed(), "{clocks}");
+            // And a low count after that can't clear it.
+            check.result(CLOCKS_MIN / 2, SHORT);
+            assert!(check.failed(), "{clocks}");
+        }
+    }
+
+    /// A fade moves a level at a time (`gradual::Gradual`). The count takes
+    /// each cycle's length from PER, so a row caught mid-change can only swap
+    /// one cycle's length for another's, and it's the gap between the two
+    /// rows' cycles that comes off. That has to fit in the floor's margin at
+    /// the worst corner, or a fade could lose a row on both of a count's goes.
+    #[test]
+    fn a_step_of_one_level_moves_the_cycle_by_less_than_the_floors_margin() {
+        let margin = LEAST_CLOCKS - PASS_CLOCKS - CLOCKS_MIN;
+        for level in 1..crate::ramp::LEVELS {
+            let (this, next) = (
+                crate::ramp::output(level).top,
+                crate::ramp::output(level + 1).top,
+            );
+            let gap = u32::from(this.abs_diff(next));
+            assert!(gap < margin, "levels {level} and up: {gap} of {margin}");
         }
     }
 }
