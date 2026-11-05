@@ -75,9 +75,9 @@
 //!   between two instructions now and then, so writing PERBUF or a CMPnBUF
 //!   with the timer running and LUPD clear is checked as if one landed
 //!   straight after that write. `check` shows that catches firmware with the
-//!   lock taken out. The datasheet doesn't say whether writing CNT counts as
-//!   a BOTTOM, so this guesses that it doesn't and pushes BOTTOM a full cycle
-//!   away. The real wait can be far shorter, so the firmware mustn't lean on
+//!   lock taken out. Table 20-1 has BOTTOM reached "when it becomes 0x0000",
+//!   which doesn't settle whether writing CNT counts, so this guesses that it
+//!   doesn't and pushes BOTTOM a full cycle away. The real wait can be far shorter, so the firmware mustn't lean on
 //!   a pass that writes the output staying in idle: `Torch::tick` rests in
 //!   that same pass. CNT only takes 0 while running. Sleeping with LUPD set
 //!   is an error. TCA0 stops in power-down, since §20.3.6 only promises idle,
@@ -4332,6 +4332,8 @@ impl Chip {
         chip.lupd_broken = self.lupd_broken;
         chip.bv_adverse = self.bv_adverse;
         chip.bv_cleared = self.bv_cleared;
+        // It goes with `world.tca_stopped`, which survives too.
+        chip.tca_deaf = self.tca_deaf;
         *self = chip;
     }
 }
@@ -4346,6 +4348,12 @@ impl Sim {
         self.testing = self.ram_tested;
         self.booted = self.executed;
         self.landed = None;
+        // A reset takes any probe with it, and a stale one would swallow the
+        // next real handler's flags.
+        if let Some(landings) = &mut self.landings {
+            landings.probe = None;
+            landings.deadline = false;
+        }
     }
 
     /// What's in the marker right now, if it's a marker at all.
