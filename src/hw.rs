@@ -175,11 +175,12 @@ pub fn init() {
     // Pull every pin we don't drive up, so nothing floats and leaks current,
     // and so the button LED on PB5 lights. Turn off the input buffers we
     // don't read too, which saves a little more (AN2515C section 9). PA0 only
-    // gets the pull-up: it's UPDI, and nothing's worth risking that for.
+    // gets the pull-up: it's UPDI, and nothing's worth risking that for. So
+    // does the switch, with no interrupt: the PIT wakes the chip every tick
+    // on or off, and the loop reads the pin then.
     for pin in 0..8 {
         let ctrl = match pin {
-            SWITCH => regs::PORT_PULLUPEN | regs::PORT_ISC_BOTHEDGES,
-            UPDI => regs::PORT_PULLUPEN,
+            SWITCH | UPDI => regs::PORT_PULLUPEN,
             _ => UNUSED_PIN,
         };
         write(reg::PORTA_PIN0CTRL + pin as usize, ctrl);
@@ -288,17 +289,17 @@ fn prepare_sleep(rest: bool) {
 
 /// Sleeps until the next 64 Hz tick, in power-down if `rest` allows it. The
 /// PIT and the watchdog carry on in there (sections 23.8 and 19.3.4), so the
-/// loop runs every tick, on or off, and samples the switch whether or not
-/// the pin-change interrupt fired.
+/// loop runs every tick, on or off, and that's how it sees the switch.
 ///
 /// The PIT interrupt sets [`TICK`]; this checks and clears it with
 /// interrupts off, so a tick can't land between the check and the clear.
 /// If it isn't set yet, `sei` and `sleep` go back to back (AN2515C section
 /// 4.5): the instruction after `sei` always runs before a pending
 /// interrupt, so a tick that arrived after the check wakes the `sleep` at
-/// once rather than being slept through. Anything else that wakes it, such
-/// as the switch's pin-change interrupt, goes round the loop and back to
-/// sleep.
+/// once rather than being slept through. The PIT's the only interrupt there
+/// is, but the flag still earns its place: without it, a tick that landed
+/// while the loop was busy would go uncounted, and the next feed would come
+/// a tick late, at the very end of the watchdog's open window.
 pub fn wait_for_tick(rest: bool) {
     prepare_sleep(rest);
     loop {
@@ -312,7 +313,7 @@ pub fn wait_for_tick(rest: bool) {
             return;
         }
         // SAFETY: sets SREG.I and sleeps until an interrupt, whose handler
-        // returns here. Both handlers save what they touch.
+        // returns here. The handler saves what it touches.
         unsafe { asm!("sei", "sleep", options(nostack)) };
     }
 }
@@ -325,16 +326,6 @@ pub fn wait_for_tick(rest: bool) {
 pub extern "avr-interrupt" fn rtc_pit() {
     write(reg::RTC_PITINTFLAGS, regs::RTC_PI);
     write(reg::GPIO_GPIOR0, TICK);
-}
-
-/// PORTA_PORT, vector 3: the switch changed. `hw::init` sets PA5 to
-/// interrupt on both edges, since only that and LEVEL wake a partially
-/// asynchronous pin from power-down (table 16-3). Waking is all it's for,
-/// and with the PIT running that's no sooner than the next tick: the main
-/// loop samples the switch every tick anyway. It clears every PORTA flag,
-/// since one left up would fire again the moment this returned.
-pub extern "avr-interrupt" fn porta_port() {
-    write(reg::PORTA_INTFLAGS, regs::PORT_INT_ALL);
 }
 
 /// Tells the watchdog the loop is still running. `main` calls this at the

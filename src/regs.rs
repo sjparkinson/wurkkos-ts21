@@ -112,8 +112,6 @@ pub mod addr {
     pub const SLPCTRL_CTRLA: usize = 0x0050;
     /// RTC.PITINTCTRL: PI enables the PIT's interrupt.
     pub const RTC_PITINTCTRL: usize = 0x0152;
-    /// PORTA.INTFLAGS: a pin-change flag per pin, cleared by writing 1.
-    pub const PORTA_INTFLAGS: usize = 0x0409;
 
     /// FUSE.WDTCFG. The fuses are readable in data space; the firmware never
     /// writes them.
@@ -154,8 +152,6 @@ pub const WDT_SYNCBUSY: u8 = 0x01;
 
 /// PORTx.PINnCTRL.PULLUPEN.
 pub const PORT_PULLUPEN: u8 = 0x08;
-/// PORTx.PINnCTRL.ISC = BOTHEDGES.
-pub const PORT_ISC_BOTHEDGES: u8 = 0x01;
 /// PORTx.PINnCTRL.ISC = INPUT_DISABLE: no interrupt and no input buffer.
 pub const PORT_ISC_INPUT_DISABLE: u8 = 0x04;
 
@@ -252,18 +248,14 @@ pub const FUSE_RSTPINCFG_UPDI: u8 = 0x1 << 2;
 /// Entries in the vector table: reset plus 30 interrupts.
 pub const VECTORS: usize = 31;
 
-/// PORTx.INTFLAGS.INT, every pin's flag. Writing it clears them all.
-pub const PORT_INT_ALL: u8 = 0xFF;
 /// SLPCTRL.CTRLA.SEN: `sleep` sleeps. Clear, it does nothing.
 pub const SLPCTRL_SEN: u8 = 0x01;
 /// SLPCTRL.CTRLA.SMODE = IDLE: only the CPU and flash stop.
 pub const SLPCTRL_SMODE_IDLE: u8 = 0x0 << 1;
 /// SLPCTRL.CTRLA.SMODE = PDOWN: everything stops but the PIT, the WDT and
-/// the pin-change wake-ups.
+/// the pin-change wake-ups, which the firmware doesn't use.
 pub const SLPCTRL_SMODE_PDOWN: u8 = 0x2 << 1;
 
-/// Vector numbers, from the ATDF's `<interrupts>`. PORTA.PORT, PORTA's
-/// pin-change interrupt.
-pub const VECTOR_PORTA_PORT: usize = 3;
-/// RTC.PIT, the periodic interrupt timer.
+/// Vector numbers, from the ATDF's `<interrupts>`. RTC.PIT, the periodic
+/// interrupt timer.
 pub const VECTOR_RTC_PIT: usize = 7;

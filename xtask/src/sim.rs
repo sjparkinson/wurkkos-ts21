@@ -47,12 +47,12 @@
 //!   and take it again, forever.
 //! - `sleep` needs SLPCTRL.SEN (the chip treats it as a nop otherwise), idle
 //!   or power-down, the only modes modelled, and an enabled interrupt that
-//!   could wake it. `avr.rs` adds that SREG.I is set and no handler's
+//!   could wake it, which in power-down leaves out RISING and FALLING on all
+//!   but pins 2 and 6 (table 16-3). `avr.rs` adds that SREG.I is set and no handler's
 //!   running. Power-down also wants nothing left that it would freeze or
 //!   keep burning: no conversion running (§30.3.5 resumes it on waking, with
-//!   a result that's invalid), the ADC off, the reference not forced on,
-//!   TCA0's channels off the pins with both compares at 0, and PA5 able to
-//!   wake it.
+//!   a result that's invalid), the ADC off, the reference not forced on, and
+//!   TCA0's channels off the pins with both compares at 0.
 //! - The clock has to be 5 MHz, and TCA0 single-slope with a PER of 254 and
 //!   no prescaler: writes of anything else are refused, and after `hw::init`
 //!   a write that never happened fails too.
@@ -192,10 +192,10 @@ const WDT_CLOCKS_PER_TICK: u32 = 16;
 const _: () = assert!(TICK_BUDGET < TICK_CYCLES / 2);
 
 /// PORTx.PINnCTRL.ISC, the mask and its values (DS40002204A §16.5.11),
-/// beyond the BOTHEDGES the firmware uses. atdf.rs checks them.
+/// for anything that sets them. atdf.rs checks them.
 pub const ISC: u8 = 0x07;
 pub const ISC_INTDISABLE: u8 = 0x0;
-pub const ISC_BOTHEDGES: u8 = regs::PORT_ISC_BOTHEDGES;
+pub const ISC_BOTHEDGES: u8 = 0x1;
 pub const ISC_RISING: u8 = 0x2;
 pub const ISC_FALLING: u8 = 0x3;
 pub const ISC_INPUT_DISABLE: u8 = regs::PORT_ISC_INPUT_DISABLE;
@@ -208,8 +208,12 @@ const PWM_CYCLE: u64 = ramp::PWM_TOP as u64;
 pub(crate) const TCA_WGMODE: u8 = 0x07;
 /// PORTx.PINnCTRL.INVEN, which the simulator refuses on PA5.
 pub const PORT_INVEN: u8 = 0x80;
-/// PORTB's and PORTC's pin-change vectors, which the firmware has no
-/// handlers for. atdf.rs checks them.
+/// PORTA.INTFLAGS: a pin-change flag per pin, cleared by writing 1. The
+/// firmware doesn't use it. atdf.rs checks it.
+pub const PORTA_INTFLAGS: usize = 0x0409;
+/// The ports' pin-change vectors, which the firmware has no handlers for.
+/// atdf.rs checks them.
+pub const VECTOR_PORTA_PORT: usize = 3;
 pub const VECTOR_PORTB_PORT: usize = 4;
 pub const VECTOR_PORTC_PORT: usize = 5;
 
@@ -1223,13 +1227,6 @@ impl Chip {
                 self.compare
             ));
         }
-        let isc = self.io[reg::PORTA_PIN0CTRL + 5] & ISC;
-        if isc != ISC_BOTHEDGES && isc != ISC_LEVEL {
-            return Err(format!(
-                "powers down with PA5's ISC at {isc:#x}: it's a partially asynchronous pin, \
-                 so only BOTHEDGES or LEVEL wakes the chip (table 16-3)"
-            ));
-        }
         Ok(())
     }
 
@@ -1261,17 +1258,31 @@ impl Chip {
     /// A bit per vector whose interrupt is enabled. A port's is enabled
     /// when any of its pins' ISC is.
     fn enabled(&self) -> u32 {
+        self.interrupts(|_, isc| {
+            matches!(isc, ISC_BOTHEDGES | ISC_RISING | ISC_FALLING | ISC_LEVEL)
+        })
+    }
+
+    /// [`Chip::enabled`] for power-down, with the peripheral clock stopped.
+    /// Only pins 2 and 6 are fully asynchronous. The rest wake it on
+    /// BOTHEDGES or LEVEL and no other sense (table 16-3).
+    fn enabled_in_power_down(&self) -> u32 {
+        self.interrupts(|pin, isc| match isc {
+            ISC_BOTHEDGES | ISC_LEVEL => true,
+            ISC_RISING | ISC_FALLING => pin == 2 || pin == 6,
+            _ => false,
+        })
+    }
+
+    /// A bit per vector, a port's being set when `senses` is true of any of
+    /// its pins' number and ISC, and the PIT's when its interrupt's on.
+    fn interrupts(&self, senses: impl Fn(usize, u8) -> bool) -> u32 {
         let port = |base: usize, vector: usize| {
-            let on = (base..base + 8).any(|a| {
-                matches!(
-                    self.io[a] & ISC,
-                    ISC_BOTHEDGES | ISC_RISING | ISC_FALLING | ISC_LEVEL
-                )
-            });
+            let on = (0..8).any(|pin| senses(pin, self.io[base + pin] & ISC));
             u32::from(on) << vector
         };
         let pit = self.io[reg::RTC_PITINTCTRL] & regs::RTC_PI != 0;
-        port(reg::PORTA_PIN0CTRL, regs::VECTOR_PORTA_PORT)
+        port(reg::PORTA_PIN0CTRL, VECTOR_PORTA_PORT)
             | port(reg::PORTB_PIN0CTRL, VECTOR_PORTB_PORT)
             | port(reg::PORTC_PIN0CTRL, VECTOR_PORTC_PORT)
             | u32::from(pit) << regs::VECTOR_RTC_PIT
@@ -1549,7 +1560,7 @@ const ADC_SETUP: [usize; 9] = [
 
 fn vector_name(vector: u8) -> String {
     match usize::from(vector) {
-        regs::VECTOR_PORTA_PORT => "PORTA_PORT (vector 3)".into(),
+        VECTOR_PORTA_PORT => "PORTA_PORT (vector 3)".into(),
         VECTOR_PORTB_PORT => "PORTB_PORT (vector 4)".into(),
         VECTOR_PORTC_PORT => "PORTC_PORT (vector 5)".into(),
         regs::VECTOR_RTC_PIT => "RTC_PIT (vector 7)".into(),
@@ -1607,7 +1618,7 @@ fn name(addr: usize) -> String {
         (reg::GPIO_GPIOR0, "GPIO.GPIOR0"),
         (reg::SLPCTRL_CTRLA, "SLPCTRL.CTRLA"),
         (reg::RTC_PITINTCTRL, "RTC.PITINTCTRL"),
-        (reg::PORTA_INTFLAGS, "PORTA.INTFLAGS"),
+        (PORTA_INTFLAGS, "PORTA.INTFLAGS"),
         (reg::CRCSCAN_CTRLA, "CRCSCAN.CTRLA"),
         (reg::CRCSCAN_CTRLB, "CRCSCAN.CTRLB"),
         (reg::CRCSCAN_STATUS, "CRCSCAN.STATUS"),
@@ -1627,7 +1638,7 @@ impl Bus for Chip {
     /// static priority (DS40002204A §13.3.2.4). A port's flags only go up
     /// for pins whose ISC enables them, so any flag is a request.
     fn interrupt(&self) -> Option<u8> {
-        let pending = u32::from(self.porta_flags != 0) << regs::VECTOR_PORTA_PORT
+        let pending = u32::from(self.porta_flags != 0) << VECTOR_PORTA_PORT
             | u32::from(self.pit_flag) << regs::VECTOR_RTC_PIT;
         let requests = pending & self.enabled();
         (requests != 0).then(|| requests.trailing_zeros() as u8)
@@ -1658,7 +1669,10 @@ impl Bus for Chip {
         }
         // The PIT's interrupt can only wake the chip if the PIT's running.
         let pit_off = self.io[reg::RTC_PITCTRLA] & regs::RTC_PITEN == 0;
-        let mut wakes = self.enabled();
+        let mut wakes = match ctrla == regs::SLPCTRL_SMODE_PDOWN | regs::SLPCTRL_SEN {
+            true => self.enabled_in_power_down(),
+            false => self.enabled(),
+        };
         if pit_off {
             wakes &= !(1 << regs::VECTOR_RTC_PIT);
         }
@@ -1688,6 +1702,11 @@ impl Bus for Chip {
         match a {
             reg::VPORTA_IN => {
                 self.switch_not_inverted()?;
+                if self.io[reg::PORTA_PIN0CTRL + 5] & ISC == ISC_INPUT_DISABLE {
+                    return Err(
+                        "reads PA5 with its input buffer off, so PORTA.IN never changes".into(),
+                    );
+                }
                 Ok(if self.pressed { !SWITCH } else { 0xFF })
             }
             reg::RTC_PITSTATUS => {
@@ -1703,7 +1722,7 @@ impl Bus for Chip {
             // Reading the flag doesn't move time on: a firmware that went
             // back to busy-waiting on it would run out of instructions.
             reg::RTC_PITINTFLAGS => Ok(if self.pit_flag { regs::RTC_PI } else { 0 }),
-            reg::PORTA_INTFLAGS => Ok(self.porta_flags),
+            PORTA_INTFLAGS => Ok(self.porta_flags),
             reg::ADC0_INTFLAGS => {
                 let ready = self.adc.ready_at.is_some_and(|at| self.now >= at);
                 Ok(if ready { regs::ADC_RESRDY } else { 0 })
@@ -1841,7 +1860,7 @@ impl Bus for Chip {
                     self.pit_flag = false;
                 }
             }
-            reg::PORTA_INTFLAGS => self.porta_flags &= !value,
+            PORTA_INTFLAGS => self.porta_flags &= !value,
             _ if WIDE.contains(&a) => {
                 if let Some((pending, _)) = self.temp {
                     return Err(format!(
@@ -2381,13 +2400,13 @@ mod tests {
 
         // Both pending: PORTA's vector is the lower, so it goes first.
         let mut c = chip();
-        c.io[pin5] = regs::PORT_ISC_BOTHEDGES;
+        c.io[pin5] = ISC_BOTHEDGES;
         c.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
         c.pit_flag = true;
         c.set_switch(true).unwrap();
-        assert_eq!(c.interrupt(), Some(regs::VECTOR_PORTA_PORT as u8));
-        c.write(reg::PORTA_INTFLAGS as u16, SWITCH).unwrap();
-        assert_eq!(c.read(reg::PORTA_INTFLAGS as u16), Ok(0));
+        assert_eq!(c.interrupt(), Some(VECTOR_PORTA_PORT as u8));
+        c.write(PORTA_INTFLAGS as u16, SWITCH).unwrap();
+        assert_eq!(c.read(PORTA_INTFLAGS as u16), Ok(0));
         assert_eq!(c.interrupt(), Some(regs::VECTOR_RTC_PIT as u8));
 
         c.io[pin5] = ISC_LEVEL;
@@ -2434,7 +2453,7 @@ mod tests {
         assert_eq!(c.sleep(), Ok(()));
         // The switch alone would do too.
         c.io[reg::RTC_PITINTCTRL] = 0;
-        c.io[reg::PORTA_PIN0CTRL + 5] = regs::PORT_ISC_BOTHEDGES;
+        c.io[reg::PORTA_PIN0CTRL + 5] = ISC_BOTHEDGES;
         assert_eq!(c.sleep(), Ok(()));
     }
 
@@ -2445,7 +2464,6 @@ mod tests {
         c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_PDOWN;
         c.io[reg::RTC_PITINTCTRL] = regs::RTC_PI;
         c.io[reg::RTC_PITCTRLA] = regs::RTC_PITEN;
-        c.io[reg::PORTA_PIN0CTRL + 5] = regs::PORT_ISC_BOTHEDGES;
         c
     }
 
@@ -2454,8 +2472,6 @@ mod tests {
         let mut c = ready_to_power_down();
         assert_eq!(c.sleep(), Ok(()));
         assert_eq!(c.power_downs, 1);
-        c.io[reg::PORTA_PIN0CTRL + 5] = ISC_LEVEL;
-        assert_eq!(c.sleep(), Ok(()), "LEVEL wakes it too");
     }
 
     #[test]
@@ -2522,12 +2538,43 @@ mod tests {
     }
 
     #[test]
-    fn wont_power_down_unless_pa5_can_wake_it() {
-        for isc in [ISC_INTDISABLE, ISC_RISING, ISC_FALLING, ISC_INPUT_DISABLE] {
+    fn wont_power_down_with_the_pit_off_and_no_pin_to_wake_it() {
+        let mut c = ready_to_power_down();
+        c.io[reg::RTC_PITCTRLA] = 0;
+        assert!(c.sleep().unwrap_err().contains("no interrupt enabled"));
+    }
+
+    #[test]
+    fn only_some_pin_senses_wake_it_from_power_down() {
+        let pin = |n: usize| reg::PORTA_PIN0CTRL + n;
+        for (at, isc, wakes) in [
+            (5, ISC_RISING, false),
+            (5, ISC_FALLING, false),
+            (5, ISC_BOTHEDGES, true),
+            (5, ISC_LEVEL, true),
+            (2, ISC_FALLING, true),
+            (6, ISC_RISING, true),
+        ] {
             let mut c = ready_to_power_down();
-            c.io[reg::PORTA_PIN0CTRL + 5] = isc;
-            assert!(c.sleep().unwrap_err().contains("PA5"), "{isc}");
+            c.io[reg::RTC_PITINTCTRL] = 0;
+            c.io[pin(at)] = isc;
+            assert_eq!(c.sleep().is_ok(), wakes, "PA{at} ISC {isc}");
         }
+        // Idle has the clock, so any sense will do.
+        let mut c = ready_to_power_down();
+        c.io[reg::RTC_PITINTCTRL] = 0;
+        c.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SEN | regs::SLPCTRL_SMODE_IDLE;
+        c.io[reg::RTC_PITCTRLA] = 0;
+        c.io[pin(5)] = ISC_FALLING;
+        assert_eq!(c.sleep(), Ok(()));
+    }
+
+    #[test]
+    fn the_switch_cant_be_read_with_its_input_buffer_off() {
+        let mut c = chip();
+        c.io[reg::PORTA_PIN0CTRL + 5] = ISC_INPUT_DISABLE;
+        let error = c.read(reg::VPORTA_IN as u16).unwrap_err();
+        assert!(error.contains("input buffer"), "{error}");
     }
 
     /// Writes `value` to a 16-bit TCA0 register, low byte first.
