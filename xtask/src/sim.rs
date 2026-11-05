@@ -81,8 +81,11 @@
 //!   a pass that writes the output staying in idle: `Torch::tick` rests in
 //!   that same pass. CNT only takes 0 while running. Sleeping with LUPD set
 //!   is an error. TCA0 stops in power-down, since §20.3.6 only promises idle,
-//!   so powering down also wants the buffers empty and PER back at the off
-//!   output's. CTRLA only takes the one setting, and CTRLB refuses ALUPD.
+//!   so powering down also wants no BV set and PER back at the off output's.
+//!   CTRLA only takes the one setting, and CTRLB refuses ALUPD. WO0 and WO1
+//!   are latches, set at BOTTOM and cleared on a match, that hold when the
+//!   timer isn't counting, and `Chip::bv_adverse` is the other reading of a
+//!   BOTTOM under LUPD.
 //! - CRCSCAN runs CRC-16-CCITT over all of flash and sets STATUS.OK if it
 //!   comes to 0, which is what a correct checksum in the last two bytes
 //!   does (`crc.rs`). The firmware runs on the image `cargo xtask hex`
@@ -296,6 +299,8 @@ pub struct Report {
     pub ticks_landed: u32,
     /// `tcb0_int`s that `Landings` set off.
     pub deadlines_landed: u32,
+    /// Times a locked BOTTOM cleared a buffer's BV, under `Chip::bv_adverse`.
+    pub bv_cleared: u32,
 }
 
 /// Ticks the library can be resting before the firmware has to be powering
@@ -396,6 +401,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         mid_access: 0,
         ticks_landed: 0,
         deadlines_landed: 0,
+        bv_cleared: 0,
     };
     watchdog_proof(&power_on, main, &mut report).map_err(|e| format!("watchdog proof: {e}"))?;
     for example in spec::examples(spec::UI_MD)? {
@@ -422,6 +428,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     }
     lock_taken_out(&power_on)?;
     off_with_tca0_dead(&power_on).map_err(|e| format!("off with TCA0 dead: {e}"))?;
+    adverse_bv(&power_on).map_err(|e| format!("with BV cleared under LUPD: {e}"))?;
     Ok(report)
 }
 
@@ -483,6 +490,37 @@ fn off_with_tca0_dead(
     Ok(())
 }
 
+/// Ticks the output can lag the library by with `Chip::bv_adverse`. Each pass
+/// reissues a lost row, but a pass can be close to a whole number of PWM
+/// cycles, so a real BOTTOM can catch the same few instructions for several
+/// passes running. An eighth of a second is plenty, and a row that never
+/// lands still fails.
+const LOST_ROW_TICKS: u32 = 8;
+
+/// docs/ui.md's examples and the random switching again on a chip that reads
+/// a locked BOTTOM the other way (`Chip::locked_bottom`). Nothing may tear, and
+/// the output has to catch up with the library, and it fails unless those
+/// BOTTOMs did land.
+fn adverse_bv(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<(), String> {
+    let mut report = Report::default();
+    for example in spec::examples(spec::UI_MD)? {
+        let samples = simulate::samples(&example.actions);
+        let world = samples.first().map_or(World::NORMAL, |s| s.world);
+        let (mut sim, boot) =
+            power_on(&world).map_err(|e| format!("{}: startup: {e}", example.row))?;
+        sim.chip.bv_adverse = true;
+        ui_example(sim, boot, samples, &example, &mut report)
+            .map_err(|e| format!("{}: {e}", example.row))?;
+    }
+    let (mut sim, _) = power_on(&World::NORMAL)?;
+    sim.chip.bv_adverse = true;
+    against_the_library(sim, &mut report).map_err(|e| format!("random switching: {e}"))?;
+    match report.bv_cleared {
+        0 => Err("no BOTTOM ever landed under LUPD".into()),
+        _ => Ok(()),
+    }
+}
+
 /// Runs the same random switching on a chip that drops every write to set
 /// LUPD, which is firmware with the lock taken out, and fails unless that's
 /// caught. It's here so the check can't quietly stop checking anything.
@@ -497,6 +535,7 @@ fn lock_taken_out(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> 
         mid_access: 0,
         ticks_landed: 0,
         deadlines_landed: 0,
+        bv_cleared: 0,
     };
     match against_the_library(sim, &mut report) {
         Err(e) if e.contains("LUPD") => Ok(()),
@@ -566,8 +605,14 @@ pub fn pwm_probe(elf: &Elf) -> Result<(), String> {
             main_clock,
             ..World::NORMAL
         };
-        pwm_probe_in(elf, world)
-            .map_err(|e| format!("with the clocks at {osc32k}% and {main_clock}%: {e}"))?;
+        for adverse in [false, true] {
+            pwm_probe_in(elf, world, adverse).map_err(|e| {
+                format!(
+                    "with the clocks at {osc32k}% and {main_clock}%, \
+                     BV cleared under LUPD {adverse}: {e}"
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -578,7 +623,7 @@ const COUNT_SETUP: u64 = 64;
 /// Instructions a run of the probe may take: a count polls for most of a tick.
 const PROBE_BUDGET: u64 = 2_000_000;
 
-fn pwm_probe_in(elf: &Elf, world: World) -> Result<(), String> {
+fn pwm_probe_in(elf: &Elf, world: World, adverse: bool) -> Result<(), String> {
     let symbol = |name| {
         elf.symbol(name)
             .ok_or_else(|| format!("no `{name}` symbol"))
@@ -602,6 +647,7 @@ fn pwm_probe_in(elf: &Elf, world: World) -> Result<(), String> {
     sim.run_to(symbol("main")? / 2, BOOT_BUDGET)
         .map_err(|e| format!("startup: {e}"))?;
     sim.chip.set_world(world);
+    sim.chip.bv_adverse = adverse;
 
     let mut seen = [false; ramp::LEVELS as usize + 1];
     let mut counts = 0;
@@ -611,6 +657,9 @@ fn pwm_probe_in(elf: &Elf, world: World) -> Result<(), String> {
         if sim.cpu.pc == done {
             if counts == 0 {
                 return Err("never counted a tick".into());
+            }
+            if adverse && sim.chip.bv_cleared == 0 {
+                return Err("no BOTTOM ever landed under LUPD".into());
             }
             return match seen.iter().position(|&seen| !seen) {
                 Some(level) => Err(format!("never set level {level}")),
@@ -1859,6 +1908,7 @@ fn in_step(
     let mut resting = 0;
     let mut hung = false;
     let mut overdue = 0;
+    let mut behind = 0;
     for (tick, sample) in samples.enumerate() {
         sim.chip.set_world(sample.world);
         if sample.world.hang && !hung {
@@ -1920,7 +1970,14 @@ fn in_step(
         // turns the light off, so there's nothing to compare until then. Off
         // is still off.
         let frozen = sample.world.tca_stopped && rig.level() > 0;
-        if leds != want && !settling && !frozen {
+        if leds == want || settling || frozen {
+            behind = 0;
+            continue;
+        }
+        behind += 1;
+        // With `Chip::bv_adverse` a row can be lost, which is put right on
+        // the next pass, and it goes live at the BOTTOM after that.
+        if !sim.chip.bv_adverse || behind > LOST_ROW_TICKS {
             return Err(format!(
                 "tick {tick}: the firmware's (linear, FET, top) is {leds:?}, \
                  but the library's level {} is {want:?}",
@@ -1932,6 +1989,7 @@ fn in_step(
     report.mid_access += sim.mid_access;
     report.ticks_landed += sim.ticks_landed;
     report.deadlines_landed += sim.deadlines_landed;
+    report.bv_cleared += sim.chip.bv_cleared;
     Ok(rig.level())
 }
 
@@ -2268,6 +2326,15 @@ struct Chip {
     /// TCA0 ignores commands too, which a stopped one might, for all the
     /// datasheet says.
     tca_deaf: bool,
+    /// A BOTTOM under LUPD clears BV, with nothing copied: see
+    /// `Chip::locked_bottom`.
+    bv_adverse: bool,
+    /// Where in a lock the next `Chip::adverse_bottom` lands, 1 to 4.
+    adverse_at: u8,
+    /// Buffers written since LUPD went on.
+    lock_writes: u8,
+    /// Times a locked BOTTOM has cleared any buffer's BV.
+    bv_cleared: u32,
     /// Whether anything's read TCA0.INTFLAGS, which only a counted wait does.
     tca_polled: bool,
 }
@@ -2421,6 +2488,10 @@ impl Chip {
             wo_counted: 0,
             tca_ovf: false,
             tca_deaf: false,
+            bv_adverse: false,
+            adverse_at: 1,
+            lock_writes: 0,
+            bv_cleared: 0,
             tca_polled: false,
         }
     }
@@ -3085,6 +3156,9 @@ impl Chip {
     /// The UPDATE condition, at BOTTOM. LUPD holds it off, and the buffers
     /// stay valid for the next one.
     fn tca_update(&mut self) -> Result<(), String> {
+        if self.lupd && self.bv_adverse {
+            self.locked_bottom();
+        }
         if self.lupd || self.buffer_valid == [false; 3] {
             return Ok(());
         }
@@ -3095,6 +3169,28 @@ impl Chip {
         self.compare = compare;
         self.buffer_valid = [false; 3];
         Ok(())
+    }
+
+    /// The other way to read a BOTTOM under LUPD: BV clears on an UPDATE
+    /// condition (§20.3.3.2), and one still happens, it just copies nothing
+    /// (§20.5.6). `Chip::bv_adverse` is that reading. Any buffers written so
+    /// far have to be written again.
+    fn locked_bottom(&mut self) {
+        if self.buffer_valid != [false; 3] {
+            self.bv_cleared += 1;
+        }
+        self.buffer_valid = [false; 3];
+    }
+
+    /// Under `Chip::bv_adverse`, a BOTTOM lands at each place in the lock in
+    /// turn, one lock at a time, since a real one would only be there now and
+    /// then. `at` is how many buffers have been written in this lock, or 4
+    /// with the lock about to clear, after the firmware's looked at the flags,
+    /// which is the one that loses a whole row.
+    fn adverse_bottom(&mut self, at: u8) {
+        if self.bv_adverse && self.lupd && at == self.adverse_at {
+            self.locked_bottom();
+        }
     }
 
     /// Whether the next UPDATE leaves TCA0 running one level's whole output.
@@ -3145,6 +3241,8 @@ impl Chip {
             }
         } else if let Some(i) = BUFFERED.iter().position(|&a| a == low) {
             self.buffer_valid[i] = true;
+            self.lock_writes = self.lock_writes.saturating_add(1);
+            self.adverse_bottom(self.lock_writes);
             // A BOTTOM could land straight after this write.
             if self.tca_running() && !self.lupd {
                 self.tca_check_update()?;
@@ -3175,7 +3273,10 @@ impl Chip {
         }
         if a == reg::TCA0_CTRLESET {
             self.lupd = !self.lupd_broken;
+            self.lock_writes = 0;
         } else {
+            self.adverse_bottom(4);
+            self.adverse_at = self.adverse_at % 4 + 1;
             self.lupd = false;
             if self.tca_running() {
                 self.tca_check_update()?;
@@ -3274,6 +3375,7 @@ fn name(addr: usize) -> String {
         (reg::TCA0_CTRLECLR, "TCA0.CTRLECLR"),
         (reg::TCA0_CTRLESET, "TCA0.CTRLESET"),
         (reg::TCA0_CTRLFSET, "TCA0.CTRLFSET"),
+        (reg::TCA0_CTRLFCLR, "TCA0.CTRLFCLR"),
         (reg::TCA0_CNT, "TCA0.CNT"),
         (reg::TCA0_PER, "TCA0.PER"),
         (reg::TCA0_CMP0, "TCA0.CMP0"),
@@ -3931,6 +4033,12 @@ impl Bus for Chip {
             }
             PORTA_INTFLAGS => self.porta_flags &= !value,
             reg::TCA0_CTRLESET | reg::TCA0_CTRLECLR => self.tca_lock(a, value)?,
+            reg::TCA0_CTRLFCLR => {
+                let bits = [regs::TCA_PERBV, regs::TCA_CMP0BV, regs::TCA_CMP1BV];
+                for (valid, bit) in iter::zip(&mut self.buffer_valid, bits) {
+                    *valid &= value & bit == 0;
+                }
+            }
             reg::RSTCTRL_RSTFR => self.rstfr &= !value,
             reg::RSTCTRL_SWRR => {
                 self.take_protected_write(a)?;
@@ -4108,6 +4216,8 @@ impl Chip {
         chip.resets = self.resets + 1;
         chip.bites = self.bites;
         chip.lupd_broken = self.lupd_broken;
+        chip.bv_adverse = self.bv_adverse;
+        chip.bv_cleared = self.bv_cleared;
         *self = chip;
     }
 }
@@ -4754,7 +4864,7 @@ mod tests {
     }
 
     #[test]
-    fn the_update_command_lands_a_locked_row_now_and_empties_the_buffers() {
+    fn the_update_command_lands_a_locked_row_now_and_clears_bv() {
         let mut c = pwm_at(1);
         let off = ramp::Output::OFF;
         c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
@@ -4779,6 +4889,30 @@ mod tests {
             .write(reg::TCA0_CTRLESET as u16, regs::TCA_CMD_UPDATE)
             .unwrap_err();
         assert!(err.contains("UPDATE"), "{err}");
+    }
+
+    #[test]
+    fn a_locked_bottom_keeps_or_clears_bv_depending_on_the_reading() {
+        for (adverse, want) in [(false, [true, false, false]), (true, [false; 3])] {
+            let mut c = pwm_at(1);
+            c.bv_adverse = adverse;
+            c.adverse_at = 3; // out of the way of the first write
+            c.write(reg::TCA0_CTRLESET as u16, regs::TCA_LUPD).unwrap();
+            write_wide(&mut c, reg::TCA0_PERBUF, 254);
+            let bottom = c.next_bottom;
+            c.advance_to(bottom).unwrap();
+            assert_eq!(c.buffer_valid, want, "adverse {adverse}");
+            assert_eq!(c.wide(reg::TCA0_PER), ramp::output(1).top - 1, "not copied");
+        }
+    }
+
+    #[test]
+    fn the_buffer_valid_flags_clear_by_writing_1() {
+        let mut c = chip();
+        c.buffer_valid = [true; 3];
+        let clear = regs::TCA_PERBV | regs::TCA_CMP1BV;
+        c.write(reg::TCA0_CTRLFCLR as u16, clear).unwrap();
+        assert_eq!(c.buffer_valid, [false, true, false]);
     }
 
     #[test]

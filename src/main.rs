@@ -72,8 +72,9 @@ extern "C" fn main() -> ! {
         if let Some(convert) = torch.convert() {
             hw::adc_start(convert);
         }
-        if let Some(level) = changes.update(torch.level()) {
-            hw::set_output(ramp::output(level));
+        match changes.update(torch.level()) {
+            Some(level) => hw::set_output(ramp::output(level)),
+            None => hw::keep_output(ramp::output(torch.level())),
         }
         // The only place the running torch feeds the watchdog, and only on a
         // real tick, or a pass that a late tick woke would land it out of
