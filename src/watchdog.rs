@@ -34,11 +34,13 @@
 //!
 //! Each reset has to leave [`Step`] behind for the next boot, so a marker
 //! goes in `.noinit` (`hw::marker`), and `RSTCTRL.RSTFR` says what kind of
-//! reset it was. `src/rt.rs` skips its RAM test unless that was a power-on
-//! or UPDI reset, or the test would wipe the marker. The datasheet doesn't
-//! promise SRAM survives a watchdog reset. AN2632 §6 relies on it for its
-//! own test state, so it's likely, but nobody's seen it on this light. If it
-//! doesn't, the marker reads as junk and the proof fails safe.
+//! reset it was. `src/rt.rs` skips its RAM test on the proof's own resets,
+//! which would otherwise take 85 ms each, and runs it after a hang, keeping
+//! the marker in registers across it, so a RAM fault that caused the hang
+//! stops the light for good. The datasheet doesn't promise SRAM survives a
+//! watchdog reset. AN2632 §6 relies on it for its own test state, so it's
+//! likely, but nobody's seen it on this light. If it doesn't, the marker
+//! reads as junk and the proof fails safe.
 //!
 //! Every wait is counted in ticks. The PIT and the WDT share an oscillator,
 //! so the ratio between them holds however far that oscillator is from
@@ -225,6 +227,21 @@ impl Step {
 
 /// The marker's bit for a press during the proof.
 const PRESSED: u8 = 0x80;
+/// The marker's bits for the step. src/rt.rs reads the marker before there's
+/// any Rust to call [`decode`], so it needs this and [`PROVING_STEPS`].
+pub const STEP_BITS: u8 = !PRESSED;
+/// A marker's step is below this while the proof's going.
+pub const PROVING_STEPS: u8 = Step::Passed as u8;
+
+const _: () = {
+    let mut i = 0;
+    while i < Step::ALL.len() {
+        let step = Step::ALL[i];
+        assert!(step as usize == i);
+        assert!(step.proving() == ((step as u8) < PROVING_STEPS));
+        i += 1;
+    }
+};
 
 /// What the marker bytes in `.noinit` say: a step, and whether the switch
 /// was seen down. `None` for anything else, which is what SRAM holds after

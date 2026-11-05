@@ -345,9 +345,10 @@ pub fn feed_watchdog() {
 }
 
 /// Where the watchdog's proof keeps its place across a reset (`ts21::watchdog`
-/// says what the bytes mean). `.noinit` isn't copied, zeroed or tested on a
-/// reset that isn't power-on or UPDI, so it holds what the last boot stored,
-/// and after power-on it holds junk, which is why it's `MaybeUninit`.
+/// says what the bytes mean). Startup doesn't copy or zero `.noinit`, and puts
+/// it back after a RAM test on a hang, so it holds what the last boot stored.
+/// After a power-on or UPDI reset it holds no step at all, and if SRAM doesn't
+/// survive a reset it holds junk, which is why it's `MaybeUninit`.
 #[unsafe(link_section = ".noinit")]
 static mut MARKER: MaybeUninit<[u8; 2]> = MaybeUninit::uninit();
 
