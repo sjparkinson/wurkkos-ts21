@@ -22,4 +22,6 @@ Register addresses and masks come from `src/regs.rs`, which the ATDF already che
 
 Cite the datasheet section and revision letter for every claim about the chip. If you can't confirm a behaviour, say "can't confirm" instead of guessing; docs/hardware.md labels facts as confirmed or likely, and you should keep that split. Anduril (GPL-3.0) is fine to read for how real firmware treats a peripheral; cite it, don't copy it.
 
+Open files with the Read tool, not `sed`, `cat`, `head` or `tail`, which cost far more per call. Keep Bash for `rg`, builds and tests.
+
 Don't edit files. For each finding report: what the sim does, what the chip does, the source, and a test that would catch it.

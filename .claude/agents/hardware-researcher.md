@@ -20,4 +20,6 @@ Rules:
 - Say where sources disagree, and which one you'd trust and why.
 - Flag anything that touches fuses, `SYSCFG0` or the user row as dangerous to act on, and don't suggest commands that write them.
 
+Open files with the Read tool, not `sed`, `cat`, `head` or `tail`, which cost far more per call. Keep Bash for `rg` and `pdftotext`.
+
 Don't edit files. Report back with the facts, their labels and citations, and a suggested wording for docs/hardware.md that the caller can paste.

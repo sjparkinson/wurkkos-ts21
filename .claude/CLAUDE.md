@@ -31,6 +31,7 @@ The `avr-codegen` skill in `.claude/skills/` runs in the session itself: use it 
 ## Working in this repo
 
 - **Edit `.rs` files with Edit or Write**, not `sed -i`, `cp` or a heredoc. The hook that runs rustfmt only fires on Edit and Write. Clippy runs at `git commit`, alongside `cargo fmt --check` and the tests, so a failing commit is where lint problems show up.
+- **Open files with Read**, not `sed -n`, `cat`, `head` or `tail`. A trivial Bash call costs a second or more; Read is close to free. Keep Bash for `rg`, builds and tests.
 - **Parallel agents get their own worktree and their own files.** Two agents in one checkout broke each other's builds mid-edit. Never `git stash` to compare before and after; use a WIP commit or a second worktree.
 - **The sandbox can't write `.git/config`**, so `git push -u` pushes but can't record the upstream. Push with `git push origin <branch>`, pass `--head <branch>` to `gh pr create`, and don't try to fix the tracking.
 - **PRs merge by rebase only**, so every commit on a branch lands on main as written. Keep each one single-line and passing.
