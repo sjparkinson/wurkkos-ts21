@@ -37,12 +37,12 @@ This reads the chip's System Information Block and changes nothing, not even a r
 Do this before you flash anything. It's the only copy of Wurkkos's build and its calibration that you'll have.
 
 ```sh
-cargo xtask backup /dev/cu.usbserial-XXXX
+cargo xtask backup /dev/cu.usbserial-XXXX backup/torch
 ```
 
-That puts the chip in programming mode, checks it's an ATtiny1616, and saves `backup/flash.hex` (all 16 KB), `backup/eeprom.hex` and `backup/fuses.hex`. The fuses are there for reference only. It refuses to run if `backup/flash.hex` already exists, so a second run can't overwrite your factory copy with this firmware.
+That puts the chip in programming mode, checks it's an ATtiny1616, and saves `flash.hex` (all 16 KB), `eeprom.hex` and `fuses.hex` in the directory you name, creating it if it needs to. A relative path starts from where you run the command. The fuses are there for reference only. It refuses to run if `flash.hex` is already there, so a second run can't overwrite your factory copy with this firmware.
 
-`backup/` is git-ignored. Copy it somewhere safe too.
+Give each chip its own directory: nothing in a backup says which chip it came from. `backup/` is git-ignored. Copy yours somewhere safe too.
 
 ## Flash this firmware
 
@@ -65,7 +65,7 @@ If a write or the compare fails, step 5 still runs, so the chip isn't left in pr
 `restore` puts your backup's flash and EEPROM back. It writes every EEPROM page, blank ones included, since with EESAVE set the old contents survive the erase.
 
 ```sh
-cargo xtask restore /dev/cu.usbserial-XXXX
+cargo xtask restore /dev/cu.usbserial-XXXX backup/torch
 ```
 
 For current Anduril, download a release zip from [ToyKeeper's releases](https://github.com/ToyKeeper/anduril/releases), pull `anduril.sofirn-sp36-t1616.hex` out of it and flash that.
@@ -78,7 +78,7 @@ That's the build Wurkkos ships for model 0614, and people report recent ones run
 
 ## If it won't go above the linear channel
 
-The power-on self-tests (docs/ui.md) quietly cap the light at the top of the linear channel if flash doesn't match its CRC or the fuses aren't what the firmware expects. If that happens after a flash that verified, suspect the CRC convention in `xtask/src/crc.rs` first, since it's never been checked against a real chip. Then the fuses: `cargo xtask backup` saves them to `backup/fuses.hex`, to compare with the checks in `src/selftest.rs`. Nothing here writes fuses, so that's a decision for you, not the tool. After an interrupted flash, run `cargo xtask flash` again.
+The power-on self-tests (docs/ui.md) quietly cap the light at the top of the linear channel if flash doesn't match its CRC or the fuses aren't what the firmware expects. If that happens after a flash that verified, suspect the CRC convention in `xtask/src/crc.rs` first, since it's never been checked against a real chip. Then the fuses: `cargo xtask backup` saves them to `fuses.hex` in its directory, to compare with the checks in `src/selftest.rs`. Nothing here writes fuses, so that's a decision for you, not the tool. After an interrupted flash, run `cargo xtask flash` again.
 
 ## If it doesn't talk
 
