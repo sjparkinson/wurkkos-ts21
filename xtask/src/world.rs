@@ -11,13 +11,13 @@ use std::mem;
 use std::str::FromStr;
 
 use ts21::ramp::PWM_TOP;
+use ts21::regs::{self, addr as reg};
 use ts21::selftest::{CLOCKS_MAX, Faults, Fuses, NO_TICK};
 use ts21::sensors::Channel;
 use ts21::testing::{Adc, temperature_reading, voltage_reading};
 use ts21::torch::Torch;
 
 use crate::avr::Cpu;
-use crate::sim::regs::addr as reg;
 use crate::updi::map;
 
 /// The temperature sensor calibration the simulated chip has in its
@@ -39,16 +39,16 @@ pub const FUSE_NAMES: [&str; FUSE_BYTES] = [
 /// (a clock, a section), but these stop it running at all, so a script
 /// with them would show behaviour no real light has:
 ///
-/// - `WDTCFG.PERIOD` (mask 0x0F) starts the watchdog at reset, and nothing
-///   feeds it before `hw::init`, so the chip resets in a loop (DS §19.3.3.3).
-/// - `SYSCFG0.CRCSRC` (mask 0xC0) other than NOCRC (0x3) scans flash before
-///   the CPU starts and hangs on a mismatch (DS §27.3.1).
+/// - `WDTCFG.PERIOD` starts the watchdog at reset, and nothing feeds it
+///   before `hw::init`, so the chip resets in a loop (DS §19.3.3.3).
+/// - `SYSCFG0.CRCSRC` other than NOCRC scans flash before the CPU starts and
+///   hangs on a mismatch (DS §27.3.1).
 pub fn unmodelled_fuse(offset: usize, value: u8) -> Option<&'static str> {
     match FUSE_NAMES.get(offset).copied() {
-        Some("WDTCFG") if value & 0x0F != 0 => {
+        Some("WDTCFG") if value & regs::FUSE_PERIOD != 0 => {
             Some("a WDTCFG.PERIOD starts the watchdog at reset, which the simulator doesn't model")
         }
-        Some("SYSCFG0") if value & 0xC0 != 0xC0 => Some(
+        Some("SYSCFG0") if value & regs::FUSE_CRCSRC != regs::FUSE_CRCSRC_NOCRC => Some(
             "a SYSCFG0.CRCSRC scans flash before reset ends, which the simulator doesn't model",
         ),
         _ => None,
@@ -477,11 +477,12 @@ fn sram_address(s: &str) -> Result<u16, String> {
         .strip_prefix("0x")
         .and_then(|hex| u16::from_str_radix(hex, 16).ok())
         .ok_or_else(|| format!("expected an address like 0x3800, not `{s}`"))?;
-    if !(reg::SRAM_START..reg::SRAM_END).contains(&usize::from(addr)) {
+    if !(regs::mem::INTERNAL_SRAM_START..regs::mem::INTERNAL_SRAM_END).contains(&usize::from(addr))
+    {
         return Err(format!(
             "{addr:#06x} isn't in SRAM, which is {:#06x} to {:#06x}",
-            reg::SRAM_START,
-            reg::SRAM_END - 1
+            regs::mem::INTERNAL_SRAM_START,
+            regs::mem::INTERNAL_SRAM_END - 1
         ));
     }
     Ok(addr)

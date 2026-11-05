@@ -18,30 +18,39 @@
 use std::io;
 use std::time::{Duration, Instant};
 
+// NVMCTRL.CTRLA commands and NVMCTRL.STATUS bits.
+use ts21::regs::{
+    NVMCTRL_CMD_CHIPERASE as NVM_CHIP_ERASE, NVMCTRL_CMD_PAGEBUFCLR as NVM_PAGE_BUFFER_CLEAR,
+    NVMCTRL_CMD_PAGEERASEWRITE as NVM_PAGE_ERASE_WRITE, NVMCTRL_CMD_PAGEWRITE as NVM_PAGE_WRITE,
+    NVMCTRL_EEBUSY as NVM_EEBUSY, NVMCTRL_FBUSY as NVM_FBUSY, NVMCTRL_WRERROR as NVM_WRERROR,
+};
+
 /// Data-space layout of the ATtiny1616, as UPDI sees it.
 pub mod map {
+    use ts21::regs::{self, addr, mem};
+
     /// Flash, seen through the data-space window. Writes land in the page
     /// buffer until an NVM command commits them.
-    pub const FLASH: u16 = 0x8000;
-    pub const FLASH_SIZE: usize = 16 * 1024;
-    pub const FLASH_PAGE: usize = 64;
+    pub const FLASH: u16 = mem::MAPPED_PROGMEM_START as u16;
+    pub const FLASH_SIZE: usize = mem::MAPPED_PROGMEM_SIZE;
+    pub const FLASH_PAGE: usize = mem::MAPPED_PROGMEM_PAGE;
 
-    pub const EEPROM: u16 = 0x1400;
-    pub const EEPROM_SIZE: usize = 256;
-    pub const EEPROM_PAGE: usize = 32;
+    pub const EEPROM: u16 = mem::EEPROM_START as u16;
+    pub const EEPROM_SIZE: usize = mem::EEPROM_SIZE;
+    pub const EEPROM_PAGE: usize = mem::EEPROM_PAGE;
 
     /// Device signature, the first three bytes of SIGROW.
-    pub const SIGNATURE: u16 = 0x1100;
-    /// From the ATDF's SIGNATURE0 to SIGNATURE2.
-    pub const ATTINY1616: [u8; 3] = [0x1E, 0x94, 0x21];
+    pub const SIGNATURE: u16 = mem::SIGNATURES_START as u16;
+    /// What the signature reads.
+    pub const ATTINY1616: [u8; 3] = regs::SIGNATURE;
 
     /// The fuses (0x1280..0x128A) and the lock byte (0x128A). Read only:
     /// nothing here writes them.
-    pub const FUSES: u16 = 0x1280;
-    pub const FUSES_SIZE: usize = 11;
+    pub const FUSES: u16 = mem::FUSES_START as u16;
+    pub const FUSES_SIZE: usize = mem::LOCKBITS_END - mem::FUSES_START;
 
-    pub const NVMCTRL_CTRLA: u16 = 0x1000;
-    pub const NVMCTRL_STATUS: u16 = 0x1002;
+    pub const NVMCTRL_CTRLA: u16 = addr::NVMCTRL_CTRLA as u16;
+    pub const NVMCTRL_STATUS: u16 = addr::NVMCTRL_STATUS as u16;
 }
 
 /// One serial UPDI connection. `send` writes bytes and swallows their echo;
@@ -104,15 +113,6 @@ const SYS_STATUS_LOCKSTATUS: u8 = 1 << 0;
 const RESET_REQ_APPLY: u8 = 0x59;
 
 const KEY_NVMPROG: &[u8; 8] = b"NVMProg ";
-
-// NVMCTRL.CTRLA commands and NVMCTRL.STATUS bits.
-const NVM_PAGE_WRITE: u8 = 0x01;
-const NVM_PAGE_ERASE_WRITE: u8 = 0x03;
-const NVM_PAGE_BUFFER_CLEAR: u8 = 0x04;
-const NVM_CHIP_ERASE: u8 = 0x05;
-const NVM_FBUSY: u8 = 1 << 0;
-const NVM_EEBUSY: u8 = 1 << 1;
-const NVM_WRERROR: u8 = 1 << 2;
 
 /// The most a single REPEAT can cover.
 const MAX_BLOCK: usize = 256;
@@ -429,94 +429,26 @@ mod tests {
     use super::*;
     use fake::Tiny;
 
-    /// The memory map and NVM constants against the vendored ATDF. The
-    /// UPDI instruction set isn't in the ATDF, so those stay checked by
-    /// review against the datasheet and pymcuprog.
+    /// What `map` assumes about the ATDF's segments. Its constants come from
+    /// the ATDF, but the UPDI instruction set isn't in there, so that stays
+    /// checked by review against the datasheet and pymcuprog.
     #[test]
-    fn map_and_nvm_constants_match_the_atdf() {
-        let atdf = crate::atdf::Atdf::load();
+    fn map_assumes_what_the_atdf_says() {
+        use ts21::regs::mem;
 
-        let flash = atdf.segment("MAPPED_PROGMEM");
-        assert_eq!(u32::from(map::FLASH), flash.start, "flash window");
-        assert_eq!(map::FLASH_SIZE as u32, flash.size, "flash size");
+        assert_eq!(map::FLASH_SIZE, mem::PROGMEM_SIZE, "PROGMEM size");
+        assert_eq!(map::FLASH_PAGE, mem::PROGMEM_PAGE, "PROGMEM page");
         assert_eq!(
-            map::FLASH_SIZE as u32,
-            atdf.segment("PROGMEM").size,
-            "PROGMEM size"
-        );
-        assert_eq!(Some(map::FLASH_PAGE as u32), flash.page, "flash page");
-
-        let eeprom = atdf.segment("EEPROM");
-        assert_eq!(u32::from(map::EEPROM), eeprom.start, "EEPROM");
-        assert_eq!(map::EEPROM_SIZE as u32, eeprom.size, "EEPROM size");
-        assert_eq!(Some(map::EEPROM_PAGE as u32), eeprom.page, "EEPROM page");
-
-        let signatures = atdf.segment("SIGNATURES");
-        assert_eq!(u32::from(map::SIGNATURE), signatures.start, "signature");
-        assert_eq!(
-            map::ATTINY1616.len() as u32,
-            signatures.size,
+            map::ATTINY1616.len(),
+            mem::SIGNATURES_SIZE,
             "signature size"
         );
-        assert_eq!(u32::from(map::ATTINY1616[0]), atdf.property("SIGNATURE0"));
-        assert_eq!(u32::from(map::ATTINY1616[1]), atdf.property("SIGNATURE1"));
-        assert_eq!(u32::from(map::ATTINY1616[2]), atdf.property("SIGNATURE2"));
-
         // FUSES_SIZE covers the fuses and the lock byte straight after them.
-        let fuses = atdf.segment("FUSES");
-        let lock = atdf.segment("LOCKBITS");
-        assert_eq!(u32::from(map::FUSES), fuses.start, "fuses");
         assert_eq!(
-            fuses.start + fuses.size,
-            lock.start,
+            mem::FUSES_END,
+            mem::LOCKBITS_START,
             "lock byte follows the fuses"
         );
-        assert_eq!(
-            map::FUSES_SIZE as u32,
-            fuses.size + lock.size,
-            "fuses and lock size"
-        );
-
-        let ctrla = atdf.register("NVMCTRL", None, "CTRLA");
-        let status = atdf.register("NVMCTRL", None, "STATUS");
-        assert_eq!(
-            u32::from(map::NVMCTRL_CTRLA),
-            ctrla.address,
-            "NVMCTRL.CTRLA"
-        );
-        assert_eq!(
-            u32::from(map::NVMCTRL_STATUS),
-            status.address,
-            "NVMCTRL.STATUS"
-        );
-
-        for (ours, theirs, label) in [
-            (
-                NVM_PAGE_WRITE,
-                ctrla.value("CMD", "PAGEWRITE"),
-                "CMD=PAGEWRITE",
-            ),
-            (
-                NVM_PAGE_ERASE_WRITE,
-                ctrla.value("CMD", "PAGEERASEWRITE"),
-                "CMD=PAGEERASEWRITE",
-            ),
-            (
-                NVM_PAGE_BUFFER_CLEAR,
-                ctrla.value("CMD", "PAGEBUFCLR"),
-                "CMD=PAGEBUFCLR",
-            ),
-            (
-                NVM_CHIP_ERASE,
-                ctrla.value("CMD", "CHIPERASE"),
-                "CMD=CHIPERASE",
-            ),
-            (NVM_FBUSY, status.mask("FBUSY"), "STATUS.FBUSY"),
-            (NVM_EEBUSY, status.mask("EEBUSY"), "STATUS.EEBUSY"),
-            (NVM_WRERROR, status.mask("WRERROR"), "STATUS.WRERROR"),
-        ] {
-            assert_eq!(u32::from(ours), theirs, "NVMCTRL.{label}");
-        }
     }
 
     #[test]

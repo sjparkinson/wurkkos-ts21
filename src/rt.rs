@@ -689,19 +689,19 @@ global_asm!(
     // The register test's patterns, and the stack pointer's home.
     a = const PATTERN_A,
     b = const PATTERN_B,
-    sreg_a = const PATTERN_A & !regs::CPU_SREG_I,
-    sreg_b = const PATTERN_B & !regs::CPU_SREG_I,
+    sreg_a = const PATTERN_A & !regs::CPU_I,
+    sreg_b = const PATTERN_B & !regs::CPU_I,
     sph_a = const PATTERN_A & SPH_BITS,
     sph_b = const PATTERN_B & SPH_BITS,
     c = const PATTERN_C,
     d = const !PATTERN_C,
     e = const PATTERN_E,
     f = const !PATTERN_E,
-    sreg_bits = const !regs::CPU_SREG_I,
+    sreg_bits = const !regs::CPU_I,
     sph_bits = const SPH_BITS,
     spl = const regs::addr::CPU_SPL,
     sph = const regs::addr::CPU_SPH,
-    stack_top = const regs::addr::SRAM_END - 1,
+    stack_top = const regs::mem::INTERNAL_SRAM_END - 1,
     // Which resets run the RAM test.
     rstfr = const regs::addr::RSTCTRL_RSTFR,
     new_start = const regs::RSTCTRL_PORF | regs::RSTCTRL_UPDIRF,
@@ -709,8 +709,8 @@ global_asm!(
     step_bits = const ts21::watchdog::STEP_BITS,
     proving_steps = const ts21::watchdog::PROVING_STEPS,
     // What the RAM test walks.
-    sram_start = const regs::addr::SRAM_START,
-    sram_end = const regs::addr::SRAM_END,
+    sram_start = const regs::mem::INTERNAL_SRAM_START,
+    sram_end = const regs::mem::INTERNAL_SRAM_END,
     // TCA0.CTRLB without CMP0EN and CMP1EN.
     tca0_ctrlb = const regs::addr::TCA0_CTRLB,
     tca_pins_off = const regs::TCA_WGMODE_SINGLESLOPE,
@@ -744,7 +744,7 @@ const PATTERN_E: u8 = 0x0F;
 
 /// The bits of SPH that must exist for SP to reach the top of SRAM, 0x3F
 /// for 0x3FFF. Any above might read 0 (DS40002204A §8.7.2).
-const SPH_BITS: u8 = ((regs::addr::SRAM_END.next_power_of_two() - 1) >> 8) as u8;
+const SPH_BITS: u8 = ((regs::mem::INTERNAL_SRAM_END.next_power_of_two() - 1) >> 8) as u8;
 
 // `in` and `out` only reach the first 64 I/O addresses, and `sbi` the first
 // 32.

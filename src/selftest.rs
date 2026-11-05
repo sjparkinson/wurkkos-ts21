@@ -93,7 +93,7 @@ pub const RAM_STEP: u16 = 8;
 /// Sections in a sweep of all of SRAM, at one a tick: just under 4 seconds.
 pub const RAM_SECTIONS: u8 = ((SRAM_BYTES - RAM_SECTION) / RAM_STEP + 1) as u8;
 
-const SRAM_BYTES: u16 = (regs::addr::SRAM_END - regs::addr::SRAM_START) as u16;
+const SRAM_BYTES: u16 = (regs::mem::INTERNAL_SRAM_END - regs::mem::INTERNAL_SRAM_START) as u16;
 
 // The sections reach the end of SRAM exactly, and fit a `u8`.
 const _: () = {
@@ -124,7 +124,7 @@ impl RamSweep {
             0
         };
         self.next = section + 1;
-        regs::addr::SRAM_START as u16 + u16::from(section) * RAM_STEP
+        regs::mem::INTERNAL_SRAM_START as u16 + u16::from(section) * RAM_STEP
     }
 }
 
@@ -301,11 +301,11 @@ mod tests {
     #[test]
     fn a_sweep_covers_all_of_sram_with_each_section_overlapping_the_last() {
         let mut sweep = RamSweep::new();
-        let mut tested = [false; regs::addr::SRAM_END - regs::addr::SRAM_START];
+        let mut tested = [false; regs::mem::INTERNAL_SRAM_END - regs::mem::INTERNAL_SRAM_START];
         let mut last = None;
         for _ in 0..RAM_SECTIONS {
             let start = sweep.next_section();
-            let from = usize::from(start) - regs::addr::SRAM_START;
+            let from = usize::from(start) - regs::mem::INTERNAL_SRAM_START;
             tested[from..from + usize::from(RAM_SECTION)].fill(true);
             if let Some(last) = last {
                 assert_eq!(start - last, RAM_STEP);
@@ -315,7 +315,7 @@ mod tests {
         assert!(tested.iter().all(|&t| t));
         assert_eq!(
             last.map(|l| usize::from(l + RAM_SECTION)),
-            Some(regs::addr::SRAM_END)
+            Some(regs::mem::INTERNAL_SRAM_END)
         );
     }
 
@@ -333,8 +333,8 @@ mod tests {
     fn any_corrupted_count_still_lands_in_sram() {
         for next in 0..=u8::MAX {
             let start = RamSweep { next }.next_section();
-            assert!(usize::from(start) >= regs::addr::SRAM_START);
-            assert!(usize::from(start + RAM_SECTION) <= regs::addr::SRAM_END);
+            assert!(usize::from(start) >= regs::mem::INTERNAL_SRAM_START);
+            assert!(usize::from(start + RAM_SECTION) <= regs::mem::INTERNAL_SRAM_END);
         }
     }
 
