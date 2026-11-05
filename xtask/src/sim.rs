@@ -425,27 +425,62 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     Ok(report)
 }
 
-/// A torch that's on when TCA0 stops, never reaches BOTTOM again and ignores
-/// the UPDATE command as well, then gets clicked off. The light has to go out
-/// anyway, which leaves only `hw::set_output`'s direct writes to do it. With
-/// the buffers stuck full it can't power down, so that's all this asks for.
+/// A torch that's on when TCA0 stops with a waveform output high, never reaches
+/// BOTTOM again and ignores the UPDATE command as well, then gets clicked off.
+/// Writing a compare doesn't move a stopped output, so the light only goes out
+/// if `hw::set_output` takes the pins off TCA0. With the buffers stuck full it
+/// can't power down, so that's all this asks for, along with a press not
+/// bringing the output back while it counts.
+///
+/// Once at level 150, with the FET fully on. The UI can't get there yet, so
+/// that row's put in by hand. Once at the UI's own level, a lower duty,
+/// stopped in the high part of a cycle.
 fn off_with_tca0_dead(
     power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
 ) -> Result<(), String> {
-    let mut sim = switched_on(power_on)?;
-    let world = World {
-        tca_stopped: true,
-        ..sim.chip.world
-    };
-    sim.chip.set_world(world);
-    sim.chip.tca_deaf = true;
-    for sample in simulate::samples(&simulate::parse(&["1C", "wait:1s"])?) {
-        sim.tick(sample.pressed)?;
+    for top_level in [true, false] {
+        let mut sim = switched_on(power_on)?;
+        if top_level {
+            let row = ramp::output(ramp::LEVELS);
+            sim.chip.compare = [row.fet, row.linear];
+            sim.chip.wide[1] = row.top - 1;
+            sim.chip.next_bottom = sim.chip.now;
+        }
+        // A cycle at the most, to catch the outputs high.
+        let want = |c: &Chip| if top_level { c.wo[0] } else { c.wo[1] };
+        for _ in 0..ramp::MAX_TOP {
+            sim.chip.advance_to(sim.chip.now + 1)?;
+            if want(&sim.chip) {
+                break;
+            }
+        }
+        let world = World {
+            tca_stopped: true,
+            ..sim.chip.world
+        };
+        sim.chip.set_world(world);
+        sim.chip.tca_deaf = true;
+        let on = sim.chip.leds();
+        if on == (0, 0) || top_level && on.1 == 0 {
+            return Err(format!("the light should be stuck on, but it's at {on:?}"));
+        }
+        for sample in simulate::samples(&simulate::parse(&["1C", "wait:1s"])?) {
+            sim.tick(sample.pressed)?;
+        }
+        if sim.chip.leds() != (0, 0) {
+            return Err(format!("the light's still at {:?}", sim.chip.leds()));
+        }
+        for _ in 0..4 {
+            sim.tick(true)?;
+            if sim.chip.leds() != (0, 0) {
+                return Err(format!(
+                    "a press brought the light back, at {:?}",
+                    sim.chip.leds()
+                ));
+            }
+        }
     }
-    match sim.chip.leds() {
-        (0, 0) => Ok(()),
-        leds => Err(format!("the light's still at {leds:?}")),
-    }
+    Ok(())
 }
 
 /// Runs the same random switching on a chip that drops every write to set
@@ -1881,7 +1916,11 @@ fn in_step(
         let want = (output.linear, output.fet, output.top);
         let leds = sim.chip.leds();
         let leds = (leds.0, leds.1, sim.chip.wide(reg::TCA0_PER).wrapping_add(1));
-        if leds != want && !settling {
+        // A stopped TCA0 can't do what the library asks until the next count
+        // turns the light off, so there's nothing to compare until then. Off
+        // is still off.
+        let frozen = sample.world.tca_stopped && rig.level() > 0;
+        if leds != want && !settling && !frozen {
             return Err(format!(
                 "tick {tick}: the firmware's (linear, FET, top) is {leds:?}, \
                  but the library's level {} is {want:?}",
@@ -2218,6 +2257,12 @@ struct Chip {
     /// reset ends it.
     stuck: bool,
     tcb: Tcb,
+    /// The waveform outputs WO0 and WO1: set at BOTTOM unless the compare's
+    /// 0, cleared on a compare match (§20.3.3.4.3). Nothing moves them while
+    /// the timer isn't counting.
+    wo: [bool; 2],
+    /// How far the counter had got when `wo` was last brought up to date.
+    wo_counted: u64,
     /// TCA0.INTFLAGS.OVF.
     tca_ovf: bool,
     /// TCA0 ignores commands too, which a stopped one might, for all the
@@ -2372,6 +2417,8 @@ impl Chip {
             bites: false,
             stuck: false,
             tcb: Tcb::default(),
+            wo: [false; 2],
+            wo_counted: 0,
             tca_ovf: false,
             tca_deaf: false,
             tca_polled: false,
@@ -2811,18 +2858,35 @@ impl Chip {
     /// (linear, FET) compares as the pins see them: TCA0 running, the compare
     /// channel enabled and the pin set as an output. These are the live
     /// values, so an update that never landed shows.
+    ///
+    /// A waveform output only overrides PORT, whose OUT is 0 here, with its
+    /// channel enabled (§20.3.3.4.5). A timer that's counting makes the duty
+    /// its compare says. A timer that isn't holds the pin at whatever its
+    /// output was, which is fully on or fully off, whatever the compare's
+    /// been set to since, and so is an output that hasn't reached BOTTOM
+    /// after its compare went to 0.
     fn leds(&self) -> (u16, u16) {
-        let running = self.io[reg::TCA0_CTRLA] & regs::TCA_ENABLE != 0;
-        let channel = |enable: u8, pin: u8, compare: u16| {
-            let on = running
-                && self.io[reg::TCA0_CTRLB] & enable != 0
-                && self.io[reg::VPORTB_DIR] & pin != 0;
-            if on { compare } else { 0 }
+        let top = self.wide(reg::TCA0_PER).wrapping_add(1);
+        let channel = |enable: u8, pin: u8, i: usize| {
+            let driving =
+                self.io[reg::TCA0_CTRLB] & enable != 0 && self.io[reg::VPORTB_DIR] & pin != 0;
+            let held = self.wo[i] && (self.compare[i] == 0 || !self.tca_counts());
+            match driving {
+                false => 0,
+                true if held => top,
+                true if self.tca_counts() => self.compare[i],
+                true => 0,
+            }
         };
         (
-            channel(regs::TCA_CMP1EN, LINEAR, self.compare[1]),
-            channel(regs::TCA_CMP0EN, FET, self.compare[0]),
+            channel(regs::TCA_CMP1EN, LINEAR, 1),
+            channel(regs::TCA_CMP0EN, FET, 0),
         )
+    }
+
+    /// Whether the counter's moving, so the output's a PWM.
+    fn tca_counts(&self) -> bool {
+        self.tca_running() && !self.tca_frozen
     }
 }
 
@@ -2983,8 +3047,24 @@ impl Chip {
             self.tca_ovf = true;
             self.tca_update()?;
             self.next_bottom += self.tca_cycle();
+            self.wo = self.compare.map(|compare| compare != 0);
+            self.wo_counted = 0;
         }
+        self.tca_compare_match();
         Ok(())
+    }
+
+    /// Clears each waveform output whose compare the counter has reached
+    /// since this last looked. Writing a compare the counter's already past
+    /// matches nothing, so the output stays as it is until BOTTOM.
+    fn tca_compare_match(&mut self) {
+        let left = self.next_bottom.saturating_sub(self.now);
+        let count = self.tca_cycle().saturating_sub(left);
+        for (wo, compare) in iter::zip(&mut self.wo, self.compare) {
+            let compare = u64::from(compare);
+            *wo &= !(self.wo_counted <= compare && compare <= count);
+        }
+        self.wo_counted = count;
     }
 
     /// (PER, [CMP0, CMP1]) as the next UPDATE leaves them.
@@ -3054,6 +3134,7 @@ impl Chip {
                 ));
             }
             self.next_bottom = self.now + self.tca_cycle();
+            self.wo_counted = 0;
         } else if low == reg::TCA0_PER {
             if self.tca_running() {
                 return Err(
@@ -6710,6 +6791,66 @@ mod tests {
         assert!(c.write(MAPPED, 0).is_err(), "flash isn't writable");
         assert_eq!(c.read(MAPPED + 100), Ok(0xFF), "erased flash");
         assert_eq!(c.read(MAPPED + 2), Ok(0));
+    }
+
+    /// A chip at `level` with the pins on TCA0, just past a BOTTOM.
+    fn pins_at(level: u8) -> Chip {
+        let mut c = pwm_at(level);
+        c.io[reg::TCA0_CTRLB] = regs::TCA_CMP0EN | regs::TCA_CMP1EN;
+        c.io[reg::VPORTB_DIR] = FET | LINEAR;
+        let bottom = c.next_bottom;
+        c.advance_to(bottom).unwrap();
+        c
+    }
+
+    #[test]
+    fn a_waveform_output_is_set_at_bottom_and_cleared_on_a_match() {
+        let mut c = pins_at(ramp::LINEAR_MAX - 1);
+        let linear = u64::from(ramp::output(ramp::LINEAR_MAX - 1).linear);
+        assert_eq!(c.wo, [false, true], "the FET's compare is 0");
+        let start = c.now;
+        c.advance_to(start + linear - 1).unwrap();
+        assert!(c.wo[1]);
+        c.advance_to(start + linear).unwrap();
+        assert!(!c.wo[1], "on the match");
+        let bottom = c.next_bottom;
+        c.advance_to(bottom).unwrap();
+        assert!(c.wo[1], "and again at BOTTOM");
+    }
+
+    #[test]
+    fn a_compare_over_top_holds_a_waveform_output_high() {
+        let mut c = pins_at(ramp::LEVELS);
+        let top = u64::from(ramp::output(ramp::LEVELS).top);
+        let start = c.now;
+        for at in 1..2 * top {
+            c.advance_to(start + at).unwrap();
+            assert!(c.wo[1], "{at}");
+        }
+    }
+
+    #[test]
+    fn a_stopped_timer_holds_its_output_whatever_the_compare_says() {
+        let mut c = pins_at(ramp::LINEAR_MAX - 1);
+        c.world.tca_stopped = true;
+        let top = ramp::output(ramp::LINEAR_MAX - 1).top;
+        c.compare = [0, 0];
+        c.advance_to(c.now + 10_000).unwrap();
+        assert_eq!(c.leds(), (top, 0), "fully on, and the compare's 0");
+        c.io[reg::TCA0_CTRLB] = regs::TCA_WGMODE_SINGLESLOPE;
+        assert_eq!(c.leds(), (0, 0), "and PORT only gets it back with CMPnEN");
+    }
+
+    #[test]
+    fn writing_a_compare_past_the_count_leaves_the_output_until_bottom() {
+        let mut c = pins_at(ramp::LINEAR_MAX - 1);
+        c.advance_to(c.now + 1).unwrap();
+        c.compare[1] = 0;
+        let top = ramp::output(ramp::LINEAR_MAX - 1).top;
+        assert_eq!(c.leds(), (top, 0));
+        let bottom = c.next_bottom;
+        c.advance_to(bottom).unwrap();
+        assert_eq!(c.leds(), (0, 0));
     }
 
     #[test]
