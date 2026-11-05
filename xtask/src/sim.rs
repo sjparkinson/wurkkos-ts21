@@ -391,7 +391,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         ram_tested: ram_tested / 2,
     };
     periodic_faults(&power_on, &late).map_err(|e| format!("periodic RAM test: {e}"))?;
-    jump_to_reset(&power_on).map_err(|e| format!("a jump to the reset vector: {e}"))?;
+    jump_to_reset(&power_on, &late).map_err(|e| format!("a jump to the reset vector: {e}"))?;
 
     let mut report = Report {
         stack: 0,
@@ -1778,21 +1778,62 @@ const PINS_OFF_INSTRUCTIONS: u32 = 300;
 
 /// Something jumps to the reset vector with the light on. There's been no
 /// reset, so TCA0's still driving the pins, and startup has to stop that
-/// before it spends 85 ms on the RAM test, or longer.
-fn jump_to_reset(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<(), String> {
+/// before it spends 85 ms on the RAM test, or longer. The interrupt flags are
+/// still up as well, with the PIT's coming first, and `main` has to turn that
+/// into a real reset, or they'd fail the clock check and leave the torch dark
+/// for good. It has to come back off, with the FET refused, and work.
+fn jump_to_reset(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    marks: &LateMarks,
+) -> Result<(), String> {
     let mut sim = switched_on(power_on)?;
     sim.cpu = Cpu::new(&SRAM);
     sim.testing = sim.ram_tested;
+    sim.chip.pit_flag = true;
+    sim.chip.tcb.capt = true;
+    let mut off = false;
     for _ in 0..PINS_OFF_INSTRUCTIONS {
         sim.step()?;
-        if sim.chip.leds() == (0, 0) {
-            return Ok(());
+        off = sim.chip.leds() == (0, 0);
+        if off {
+            break;
         }
     }
-    Err(format!(
-        "the light's still at {:?} after {PINS_OFF_INSTRUCTIONS} instructions",
-        sim.chip.leds()
-    ))
+    if !off {
+        return Err(format!(
+            "the light's still at {:?} after {PINS_OFF_INSTRUCTIONS} instructions",
+            sim.chip.leds()
+        ));
+    }
+    // A slow WDT, at the far end of its spread, lets the RAM test finish
+    // before it bites, and a bite would be a real reset, which hides this.
+    while sim.cpu.pc != marks.main {
+        if sim.cpu.pc == marks.selftest_failed {
+            return Err("the self-tests failed on a good chip".into());
+        }
+        sim.chip.wdt.ticks = 0;
+        sim.step()?;
+    }
+    for _ in 0..4 {
+        sim.tick(false)?;
+    }
+    if sim.proved() != Some(Step::Hung) {
+        return Err(format!(
+            "the marker says {:?}, not that it hung",
+            sim.marker()
+        ));
+    }
+    if sim.chip.leds() != (0, 0) {
+        return Err(format!("came back on, at {:?}", sim.chip.leds()));
+    }
+    for sample in simulate::samples(&simulate::parse(&["1C", "wait:1s"])?) {
+        sim.tick(sample.pressed)?;
+    }
+    match sim.chip.leds() {
+        (0, _) => Err("came back dark: a click doesn't turn it on".into()),
+        (_, 0) => Ok(()),
+        leds => Err(format!("the FET's on, at {leds:?}")),
+    }
 }
 
 /// Word addresses `periodic_faults` follows a fault through.

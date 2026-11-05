@@ -303,7 +303,8 @@ impl Proof {
     /// | Any of these | Anything else | [`Step::Failed`] |
     ///
     /// No flag at all means something jumped to the reset vector, which is
-    /// as much a hang as a bite. A UPDI flash goes first because it means new
+    /// as much a hang as a bite, and `main` follows it with a software reset,
+    /// since nothing was reset. A UPDI flash goes first because it means new
     /// firmware, and a bite just before it can leave WDRF up as well.
     pub fn after_reset(flags: u8, marker: [u8; 2]) -> Self {
         const FLAGS: u8 = regs::RSTCTRL_PORF
