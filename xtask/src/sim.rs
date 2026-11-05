@@ -2002,7 +2002,7 @@ fn in_step(
         // `sleep` again, so look for it asleep instead. Awake there means
         // it's hung, with no watchdog to rescue it.
         if sample.world.osc32k == 0 {
-            if !settling && !sim.chip_powered_down() {
+            if overdue > OVERDUE_GRACE_TICKS + lost_row_grace && !sim.chip_powered_down() {
                 return Err(format!(
                     "tick {tick}: the 32 kHz oscillator's dead, but the firmware \
                      isn't powered down"
