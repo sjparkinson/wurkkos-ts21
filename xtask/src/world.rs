@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hang_restarts_the_rig_off_with_the_fet_refused_and_only_once() {
+    fn a_hang_restarts_the_rig_off_and_only_once() {
         let mut rig = Rig::default();
         for pressed in [true, true, false] {
             rig.tick(pressed, &World::NORMAL);
