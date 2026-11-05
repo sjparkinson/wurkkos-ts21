@@ -79,9 +79,9 @@ The torch adds a question the breakout can't answer: what else is on the R pad. 
 - **Don't take the cell under 2.8 V.** The firmware should turn off at 2.99 V, but that's one of the things being tested.
 - **Nothing here writes fuses.** If a fuse looks wrong, stop and decide with the datasheet open. Having a high-voltage programmer on the bench doesn't change that: `xtask` still can't write them, and the Friend's rescue for a bad `SYSCFG0` is untested.
 - **The Friend never touches the torch.** It's for the breakout, and the JLHawaii808 kit is for the torch (see [the pulse](#the-high-voltage-updi-friends-12-v-pulse)). The one reason to break this would be a torch that's lost UPDI, and nothing in this plan can cause that.
-- **Get the breakout's backup out of `backup/` before Stage 1.** `xtask` always uses that one directory. If it's left there, the torch's backup refuses to run, and a later `restore` would put seesaw on the torch. Stage 0 moves it.
+- **Keep the two backups apart.** The breakout's goes in `backup/breakout` and the torch's in `backup/torch`. Nothing in a backup says which chip it came from, so `restore` with the wrong directory would put seesaw on the torch.
 
-Any firmware problem below is recoverable: flash and EEPROM are all that ever change, so `cargo xtask restore` puts the stock light back whatever state it's in.
+Any firmware problem below is recoverable: flash and EEPROM are all that ever change, so `cargo xtask restore <port> backup/torch` puts the stock light back whatever state it's in.
 
 ## Stage 0: the breakout
 
@@ -94,10 +94,10 @@ This stage proves `xtask` against a real chip, using the Friend. It doesn't prov
 | # | Do | Needs | Expect | Rehearses |
 |---|---|---|---|---|
 | 0.1 | `cargo xtask ping <port>`, ten times | Now | `found tinyAVR P:0D:1-3` every time. A first attempt that only works on the retry would be the pulse holding UPDI in reset | 1.4 |
-| 0.2 | `cargo xtask backup <port>` | Now | `flash.hex`, `eeprom.hex`, `fuses.hex` | 1.5 |
-| 0.3 | Read `backup/fuses.hex` against `selftest::Fuses::ok`, as 1.6 | Now | Seesaw might not use the factory fuses. If this fails, the firmware refuses the FET here for a good reason, so 0.9 to 0.11 can't work. Don't write the fuses | 1.6 |
-| 0.4 | `cargo xtask flash <port>`, then `restore`, then `flash` again | Now | All verify. Seesaw comes back in the middle, which proves `restore` before the torch needs it | 2.1, and `restore`, which nothing else tests |
-| 0.5 | Move `backup/` out of the repo, somewhere like `~/ts21-breakout-backup` | | `ls backup` finds nothing. Don't skip this | |
+| 0.2 | `cargo xtask backup <port> backup/breakout` | Now | `flash.hex`, `eeprom.hex`, `fuses.hex` | 1.5 |
+| 0.3 | Read `backup/breakout/fuses.hex` against `selftest::Fuses::ok`, as 1.6 | Now | Seesaw might not use the factory fuses. If this fails, the firmware refuses the FET here for a good reason, so 0.9 to 0.11 can't work. Don't write the fuses | 1.6 |
+| 0.4 | `cargo xtask flash <port>`, then `cargo xtask restore <port> backup/breakout`, then `flash` again | Now | All verify. Seesaw comes back in the middle, which proves `restore` before the torch needs it | 2.1, and `restore`, which nothing else tests |
+| 0.5 | Read `BODCFG` and `SYSCFG1.SUT` from the same file, as 1.7 | Now | Practice at finding them. Seesaw's values say nothing about the torch's | 1.7 |
 | 0.6 | LED on SDA. 1C on, then `cargo xtask ping <port>` ten times with the light on, then 1C off | Now | Stays on throughout, and clicks still work. `ping` claims to change nothing, so the light going out means the pulse or the port opening resets the chip. It's no danger on this board, and the torch never gets this adapter, so all this decides is how far to trust Stage 0's results. Write it down | The pulse |
 | 0.7 | Switch and LED, as 3.5: 1C on, 1C off, a few dozen times | Now | Clicks feel right. Power-cycling the Friend brings it up in about half a second. The LED glows through the proof's resets, thanks to the pull-up, which shows they happen | 3.5 |
 | 0.8 | LED off. Level 50: meter on frequency from SDA to GND, then on DC volts | Now | 19.4 kHz, a clean signal, so 3.8's "may not trigger" doesn't apply. A wrong clock is unmistakable: 10 MHz would read double. DC volts should be 29.1% of VCC, 75 / 258, since the meter averages the PWM | 3.6, 3.8, "Check 5 MHz" on silicon |
@@ -119,8 +119,8 @@ The last chance to measure Anduril, which is what the 5 MHz checks compare again
 | 1.2 | Tail current on stock: cap off, meter from cell negative to the tube, at the top of the linear channel | About 350 mA, which is the forum figure this firmware's sums rest on. Start low and ramp up slowly: past about 0.4 A you're onto the FET, so stop | Confirms the linear channel's current |
 | 1.3 | Note how bright that level looks, and whether the light whines | For comparison at 4.4 | |
 | 1.4 | `cargo xtask ping <port>`, first with the probe touching nothing, then on the pads | In the air: "no reply from the chip", which proves the port and the adapter's echo with no chip at risk. "Nothing echoed back" means the adapter's the problem. On the pads: `found tinyAVR P:0D:1-3` | First half of "ping, back up and flash" |
-| 1.5 | `cargo xtask backup <port>`, then copy `backup/` somewhere safe | `flash.hex`, `eeprom.hex`, `fuses.hex` | Second half |
-| 1.6 | Read `backup/fuses.hex` against `selftest::Fuses::ok` | `WDTCFG` 0, `OSCCFG.FREQSEL` 20 MHz with `OSCLOCK` clear, `SYSCFG0.RSTPINCFG` UPDI, `APPEND` and `BOOTEND` 0 | "`backup/fuses.hex` passes" |
+| 1.5 | `cargo xtask backup <port> backup/torch`, then copy that directory somewhere safe | `flash.hex`, `eeprom.hex`, `fuses.hex` | Second half |
+| 1.6 | Read `backup/torch/fuses.hex` against `selftest::Fuses::ok` | `WDTCFG` 0, `OSCCFG.FREQSEL` 20 MHz with `OSCLOCK` clear, `SYSCFG0.RSTPINCFG` UPDI, `APPEND` and `BOOTEND` 0 | "`backup/torch/fuses.hex` passes" |
 | 1.7 | Read `BODCFG` and `SYSCFG1.SUT` from the same file | `BODCFG` 0x00 (BOD off), `SUT` 64 ms | "Find out whether the BOD's on", and the start-up time in the watchdog item |
 
 If 1.6 fails, stop: this firmware would quietly refuse the FET, and that's worth understanding before going further.

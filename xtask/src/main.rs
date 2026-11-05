@@ -37,14 +37,14 @@ commands:
   hex                     build the firmware, write target/wurkkos-ts21-0614.hex
                           and print flash, RAM, stack and loop use
   ping <port>             check the programmer can see the chip, change nothing
-  backup <port>           save the torch's flash, EEPROM and fuses into backup/
+  backup <port> <dir>     save the chip's flash, EEPROM and fuses into <dir>
   flash <port> [file.hex] build and flash the firmware, or flash file.hex
-  restore <port>          put backup/flash.hex and backup/eeprom.hex back
+  restore <port> <dir>    put <dir>/flash.hex and <dir>/eeprom.hex back
   simulate [script...]    try src/ui.rs live in the terminal, or on a script
                           such as `1C 2H:1.5s wait:1s 3C`
 
 <port> is the serial UPDI adapter, e.g. /dev/cu.usbserial-1410 on macOS
-or /dev/ttyUSB0 on Linux.
+or /dev/ttyUSB0 on Linux. <dir> names one chip's backup, e.g. backup/torch.
 ";
 
 const ELF: &str = "target/avr-none/release/wurkkos-ts21-0614.elf";
@@ -61,12 +61,12 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         ["hex"] => hex(),
         ["ping", port] => ping(port),
-        ["backup", port] => backup(port),
+        ["backup", port, dir] => backup(port, Path::new(dir)),
         ["flash", port] => build()
             .and_then(|(elf, _)| crc::sign(&elf.flash_image()))
             .and_then(|image| flash(port, &image)),
         ["flash", port, file] => read_hex(Path::new(file)).and_then(|image| flash(port, &image)),
-        ["restore", port] => restore(port),
+        ["restore", port, dir] => restore(port, Path::new(dir)),
         ["simulate"] => simulate::interactive(),
         ["simulate", script @ ..] => simulate::script(script),
         _ => {
@@ -214,8 +214,7 @@ fn ping(port: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn backup(port: &str) -> Result<(), String> {
-    let dir = root().join("backup");
+fn backup(port: &str, dir: &Path) -> Result<(), String> {
     let flash_path = dir.join("flash.hex");
     if flash_path.exists() {
         return Err(format!(
@@ -233,11 +232,14 @@ fn backup(port: &str) -> Result<(), String> {
     let fuses = p.read(map::FUSES, map::FUSES_SIZE)?;
     p.leave()?;
 
-    fs::create_dir_all(&dir).map_err(at(&dir))?;
+    fs::create_dir_all(dir).map_err(at(dir))?;
     write(&flash_path, &ihex::encode(&flash))?;
     write(&dir.join("eeprom.hex"), &ihex::encode(&eeprom))?;
     write(&dir.join("fuses.hex"), &ihex::encode(&fuses))?;
-    eprintln!("saved flash, EEPROM and fuses (for reference, never written back) to backup/");
+    eprintln!(
+        "saved flash, EEPROM and fuses (for reference, never written back) to {}",
+        dir.display()
+    );
     Ok(())
 }
 
@@ -245,8 +247,7 @@ fn flash(port: &str, image: &[u8]) -> Result<(), String> {
     program(port, image, None)
 }
 
-fn restore(port: &str) -> Result<(), String> {
-    let dir = root().join("backup");
+fn restore(port: &str, dir: &Path) -> Result<(), String> {
     let flash = read_hex(&dir.join("flash.hex"))?;
     let eeprom = read_hex(&dir.join("eeprom.hex"))?;
     program(port, &flash, Some(&eeprom))

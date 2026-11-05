@@ -28,7 +28,7 @@ Put a serial UPDI programmer on the R, G and V pads and `cargo xtask` does the r
 
 ```sh
 cargo xtask ping /dev/cu.usbserial-XXXX
-cargo xtask backup /dev/cu.usbserial-XXXX
+cargo xtask backup /dev/cu.usbserial-XXXX backup/torch
 cargo xtask flash /dev/cu.usbserial-XXXX    # builds first
 ```
 
