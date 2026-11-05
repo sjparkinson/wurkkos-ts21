@@ -200,9 +200,9 @@ const _: () = {
 /// over-counts.
 ///
 /// The firmware counts once at power-on and then every
-/// [`CLOCK_CHECK_TICKS`] while the light's on. It doesn't count at rest, since
-/// TCA0 stops in power-down, and a torch that's off isn't doing anything a
-/// bad clock can upset. It waits for the first tick before the power-on count,
+/// [`CLOCK_CHECK_TICKS`] while the light's on. It doesn't start a count at
+/// rest, since TCA0 stops in power-down, and a torch that's off isn't doing
+/// anything a bad clock can upset; only a second go finishes there. It waits for the first tick before the power-on count,
 /// because the first PIT period can be anything up to a full one (DS
 /// §23.5.2.2).
 #[derive(Clone, Copy, Debug)]

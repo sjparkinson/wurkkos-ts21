@@ -372,6 +372,19 @@ mod tests {
     }
 
     #[test]
+    fn a_low_count_just_before_turning_off_is_settled_at_rest() {
+        let mut rig = Rig::new();
+        rig.click();
+        rig.torch.clock(CLOCKS_MIN / 2);
+        rig.click();
+        rig.run(false, 64);
+        assert!(rig.torch.resting());
+        assert!(rig.torch.clock_due());
+        rig.torch.clock(CLOCKS_MIN / 2);
+        assert!(rig.torch.clock_failed());
+    }
+
+    #[test]
     fn one_low_count_leaves_the_light_on_if_the_next_is_good() {
         let mut rig = Rig::new();
         rig.click();
@@ -404,7 +417,7 @@ mod tests {
         rig.torch.clock(306 * 255);
         rig.click();
         assert_eq!(rig.level(), LEVEL);
-        // TCA0 stops here. Off is as usual, and nothing's counted at rest.
+        // TCA0 stops here. Off is as usual, and no count starts at rest.
         rig.click();
         assert_eq!(rig.level(), 0);
         rig.run(false, 3 * 64);
