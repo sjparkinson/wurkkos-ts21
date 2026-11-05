@@ -39,7 +39,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     /// The internal 1.5 V reference against VDD, four conversions
-    /// accumulated, for `battery::centivolts`.
+    /// accumulated, for `battery::Protection`.
     Voltage,
     /// The temperature sensor against the internal 1.1 V reference, one
     /// conversion, for `temp::kelvin`.

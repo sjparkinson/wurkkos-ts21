@@ -22,7 +22,7 @@ src/button.rs     switch samples in, clicks and holds out
 src/gradual.rs    a level that fades towards a target, at most a level a tick
 src/ramp.rs       brightness levels to PWM duty cycles
 src/temp.rs       temperature sensor readings to kelvin
-src/battery.rs    battery readings to centivolts, and low-voltage protection
+src/battery.rs    battery readings, the thresholds they're held to, and low-voltage protection
 src/thermal.rs    temperatures in, a ceiling on the level out
 src/sensors.rs    which ADC channel to read each tick, and when a reading's due
 src/limits.rs     ADC readings in, the UI's level capped by the cell and the heat out

@@ -18,11 +18,15 @@
 //! at 4.2 V, and the calibration is a guess for this light anyway. The slope
 //! applies to the VCC term and the offset goes on after, as in Anduril.
 //!
-//! The numerator is 606,000, which needs 20 bits. A `u32` division links
-//! fine, but `compiler_builtins`' 32-bit divide costs about 1.3 KB of flash,
-//! and a 16-bit `/` and `%` together get the remainder with a multiply. So
-//! this does schoolbook long division a bit at a time, with nothing but
-//! compares, shifts and subtracts on `u16`s.
+//! So a reading goes up as the cell goes down, and the firmware never works
+//! out a voltage. The numerator is 606,000, which needs 20 bits, and a 32-bit
+//! divide costs about 1.3 KB of flash. The thresholds stay in centivolts,
+//! since that's how docs/ui.md talks, and `highest_reading` turns them into
+//! counts at compile time. Everything at runtime compares raw readings, so
+//! "below a voltage" is "above a reading".
+//!
+//! `centivolts` is still here for the tests and the simulators, and only
+//! exists for them, so the firmware can't call it by accident.
 
 use crate::TICKS_PER_SECOND;
 use crate::ramp::{LEVELS, LINEAR_MAX};
@@ -42,45 +46,38 @@ const NUMERATOR: u32 = 150 * 4 * SLOPE as u32;
 const _: () = assert!(NUMERATOR < 1 << 20);
 
 /// Readings below this give more than `u16::MAX` centivolts.
+#[cfg(any(test, feature = "testing"))]
 const MIN_READING: u16 = 10;
 
+#[cfg(any(test, feature = "testing"))]
 const _: () = assert!(NUMERATOR / MIN_READING as u32 + OFFSET as u32 <= u16::MAX as u32);
 
 /// The cell's voltage in centivolts from one accumulated reading of the
 /// internal reference against VCC, rounded to the nearest centivolt.
 ///
 /// Readings too small for the answer to fit (zero included, which would mean
-/// VCC at infinity, so a broken read) come out as `u16::MAX`, which isn't
-/// [`plausible`], so [`Protection`] treats it as the garbage it is.
+/// VCC at infinity, so a broken read) come out as `u16::MAX`.
+///
+/// This is the definition the thresholds are worked out from. It's a 32-bit
+/// divide, so it's only built for the tests and the simulators.
+#[cfg(any(test, feature = "testing"))]
 pub fn centivolts(reading: u16) -> u16 {
     if reading < MIN_READING {
         return u16::MAX;
     }
-    // Each step doubles the remainder and brings down a bit. The remainder is
-    // always under the reading, so `reading - remainder - bit` can't wrap, and
-    // comparing against it asks whether `2 × remainder + bit >= reading`
-    // without ever forming a sum that could overflow.
-    let (mut quotient, mut remainder) = (0u16, 0u16);
-    // The numerator's 20 bits, top-aligned and shifted out one at a time.
-    // This also stops the compiler unrolling the loop into 600 bytes.
-    let mut bits = NUMERATOR << 12;
-    for _ in 0..20 {
-        let bit = (bits >> 31) as u16;
-        bits <<= 1;
-        let gap = reading - remainder - bit;
-        quotient <<= 1;
-        if remainder >= gap {
-            remainder -= gap;
-            quotient |= 1;
-        } else {
-            remainder = (remainder << 1) | bit;
-        }
-    }
-    // Round half up: the fraction left over is remainder / reading.
-    if remainder >= reading - remainder {
-        quotient += 1;
-    }
-    quotient + OFFSET
+    let reading = u32::from(reading);
+    // Round half up.
+    ((2 * NUMERATOR + reading) / (2 * reading)) as u16 + OFFSET
+}
+
+/// The highest reading `centivolts` calls `cv` or more, so a reading is
+/// under `cv` exactly when it's above this. Compile time only.
+///
+/// `centivolts` rounds, so everything down to half a centivolt under `cv`
+/// counts as `cv`, which is where the `2 × … - 1` comes from: the last reading
+/// with `NUMERATOR / reading >= cv - OFFSET - ½`.
+const fn highest_reading(cv: u16) -> u16 {
+    (2 * NUMERATOR / (2 * (cv - OFFSET) as u32 - 1)) as u16
 }
 
 /// How many ticks apart the voltage samples come. The ADC alternates between
@@ -110,6 +107,17 @@ pub const OFF_BELOW: u16 = 299;
 /// lower level stays put.
 pub const RECOVER_AT: u16 = 330;
 
+/// A filtered reading above this is under [`STEP_DOWN_BELOW`].
+const STEP_DOWN_OVER: u16 = highest_reading(STEP_DOWN_BELOW);
+
+/// A filtered reading above this is under [`OFF_BELOW`].
+const OFF_OVER: u16 = highest_reading(OFF_BELOW);
+
+/// A filtered reading at or below this is at [`RECOVER_AT`] or above.
+const RECOVER_UP_TO: u16 = highest_reading(RECOVER_AT);
+
+const _: () = assert!(RECOVER_UP_TO < STEP_DOWN_OVER && STEP_DOWN_OVER < OFF_OVER);
+
 /// How long the filtered voltage has to stay under [`OFF_BELOW`] before it
 /// acts: one second.
 pub const HOLD_SAMPLES: u16 = SAMPLES_PER_SECOND;
@@ -137,13 +145,23 @@ pub const FORGET_TICKS: u16 = TICKS_PER_SECOND * 60 * 5;
 /// Voltages a real cell can give, in centivolts. A lithium-ion cell sits
 /// between about 2.5 and 4.2 V, and this allows for the calibration being
 /// off by a few tenths either way. Outside it, the ADC's set up wrong or the
-/// read failed: a reading of zero comes out as `u16::MAX`, and four
-/// saturated conversions (the internal reference at or above VCC) as 1.78 V.
+/// read failed: a reading of zero would be VCC at infinity, and four
+/// saturated conversions (the internal reference at or above VCC) are 1.78 V.
 pub const PLAUSIBLE: core::ops::RangeInclusive<u16> = 200..=460;
 
-/// Whether a voltage from [`centivolts`] could be a real cell.
-pub fn plausible(centivolts: u16) -> bool {
-    PLAUSIBLE.contains(&centivolts)
+/// [`PLAUSIBLE`] as readings, the ends swapped since a reading falls as the
+/// voltage rises.
+const PLAUSIBLE_READINGS: core::ops::RangeInclusive<u16> =
+    highest_reading(*PLAUSIBLE.end() + 1) + 1..=highest_reading(*PLAUSIBLE.start());
+
+// Zero means unseeded, so no sample may be zero, and the highest sample has to
+// fit in sixteenths, plus the 7 the filter's rounding can leave on top.
+const _: () = assert!(*PLAUSIBLE_READINGS.start() > 0);
+const _: () = assert!(*PLAUSIBLE_READINGS.end() as u32 * 16 + 7 <= u16::MAX as u32);
+
+/// Whether a raw reading could be a real cell.
+pub fn plausible(reading: u16) -> bool {
+    PLAUSIBLE_READINGS.contains(&reading)
 }
 
 /// Implausible samples in a row that [`Protection`] lets go before it assumes
@@ -159,7 +177,7 @@ pub enum Verdict {
     Off,
 }
 
-/// Low-voltage protection: feed it each voltage sample (every
+/// Low-voltage protection: feed it each raw voltage reading (every
 /// [`SAMPLE_TICKS`] ticks) and it says how bright the torch may be.
 ///
 /// Samples go through a moving average (each one moves the filtered value an
@@ -167,6 +185,12 @@ pub enum Verdict {
 /// second), and the filtered value has to stay low for a whole second or more
 /// before it acts, so one bad reading, or the sag as the FET comes on, does
 /// nothing.
+///
+/// The average is of readings, which isn't quite the average of voltages,
+/// since one's the reciprocal of the other. A steady cell gives the same
+/// answer either way. On the way between two voltages this one reads lower:
+/// about 1 cV partway from 3.40 to 3.05 V, but about 7 cV partway from 3.80 to
+/// 2.90 V, which is two samples, half a second, sooner to act.
 ///
 /// - Under [`STEP_DOWN_BELOW`] for [`STEP_SAMPLES`], the ceiling drops to
 ///   [`STEP`] levels under whichever is lower of the ceiling and the level the
@@ -194,8 +218,8 @@ pub enum Verdict {
 /// [`RECOVER_AT`] or above step it back up as usual.
 #[derive(Clone, Debug)]
 pub struct Protection {
-    /// The filtered voltage in sixteenths of a centivolt. Zero until the
-    /// first plausible sample, which seeds it.
+    /// The filtered reading in sixteenths of a count. Zero until the first
+    /// plausible sample, which seeds it.
     filtered: u16,
     low_samples: u16,
     flat_samples: u16,
@@ -240,18 +264,19 @@ impl Protection {
     }
 
     /// The filtered voltage in centivolts, or `None` before the first sample.
+    #[cfg(any(test, feature = "testing"))]
     pub fn centivolts(&self) -> Option<u16> {
         match self.filtered {
             0 => None,
-            filtered => Some(filtered >> 4),
+            filtered => Some(centivolts(filtered >> 4)),
         }
     }
 
-    /// One voltage sample: `centivolts` from [`centivolts`] and the level the
-    /// torch is at (`0` for off).
-    pub fn sample(&mut self, centivolts: u16, level: u8) -> Verdict {
+    /// One voltage sample: the raw `reading` and the level the torch is at
+    /// (`0` for off).
+    pub fn sample(&mut self, reading: u16, level: u8) -> Verdict {
         self.rested = 0;
-        if !plausible(centivolts) {
+        if !plausible(reading) {
             self.high_samples = 0;
             self.implausible = self.implausible.saturating_add(1);
             if self.implausible > GLITCHES {
@@ -260,9 +285,9 @@ impl Protection {
             return Verdict::Ceiling(self.ceiling);
         }
         self.implausible = 0;
-        let voltage = self.filter(centivolts);
+        let filtered = self.filter(reading);
 
-        if voltage >= RECOVER_AT {
+        if filtered <= RECOVER_UP_TO {
             self.high_samples += 1;
             if self.high_samples >= RECOVER_SAMPLES {
                 self.high_samples = 0;
@@ -276,11 +301,11 @@ impl Protection {
             (self.low_samples, self.flat_samples) = (0, 0);
             return Verdict::Ceiling(self.ceiling);
         }
-        self.low_samples = match voltage < STEP_DOWN_BELOW {
+        self.low_samples = match filtered > STEP_DOWN_OVER {
             true => self.low_samples + 1,
             false => 0,
         };
-        self.flat_samples = match voltage < OFF_BELOW {
+        self.flat_samples = match filtered > OFF_OVER {
             // Dropped to the linear channel but still fading down to it:
             // the cell's still under the FET's load, so wait till it's
             // there and judge it on the linear channel's.
@@ -307,13 +332,13 @@ impl Protection {
     }
 
     /// Folds a sample into the moving average and returns the result in
-    /// centivolts. In sixteenths, moving an eighth of the way is taking off
-    /// an eighth and adding the sample times two. Only plausible samples get
-    /// here, so the sum stays well inside a `u16` and the seed isn't zero.
-    fn filter(&mut self, centivolts: u16) -> u16 {
+    /// counts. In sixteenths, moving an eighth of the way is taking off an
+    /// eighth and adding the sample times two. Only plausible samples get
+    /// here, so the sum stays inside a `u16` and the seed isn't zero.
+    fn filter(&mut self, reading: u16) -> u16 {
         self.filtered = match self.filtered {
-            0 => centivolts << 4,
-            filtered => filtered - (filtered >> 3) + (centivolts << 1),
+            0 => reading << 4,
+            filtered => filtered - (filtered >> 3) + (reading << 1),
         };
         self.filtered >> 4
     }
@@ -324,6 +349,7 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use crate::testing::voltage_reading;
     use std::vec::Vec;
 
     /// The conversion from first principles, as an exact fraction with room
@@ -405,10 +431,25 @@ mod tests {
         seconds * SAMPLES_PER_SECOND
     }
 
+    /// The raw reading for a cell at `cv`, so the tests can go on talking in
+    /// centivolts. `0` and `u16::MAX` stand for a reading of zero, which is
+    /// what used to come out of `centivolts` as `u16::MAX`.
+    fn raw(cv: u16) -> u16 {
+        match cv {
+            0 | u16::MAX => 0,
+            cv => voltage_reading(cv),
+        }
+    }
+
+    /// One sample of a cell at `cv`.
+    fn sample(lvp: &mut Protection, cv: u16, level: u8) -> Verdict {
+        lvp.sample(raw(cv), level)
+    }
+
     /// Feeds `samples` samples at a steady voltage and level, and returns
     /// every verdict.
     fn run(lvp: &mut Protection, cv: u16, level: u8, samples: u16) -> Vec<Verdict> {
-        (0..samples).map(|_| lvp.sample(cv, level)).collect()
+        (0..samples).map(|_| sample(lvp, cv, level)).collect()
     }
 
     fn last(lvp: &mut Protection, cv: u16, level: u8, samples: u16) -> Verdict {
@@ -432,7 +473,7 @@ mod tests {
     #[test]
     fn the_first_sample_seeds_the_filter() {
         let mut lvp = Protection::new();
-        lvp.sample(290, 100);
+        sample(&mut lvp, 290, 100);
         assert_eq!(lvp.centivolts(), Some(290));
     }
 
@@ -526,7 +567,7 @@ mod tests {
         let mut lvp = Protection::new();
         run(&mut lvp, 380, 50, secs(10));
         for glitch in [0, 1, 100, 298] {
-            assert_eq!(lvp.sample(glitch, 50), NONE);
+            assert_eq!(sample(&mut lvp, glitch, 50), NONE);
             assert!(all(&run(&mut lvp, 380, 50, secs(60)), NONE));
         }
     }
@@ -545,10 +586,12 @@ mod tests {
         run(&mut lvp, 360, 50, secs(10));
         let verdicts = run(&mut lvp, 250, 50, secs(10));
         // The filtered voltage passes 2.99 V a second or two in, then the
-        // hold has to run out before the light goes off.
+        // hold has to run out before the light goes off. Averaging readings
+        // rather than volts gets there two samples sooner on a drop this big,
+        // hence the lower bound.
         let off = verdicts.iter().position(|&v| v == Verdict::Off).unwrap();
         let off = u16::try_from(off).unwrap();
-        assert!(off > secs(2) && off < secs(3), "{off}");
+        assert!(off >= secs(2) - 1 && off < secs(3), "{off}");
     }
 
     #[test]
@@ -568,7 +611,7 @@ mod tests {
         assert!(all(&run(&mut lvp, 250, 0, secs(600)), NONE));
         // And the hold starts from scratch when it comes on.
         assert_eq!(last(&mut lvp, 250, 50, secs(1) - 1), NONE);
-        assert_eq!(lvp.sample(250, 50), Verdict::Off);
+        assert_eq!(sample(&mut lvp, 250, 50), Verdict::Off);
     }
 
     #[test]
@@ -588,7 +631,7 @@ mod tests {
         }
         assert_eq!(lvp.centivolts(), None);
         // The next sample stands alone, rather than filtering into 3.05 V.
-        assert_eq!(lvp.sample(380, 0), Verdict::Ceiling(45));
+        assert_eq!(sample(&mut lvp, 380, 0), Verdict::Ceiling(45));
         assert_eq!(lvp.centivolts(), Some(380));
     }
 
@@ -609,7 +652,7 @@ mod tests {
             for _ in 0..FORGET_TICKS - 1 {
                 lvp.rest();
             }
-            lvp.sample(380, 0);
+            sample(&mut lvp, 380, 0);
         }
         assert_eq!(lvp.centivolts(), Some(380));
     }
@@ -620,7 +663,7 @@ mod tests {
         run(&mut lvp, 250, 50, secs(1) - 1);
         lvp.rest();
         assert_eq!(last(&mut lvp, 250, 50, secs(1) - 1), NONE);
-        assert_eq!(lvp.sample(250, 50), Verdict::Off);
+        assert_eq!(sample(&mut lvp, 250, 50), Verdict::Off);
     }
 
     #[test]
@@ -650,32 +693,101 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_has_room_for_the_most_plausible_voltage() {
+    fn the_filter_has_room_for_the_most_plausible_reading() {
         let mut lvp = Protection::new();
-        assert!(u32::from(*PLAUSIBLE.end()) << 4 <= u32::from(u16::MAX));
-        assert_eq!(last(&mut lvp, *PLAUSIBLE.end(), LEVELS, secs(60)), NONE);
+        // The highest reading is the lowest voltage, now.
+        assert!(u32::from(*PLAUSIBLE_READINGS.end()) << 4 <= u32::from(u16::MAX));
+        assert_eq!(lvp.sample(*PLAUSIBLE_READINGS.end(), 0), NONE);
+        assert_eq!(last(&mut lvp, *PLAUSIBLE.start(), 0, secs(60)), NONE);
+        assert_eq!(lvp.centivolts(), Some(*PLAUSIBLE.start()));
+        // And from there all the way up to the top.
+        assert_eq!(last(&mut lvp, *PLAUSIBLE.end(), 0, secs(60)), NONE);
         assert_eq!(lvp.centivolts(), Some(*PLAUSIBLE.end()));
     }
 
     #[test]
     fn plausible_covers_a_real_cell_and_nothing_broken() {
         for cv in [250, 299, 310, 420, 435] {
-            assert!(plausible(cv), "{cv}");
+            assert!(plausible(raw(cv)), "{cv}");
         }
         // A zero reading, four saturated conversions, and either side.
-        for cv in [centivolts(0), centivolts(4 * 1023), 199, 461] {
-            assert!(!plausible(cv), "{cv}");
+        for reading in [0, 4 * 1023, raw(199), raw(461)] {
+            assert!(!plausible(reading), "{reading}");
         }
+    }
+
+    #[test]
+    fn plausible_rejects_what_it_rejected_in_centivolts() {
+        for reading in 0..=u16::MAX {
+            let cv = centivolts(reading);
+            assert_eq!(plausible(reading), PLAUSIBLE.contains(&cv), "{reading}");
+        }
+        // Too small for centivolts to answer, and 1.78 V saturated.
+        for reading in 0..MIN_READING {
+            assert!(!plausible(reading), "{reading}");
+        }
+        assert_eq!(centivolts(4 * 1023), 178);
+        assert!(!plausible(4 * 1023));
+    }
+
+    #[test]
+    fn the_thresholds_land_where_centivolts_says_for_every_reading() {
+        for reading in 1..=u16::MAX {
+            let cv = centivolts(reading);
+            assert_eq!(reading > STEP_DOWN_OVER, cv < STEP_DOWN_BELOW, "{reading}");
+            assert_eq!(reading > OFF_OVER, cv < OFF_BELOW, "{reading}");
+            assert_eq!(reading <= RECOVER_UP_TO, cv >= RECOVER_AT, "{reading}");
+        }
+    }
+
+    #[test]
+    fn the_thresholds_in_counts() {
+        assert_eq!(RECOVER_UP_TO, 2023);
+        assert_eq!(STEP_DOWN_OVER, 2168);
+        assert_eq!(OFF_OVER, 2256);
+        assert_eq!(PLAUSIBLE_READINGS, 1408..=3575);
+    }
+
+    #[test]
+    fn a_steady_reading_on_a_boundary_goes_the_way_centivolts_says() {
+        /// The last verdict of `samples` samples of a steady raw `reading`.
+        fn steady(lvp: &mut Protection, reading: u16, level: u8, samples: u16) -> Verdict {
+            (0..samples).fold(NONE, |_, _| lvp.sample(reading, level))
+        }
+
+        let mut lvp = Protection::new();
+        assert_eq!(steady(&mut lvp, STEP_DOWN_OVER, 100, secs(600)), NONE);
+        let mut lvp = Protection::new();
+        assert_eq!(
+            steady(&mut lvp, STEP_DOWN_OVER + 1, 100, secs(5)),
+            Verdict::Ceiling(100 - STEP)
+        );
+
+        let mut lvp = Protection::new();
+        assert_ne!(steady(&mut lvp, OFF_OVER, 50, secs(1)), Verdict::Off);
+        let mut lvp = Protection::new();
+        assert_eq!(steady(&mut lvp, OFF_OVER + 1, 50, secs(1)), Verdict::Off);
+
+        // Off, so nothing steps down, and a minute for the filter to settle.
+        let mut lvp = Protection::new();
+        assert_eq!(last(&mut lvp, 305, 50, secs(5)), Verdict::Ceiling(35));
+        assert_eq!(steady(&mut lvp, RECOVER_UP_TO, 0, secs(60)), NONE);
+        let mut lvp = Protection::new();
+        assert_eq!(last(&mut lvp, 305, 50, secs(5)), Verdict::Ceiling(35));
+        assert_eq!(
+            steady(&mut lvp, RECOVER_UP_TO + 1, 0, secs(60)),
+            Verdict::Ceiling(35)
+        );
     }
 
     #[test]
     fn implausible_samples_never_reach_the_filter() {
         let mut lvp = Protection::new();
-        lvp.sample(u16::MAX, 100);
-        lvp.sample(0, 100);
+        sample(&mut lvp, u16::MAX, 100);
+        sample(&mut lvp, 0, 100);
         assert_eq!(lvp.centivolts(), None);
-        lvp.sample(400, 100);
-        lvp.sample(u16::MAX, 100);
+        sample(&mut lvp, 400, 100);
+        sample(&mut lvp, u16::MAX, 100);
         assert_eq!(lvp.centivolts(), Some(400));
     }
 
@@ -685,7 +797,10 @@ mod tests {
             let mut lvp = Protection::new();
             let verdicts = run(&mut lvp, u16::MAX, level, u16::from(GLITCHES));
             assert!(all(&verdicts, NONE), "level {level}");
-            assert_eq!(lvp.sample(u16::MAX, level), Verdict::Ceiling(LINEAR_MAX));
+            assert_eq!(
+                sample(&mut lvp, u16::MAX, level),
+                Verdict::Ceiling(LINEAR_MAX)
+            );
             assert!(all(
                 &run(&mut lvp, 0, level, secs(600)),
                 Verdict::Ceiling(LINEAR_MAX)
@@ -716,9 +831,9 @@ mod tests {
         run(&mut lvp, 340, 35, secs(3));
         // Every third sample bad: never four good seconds in a row.
         for _ in 0..200 {
-            lvp.sample(340, 35);
-            lvp.sample(340, 35);
-            assert_eq!(lvp.sample(0, 35), Verdict::Ceiling(35));
+            sample(&mut lvp, 340, 35);
+            sample(&mut lvp, 340, 35);
+            assert_eq!(sample(&mut lvp, 0, 35), Verdict::Ceiling(35));
         }
     }
 
@@ -728,8 +843,8 @@ mod tests {
         let mut verdicts = Vec::new();
         // Every other sample bad: the flat ones still add up.
         for _ in 0..secs(2) {
-            verdicts.push(lvp.sample(290, 50));
-            verdicts.push(lvp.sample(u16::MAX, 50));
+            verdicts.push(sample(&mut lvp, 290, 50));
+            verdicts.push(sample(&mut lvp, u16::MAX, 50));
         }
         assert!(verdicts.contains(&Verdict::Off));
     }

@@ -15,7 +15,7 @@
 //! A failed power-on self-test (`selftest::Faults`) caps the light at the
 //! top of the linear channel for as long as the cell's in.
 
-use crate::battery::{self, Protection, Verdict};
+use crate::battery::{Protection, Verdict};
 use crate::gradual::Gradual;
 use crate::ramp::{LEVELS, LINEAR_MAX};
 use crate::selftest::Faults;
@@ -127,13 +127,10 @@ impl Limits {
         self.convert = convert;
         let mut off = false;
         match reading {
-            Some(Reading::Voltage(raw)) => {
-                let centivolts = battery::centivolts(raw);
-                match self.protection.sample(centivolts, level) {
-                    Verdict::Off => off = true,
-                    Verdict::Ceiling(ceiling) => self.battery_ceiling(ceiling, level),
-                }
-            }
+            Some(Reading::Voltage(raw)) => match self.protection.sample(raw, level) {
+                Verdict::Off => off = true,
+                Verdict::Ceiling(ceiling) => self.battery_ceiling(ceiling, level),
+            },
             Some(Reading::Temperature(raw)) => {
                 let kelvin = self.calibration.kelvin(raw);
                 if on {
@@ -174,6 +171,7 @@ mod tests {
 
     use super::*;
     use crate::TICKS_PER_SECOND;
+    use crate::battery;
     use crate::ramp::LINEAR_MAX;
     use crate::testing::{Adc, CALIBRATION, temperature_reading, voltage_reading};
     use std::vec::Vec;
@@ -316,9 +314,11 @@ mod tests {
         run.ui = LEVELS;
         run.secs(1);
         run.adc.voltage = voltage_reading(290);
-        // The filter takes four seconds or so to fall under 2.99 V, then the
-        // hold a second, so it's still at the top.
-        assert_eq!(run.secs(5), LEVELS);
+        // The filter takes about four seconds to fall under 2.99 V, then the
+        // hold takes it to just under five, so it's still at the top at four.
+        // Averaging readings rather than volts gets there half a second
+        // sooner on a drop this big, which is why this isn't five any more.
+        assert_eq!(run.secs(4), LEVELS);
         assert_eq!(run.offs, 0);
         // Then it fades to the linear channel, without ever jumping, and
         // with the cell still flat it turns off once it's had a second of
