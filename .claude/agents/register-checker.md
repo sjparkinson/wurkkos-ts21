@@ -1,10 +1,12 @@
 ---
 name: register-checker
-description: Checks register addresses, bit masks and peripheral behaviour in src/regs.rs, src/hw.rs and src/rt.rs against Microchip's ATtiny1616 sources. Use after touching any register code, or to answer "which bit/offset/vector is X?" questions.
+description: Checks register addresses, bit masks and peripheral behaviour in src/regs.rs, src/hw.rs and src/rt.rs against Microchip's ATtiny1616 sources. Use once per branch that touches register code, before the PR, or to answer "which bit/offset/vector is X?" questions.
 tools: Read, Grep, Glob, Bash, WebFetch
 ---
 
 You check hand-written ATtiny1616 register code in this repo against primary sources. The firmware has no PAC, so every address and mask in `src/regs.rs` was typed by hand.
+
+Review the commit the caller gave you, not a live worktree, which can change while you read it: `git worktree add --detach "$TMPDIR/review-<sha>" <sha>`, work there, and `git worktree remove --force` it when you're done. If you weren't given a commit, use `HEAD` and say which one you reviewed.
 
 `cargo test --workspace` already compares each constant in `src/regs.rs`, and the memory map and NVM constants in `xtask/src/updi.rs`, against the vendored ATDF (`xtask/src/atdf.rs`). Run it first. Then spend your effort on what it can't see:
 

@@ -1,11 +1,13 @@
 ---
 name: ui-spec-checker
-description: Cross-checks docs/ui.md against src/ui.rs, src/limits.rs, src/torch.rs and xtask/src/spec.rs, so every spec row has a test and an Example script and the code does what the row says. Use after changing the UI, the limits, or the spec.
+description: Cross-checks docs/ui.md against src/ui.rs, src/limits.rs, src/torch.rs and xtask/src/spec.rs, so every spec row has a test and an Example script and the code does what the row says. Use once per branch that changes the UI, the limits, or the spec, before the PR.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 
 docs/ui.md is the UI spec. CLAUDE.md requires every row to have a test and an Example script that `xtask/src/spec.rs` runs against both the library and the firmware. You check that holds.
+
+Review the commit the caller gave you, not a live worktree, which can change while you read it: `git worktree add --detach "$TMPDIR/review-<sha>" <sha>`, work there, and `git worktree remove --force` it when you're done. If you weren't given a commit, use `HEAD` and say which one you reviewed.
 
 1. Run `cargo test --workspace --locked -q`. If it fails, report that first.
 2. List every row in docs/ui.md. For each one, find:

@@ -18,11 +18,11 @@ The firmware clippy and the xtask commands rebuild `core` with `-Zbuild-std`. Th
 
 ## Agents
 
-Agents in `.claude/agents/` report back and never edit. Use them rather than doing the same work inline:
+Agents in `.claude/agents/` report back and never edit. Use them rather than doing the same work inline. Run a checker once per branch, before opening the PR, not after every commit, and skip it for mechanical changes such as renames, comments and moved code. Commit first and give it the SHA, so the code can't change while it reviews:
 
-- `register-checker`: after touching `src/regs.rs`, `src/hw.rs` or `src/rt.rs`.
-- `sim-checker`: after touching `xtask/src/sim.rs`, `avr.rs`, `world.rs` or `simulate.rs`, or when the simulator and the library disagree.
-- `ui-spec-checker`: after changing docs/ui.md, `src/ui.rs`, `src/limits.rs` or `src/torch.rs`.
+- `register-checker`: on a branch that touches `src/regs.rs`, `src/hw.rs` or `src/rt.rs`.
+- `sim-checker`: on a branch that touches `xtask/src/sim.rs`, `avr.rs`, `world.rs` or `simulate.rs`, or when the simulator and the library disagree.
+- `ui-spec-checker`: on a branch that changes docs/ui.md, `src/ui.rs`, `src/limits.rs` or `src/torch.rs`.
 - `hardware-researcher`: before writing a new fact into docs/hardware.md.
 - `microchip-docs`: when you need what the datasheet, errata or an app note says. It searches the local PDFs in `docs/microchip/`, which are gitignored and only exist in the main checkout.
 
@@ -41,7 +41,7 @@ The `avr-codegen` skill in `.claude/skills/` runs in the session itself: use it 
 - **Never write fuses, and never suggest a command that does.** A wrong `SYSCFG0` disables UPDI, and only a high-voltage programmer gets it back. `cargo xtask flash` writes flash only.
 - **Never run `cargo xtask ping`, `backup`, `flash` or `restore` yourself.** They drive real hardware on a serial port, and `.claude/settings.json` denies them. Give the user the command. Test UPDI changes against the fake chip in `xtask/src/updi.rs`, and add a case there for any new sequence.
 - **The UPDI programmer never writes fuses, the user row or a locked chip.** Don't add any of that without the user asking for it explicitly.
-- **Every register address and bit mask lives in `src/regs.rs` and comes from the ATDF** (`vendor/ATtiny1616.atdf`), with a comment naming the register. No bare register numbers in `src/hw.rs` or `src/rt.rs`. Add a check for each new constant to `xtask/src/atdf.rs`; an unchecked one is dead code there and fails clippy. Use the `register-checker` agent after touching `src/regs.rs`, `src/hw.rs` or `src/rt.rs`, for what the ATDF can't express.
+- **Every register address and bit mask lives in `src/regs.rs` and comes from the ATDF** (`vendor/ATtiny1616.atdf`), with a comment naming the register. No bare register numbers in `src/hw.rs` or `src/rt.rs`. Add a check for each new constant to `xtask/src/atdf.rs`; an unchecked one is dead code there and fails clippy. Use the `register-checker` agent on branches that touch `src/regs.rs`, `src/hw.rs` or `src/rt.rs`, for what the ATDF can't express.
 - **16-bit peripheral registers: low byte first.** Use `write16` in `src/hw.rs`.
 - **Logic goes in the library** (`src/lib.rs` and its modules), which is `no_std`, has no `unsafe`, and is tested on the host. `src/main.rs` stays a thin loop.
 - **docs/ui.md is the UI spec.** Change it in the same commit as the code, add a test for every row you add, and give the row an Example script (`xtask/src/spec.rs` runs them against the library and the firmware). Click rows are tested in `src/ui.rs`. The "Low battery and heat" rows describe limits, not clicks, so their tests live in `src/limits.rs` or `src/torch.rs`.
