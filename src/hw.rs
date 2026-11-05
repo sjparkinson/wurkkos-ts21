@@ -63,7 +63,7 @@ const fn tca_driving(output: Output) -> u8 {
 const TCA_ROW: u8 = regs::TCA_PERBV | regs::TCA_CMP0BV | regs::TCA_CMP1BV;
 
 /// Goes at a row under LUPD before `set_output` lets it go for this pass. A
-/// go takes about 60 cycles, and BOTTOMs are at least 255 apart, so one or two
+/// go takes about 23 cycles, and BOTTOMs are at least 255 apart, so one or two
 /// is all it should ever need.
 const ROW_TRIES: u8 = 4;
 
@@ -343,9 +343,7 @@ fn output_settled() -> bool {
 ///
 /// Otherwise it's idle, which stops only the CPU and flash, so TCA0 keeps the
 /// PWM going and the ADC keeps converting. Standby would stop TCA0, which has
-/// no RUNSTDBY (section 11.3.2.1). CTRLB only gets written if it has to be,
-/// since the datasheet doesn't promise that rewriting it with the PWM running
-/// does nothing.
+/// no RUNSTDBY (section 11.3.2.1).
 fn prepare_sleep(rest: bool) {
     if rest && output_settled() {
         write(reg::ADC0_CTRLA, 0);
@@ -698,7 +696,8 @@ pub fn keep_output(output: Output) {
 /// with its output high holds the pin high whatever's written to CMPn. The
 /// channels only come back with a level asked for, so a press can't bring
 /// that back while the torch is off. That a stopped TCA0 holds its output like
-/// this is likely, not stated.
+/// this is likely, not stated, though section 20.5.3's CMPnOV does give the
+/// waveform generator's output a value of its own while the timer's off.
 ///
 /// Off doesn't wait for BOTTOM either. An UPDATE command lands the whole row
 /// at once, LUPD or no LUPD (section 20.3.3.5), and BV clears on it, so
@@ -720,7 +719,9 @@ pub fn set_output(output: Output) {
     }
     write(reg::TCA0_CTRLECLR, regs::TCA_LUPD);
     if off {
-        // Restart the cycle so the next turn-on is consistent.
+        // The forced UPDATE can leave CNT over the off row's PER, where it'd
+        // run on to 0xFFFF before it wrapped. This brings it back, and the
+        // next turn-on starts from the same place.
         write16(reg::TCA0_CNT, 0);
         write16(reg::TCA0_CMP0, 0);
         write16(reg::TCA0_CMP1, 0);
