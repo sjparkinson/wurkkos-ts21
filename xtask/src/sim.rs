@@ -243,6 +243,8 @@ pub struct Report {
     pub off_instructions: u64,
     /// Handlers that landed with a TCA0 16-bit access half done.
     pub mid_access: u32,
+    /// Real ticks that `Landings` put on `hw::wait_for_tick`'s loop.
+    pub ticks_landed: u32,
 }
 
 /// Ticks the library can be resting before the firmware has to be powering
@@ -301,6 +303,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         loop_budget: TICK_BUDGET,
         off_instructions: 0,
         mid_access: 0,
+        ticks_landed: 0,
     };
     for example in spec::examples(spec::UI_MD)? {
         let samples = simulate::samples(&example.actions);
@@ -741,7 +744,7 @@ fn in_step(
         }
         rig.tick(sample.pressed, &sample.world);
         resting = if rig.torch.resting() { resting + 1 } else { 0 };
-        if resting > REST_GRACE_TICKS && !powered_down {
+        if resting > REST_GRACE_TICKS && !powered_down && !sim.tick_landed() {
             return Err(format!(
                 "tick {tick}: the library's been resting for {resting} ticks, \
                  but the firmware didn't power down"
@@ -760,6 +763,7 @@ fn in_step(
     }
     report.stack = report.stack.max(sim.stack());
     report.mid_access += sim.mid_access;
+    report.ticks_landed += sim.ticks_landed;
     Ok(rig.level())
 }
 
@@ -783,6 +787,8 @@ struct Sim {
     landed: Option<Landed>,
     /// Handlers so far that landed with a TCA0 16-bit access half done.
     mid_access: u32,
+    /// Real ticks so far that `Landings` put on `hw::wait_for_tick`'s loop.
+    ticks_landed: u32,
     /// Set to land interrupts on purpose, mid-pass.
     landings: Option<Landings>,
 }
@@ -831,6 +837,7 @@ impl Sim {
             testing: None,
             landed: None,
             mid_access: 0,
+            ticks_landed: 0,
             landings: None,
         })
     }
@@ -1688,10 +1695,10 @@ struct Landed {
 ///
 /// Then for the tick that really can land near the loop. Nothing but the tick
 /// wakes the CPU, so a pass can't be caught there by waking it early. Instead
-/// `Landings` notes where `hw::wait_for_tick`'s loop is, from its `cli` to its
+/// `Landings` notes what `hw::wait_for_tick`'s loop runs, from its `cli` to its
 /// `sleep`, and on each pass after that jumps time on to just before the PIT's
-/// period ends, awake, `early` words before the `sleep`, and `early` goes
-/// round the loop. That's the same as a pass that ran long, but one that's
+/// period ends, awake, `early` instructions before the `sleep`, and `early`
+/// goes round the loop. That's the same as a pass that ran long, but one that's
 /// already fed the watchdog. So the real tick lands on each instruction of the
 /// loop, `sei; sleep` included, and a tick slept through would cost a pass.
 ///
@@ -1703,14 +1710,16 @@ struct Landings {
     /// The tick count when a tick that isn't one went up, until its handler
     /// has been and gone.
     probe: Option<u32>,
-    /// The last `cli` the CPU reached, as a word address.
-    cli_at: u32,
-    /// `hw::wait_for_tick`'s loop, from that `cli` to its `sleep`.
-    wait_loop: Option<Range<u32>>,
+    /// The word addresses the CPU's run since the last `cli`, in order. Not
+    /// a range, since the compiler can put the loop's `sleep` before its `cli`.
+    trail: Vec<u32>,
+    /// `hw::wait_for_tick`'s loop as it last ran, from its `cli` to its
+    /// `sleep`.
+    wait_loop: Vec<u32>,
     /// The tick count at the last jump. No other landing happens until that
     /// tick, so nothing gets in the way of it.
     jumped: Option<u32>,
-    early: u32,
+    early: usize,
 }
 
 /// The `cli` instruction.
@@ -1721,8 +1730,8 @@ impl Landings {
         Self {
             visits: vec![false; FLASH_SIZE / 2],
             probe: None,
-            cli_at: 0,
-            wait_loop: None,
+            trail: Vec::new(),
+            wait_loop: Vec::new(),
             jumped: None,
             early: 1,
         }
@@ -1730,6 +1739,13 @@ impl Landings {
 }
 
 impl Sim {
+    /// Whether the tick that just ended was one `Landings` jumped on to, so
+    /// its pass reached it before getting as far as `sleep`.
+    fn tick_landed(&self) -> bool {
+        let landings = self.landings.as_ref();
+        landings.is_some_and(|l| l.jumped.is_some_and(|tick| tick + 1 == self.chip.ticks))
+    }
+
     /// `before` is what the CPU was handling before the step just run.
     fn landing_stops_time(&self, before: Option<u8>) -> bool {
         self.landings.is_some() && (before.is_some() || self.cpu.handling.is_some())
@@ -1743,8 +1759,11 @@ impl Sim {
         };
         let chip = &mut self.chip;
         let pc = self.cpu.pc;
-        if word(&chip.flash, pc as usize * 2) == Some(CLI_WORD) {
-            landings.cli_at = pc;
+        if self.cpu.handling.is_none() && !self.cpu.asleep {
+            if word(&chip.flash, pc as usize * 2) == Some(CLI_WORD) {
+                landings.trail.clear();
+            }
+            landings.trail.push(pc);
         }
         if self.cpu.handling.is_some()
             || landings.jumped == Some(chip.ticks)
@@ -1757,21 +1776,23 @@ impl Sim {
             return Ok(());
         }
         if self.cpu.asleep {
-            // `sleep` is one word, and PC's past it.
-            landings.wait_loop = Some(landings.cli_at..pc.wrapping_sub(1));
+            if !landings.trail.is_empty() {
+                landings.wait_loop = std::mem::take(&mut landings.trail);
+            }
             return Ok(());
         }
-        if let Some(wait_loop) = &landings.wait_loop {
-            let from = wait_loop.end.saturating_sub(landings.early);
-            let from = from.max(wait_loop.start);
-            if (from..wait_loop.end).contains(&pc) {
-                landings.early = match from == wait_loop.start {
-                    true => 1,
-                    false => landings.early + 1,
-                };
-                landings.jumped = Some(chip.ticks);
-                return chip.advance_to((chip.next_pit - 1).max(chip.now));
-            }
+        // The loop ends in the `sleep`, so `early` 1 is the instruction before.
+        // A tick already waiting to be picked up means a pass is about to run,
+        // and going round the loop to find that isn't waiting for the next.
+        let target = landings.wait_loop.len().checked_sub(landings.early + 1);
+        if let Some(at) = target
+            && landings.wait_loop[at] == pc
+            && chip.io[reg::GPIO_GPIOR0] == 0
+        {
+            landings.early = if at == 0 { 1 } else { landings.early + 1 };
+            landings.jumped = Some(chip.ticks);
+            self.ticks_landed += 1;
+            return chip.advance_to((chip.next_pit - 1).max(chip.now));
         }
         if let Some(visited @ false) = landings.visits.get_mut(pc as usize) {
             *visited = true;
@@ -1817,6 +1838,9 @@ fn mid_pass(
     against_the_library(sim, &mut landed).map_err(|e| format!("random switching: {e}"))?;
     if landed.mid_access == 0 {
         return Err("no handler ever landed between a TCA0 low and high byte".into());
+    }
+    if landed.ticks_landed == 0 {
+        return Err("the real tick never landed on `hw::wait_for_tick`'s loop".into());
     }
     report.stack = report.stack.max(landed.stack);
     report.mid_access = landed.mid_access;
@@ -3485,28 +3509,38 @@ mod tests {
 
     #[test]
     fn the_real_tick_lands_just_before_the_sleep_and_further_back_each_time() {
-        // Sleeps again whenever it wakes: a loop of cli, nop, sei and sleep.
-        let main = [SET_UP[0], CLI_WORD, NOP, SEI, SLEEP, 0xCFFB];
-        let mut s = sim_with_tick_handler(&main, &quiet_tick());
-        s.chip.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN;
-        s.landings = Some(Landings::new());
-        let jumped = |s: &Sim| s.landings.as_ref().unwrap().jumped;
-        // It can't jump until it's seen where the loop is.
-        while s.landings.as_ref().unwrap().wait_loop.is_none() {
-            s.step().unwrap();
-        }
-        assert_eq!(jumped(&s), None);
-        let wait_loop = s.landings.as_ref().unwrap().wait_loop.clone().unwrap();
-        assert_eq!(wait_loop.end - wait_loop.start, 3);
-        // Further back each time, then round again, and never out of the loop.
-        for early in [1, 2, 3, 1] {
-            let last = jumped(&s);
-            while jumped(&s) == last {
+        // Sleeps again whenever it wakes: a loop of cli, nop, sei and sleep,
+        // straight and then laid out the way the compiler does it, with the
+        // `sei; sleep` before the `cli` and a jump round.
+        for (main, words) in [
+            (&[SET_UP[0], CLI_WORD, NOP, SEI, SLEEP, 0xCFFB][..], 4),
+            (
+                &[SET_UP[0], 0xC002, SEI, SLEEP, CLI_WORD, NOP, 0xCFFB][..],
+                5,
+            ),
+        ] {
+            let mut s = sim_with_tick_handler(main, &quiet_tick());
+            s.chip.io[reg::SLPCTRL_CTRLA] = regs::SLPCTRL_SMODE_IDLE | regs::SLPCTRL_SEN;
+            s.landings = Some(Landings::new());
+            let jumped = |s: &Sim| s.landings.as_ref().unwrap().jumped;
+            // It can't jump until it's seen where the loop is.
+            while s.landings.as_ref().unwrap().wait_loop.is_empty() {
                 s.step().unwrap();
             }
-            assert_eq!(s.cpu.pc, wait_loop.end - early);
-            assert!(!s.cpu.asleep);
-            assert_eq!(s.chip.now, s.chip.next_pit - 1, "awake, just before");
+            assert_eq!(jumped(&s), None);
+            let wait_loop = s.landings.as_ref().unwrap().wait_loop.clone();
+            assert_eq!(wait_loop.len(), words);
+            // Further back each time, then round again, never out of the loop.
+            for early in (1..words).chain([1]) {
+                let last = jumped(&s);
+                while jumped(&s) == last {
+                    s.step().unwrap();
+                }
+                assert_eq!(s.cpu.pc, wait_loop[words - 1 - early]);
+                assert!(!s.cpu.asleep);
+                assert_eq!(s.chip.now, s.chip.next_pit - 1, "awake, just before");
+            }
+            assert_eq!(s.ticks_landed, words as u32);
         }
     }
 
