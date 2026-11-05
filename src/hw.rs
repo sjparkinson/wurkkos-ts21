@@ -160,8 +160,9 @@ const SYNC_POLLS: u16 = 16_384;
 /// the 32 kHz oscillator 30% slow, and 25 ms with the main clock 5% fast.
 const TICK_DEADLINE: u16 = u16::MAX;
 
-// A counted wait restarts the deadline, and hits its ceiling before that
-// goes off, so the deadline only ends one with TCA0 stopped as well.
+// A counted wait restarts the deadline, and on short cycles hits its ceiling
+// before that goes off. On the longest, the deadline can get there first.
+// Either way it's `NO_TICK`, and a good chip's tick is well short of both.
 const _: () = assert!(CLOCKS_MAX < 2 * (TICK_DEADLINE as u32));
 
 /// Whether `mask` in `addr` clears soon enough. Everything that syncs to the
@@ -293,12 +294,12 @@ const TICK: u8 = 1 << 0;
 const OVERDUE: u8 = 1 << 0;
 
 /// Whether both PWM channels are really at 0, not only their BUF registers,
-/// which reach CMPn at the next BOTTOM. The datasheet doesn't say whether
-/// `set_output` writing CNT counts as one, so this reads the real thing. PER
-/// lands on the same update, and the longest cycle is well inside a tick. The
-/// buffers have to be empty too, or the first pass's off, which leaves the
-/// compares at 0 as they were, would freeze with an update still pending, as
-/// the datasheet only promises TCA0 runs in idle (section 20.3.6).
+/// which reach CMPn at the next BOTTOM. The buffers have to be empty too, or
+/// the chip would freeze with an update still pending, as the datasheet only
+/// promises TCA0 runs in idle (section 20.3.6). `set_output`'s UPDATE command
+/// empties them as the output goes off, so this is normally true on that pass.
+/// If TCA0 ignores the command, it stays false, and the chip idles with the
+/// compares at 0, which is still off.
 fn output_settled() -> bool {
     const PENDING: u8 = regs::TCA_PERBV | regs::TCA_CMP0BV | regs::TCA_CMP1BV;
     read(reg::TCA0_CTRLFSET) & PENDING == 0
@@ -309,9 +310,9 @@ fn output_settled() -> bool {
 /// Sets up the sleep that [`wait_for_tick`] goes on to do. `rest` is
 /// `Torch::resting`.
 ///
-/// Power-down stops TCA0 where it is, so it waits until the compares are at
-/// 0, which `set_output` sees to as the output goes off. The datasheet doesn't say
-/// what level a waveform output holds in sleep, so CMPnEN goes off too,
+/// Power-down stops TCA0 where it is, so it waits until the output's settled,
+/// which `set_output` sees to as it goes off. The datasheet doesn't say what
+/// level a waveform output holds in sleep, so CMPnEN goes off too,
 /// handing the pins to PORT, whose OUT is 0: the FET can't freeze on. They
 /// come back only while the compares are 0, or they'd glitch the old duty.
 /// It also turns the ADC and its forced reference off. The datasheet gives
