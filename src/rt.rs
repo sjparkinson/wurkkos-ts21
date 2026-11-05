@@ -645,10 +645,10 @@ global_asm!(
     // to stop here. Clearing CMPnEN hands both pins back to PORT, and
     // they're still outputs with OUT at 0, so they go low. CTRLB isn't
     // double-buffered (DS40002204A §20.3.3.2), so that's most likely at
-    // once, but the datasheet gives no delay, and `hw::prepare_sleep` only
-    // ever does this with the compares at 0. Dropping a pin mid-pulse is
-    // still to check on a real light. This uses no stack, since RAM's just
-    // been shown to be broken.
+    // once, but the datasheet gives no delay. `hw::set_output` does the same
+    // on every turn-off, so dropping a pin mid-pulse is routine, and still to
+    // check on a real light. This uses no stack, since RAM's just been shown
+    // to be broken.
     //
     // Interrupts stay off, and nothing here touches the watchdog, which is
     // only fed from the main loop. So it resets the chip about 67 WDT clocks
