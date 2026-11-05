@@ -7,7 +7,7 @@ What I'd build for the TS21 if I started again without looking at the firmware i
 Less than the name suggests, so here's the list.
 
 - **Read:** `vendor/`, `docs/hardware.md`, `docs/toolchain.md`, `.cargo/config.toml`, and CLAUDE.md, which is loaded whether I like it or not.
-- **Not read:** `../src`, `docs/ui.md`, `docs/roadmap.md`, `../link.x`, or Anduril.
+- **Not read while designing:** `../src`, `docs/ui.md`, `docs/roadmap.md`, `../link.x`, or Anduril. I read the first three afterwards, for the comparison at the end of this file. The design above that section didn't change as a result.
 - **Leaks:** `docs/hardware.md` isn't only hardware. It told me the existing firmware runs at 5 MHz, uses single-slope PWM with a period of 254, and has cut-offs near 3 V. I ended up with the same clock and the same 3 V, and I can't claim I'd have got there alone. Pins, LED channels and calibration constants trace back to Anduril through that file.
 - **After the design froze:** the tests borrow the CPU core in `../xtask/src/avr.rs`, which is a generic AVR with no torch in it. Nothing else from xtask is used, and the chip around it is new.
 
@@ -31,7 +31,7 @@ Less than the name suggests, so here's the list.
 
 **No EEPROM.** RAM survives power-down, so the memorised level only goes when the cell comes out. That's a whole peripheral, its wear and its failure modes gone, for losing one number at a battery swap.
 
-**Unused pins get their input buffers disabled** rather than pull-ups. Nothing can float into a buffer that isn't there, and it can't push current into anything the board might have wired up. PA0 is the exception: it's UPDI, so it stays as reset left it.
+**Unused pins get their input buffers disabled**, with no pull-ups. Nothing can float into a buffer that isn't there. PA0 is the exception: it's UPDI, so it stays as reset left it. Main disables the buffers too and adds pull-ups, so the only difference is the pull-up, and I've no evidence either way on which is better.
 
 ## The UI
 
@@ -65,8 +65,8 @@ The host models earned their keep. My first governor stepped by whole levels and
 
 **Open risks from the datasheet review:**
 
-- **The shared 1.1 V reference rests on an assumption.** The datasheet calls `MUXPOS` INTREF the "internal reference (from VREF peripheral)" and never says its level follows `ADC0REFSEL`. Likely, not confirmed. If it doesn't, every battery reading is wrong, so check this first: blink the voltage against a meter before trusting anything else.
-- **Channel settling isn't specified.** I swap channel and start converting in the same breath. `INITDLY` covers a change to an internal reference, but nothing says it covers a `MUXPOS` change or the switch back to VDD. If the first reading of each channel looks off, set the channel on one tick and start on the next.
+- **The shared 1.1 V reference rests on an inference.** The datasheet calls `MUXPOS` INTREF the "internal reference (from VREF peripheral)" and never says its level follows `ADC0REFSEL`. Anduril sets `ADC0REFSEL` to 1.5 V and gets correct volts from INTREF, so it almost certainly does. Likely, not confirmed. The real cost is calibration: the 0614 slope was fitted at 1.5 V and I ignore it, and the two references have their own errors, so blink the voltage against a meter before trusting it.
+- **Channel settling isn't specified.** I swap channel and start converting in the same breath. `INITDLY` covers a change to an internal reference, but nothing says it covers a `MUXPOS` change or the switch back to VDD. Main throws away the first conversion after every switch, and I should too.
 ## Size
 
 | | Flash | RAM | Stack |
@@ -74,7 +74,39 @@ The host models earned their keep. My first governor stepped by whole levels and
 | This | 3,406 B | 0 | 80 B |
 | `../src` | 5,312 B | 0 | 110 B |
 
-Don't read much into that. The existing firmware has a flash CRC at the very least, and I haven't looked at what else it does. Its RAM is 0 too, so the no-statics idea wasn't new.
+That's a difference in what each one spends flash on, not in how tight the code is. Main's UI is click on, click off, and its FET never turns on. It spends the rest on self-tests, plausibility checks and thermal prediction. This has ramping, turbo and lockout and almost none of that safety. Main's RAM is 0 too, so the no-statics idea wasn't new.
+
+## Compared with main
+
+Written after reading `../src`, so none of this fed the design above. Keep main. For a first flash its order is the right one: prove the hardware with the FET off, then add the UI.
+
+**Where this design is worse:**
+
+- **It has no clock while off.** I stop the PIT in power-down, so a sleeping torch can't tell ten seconds from a week. A near-flat cell that rests above 3.2 V gets its full ceiling back after any off and on, which is what `FORGET_TICKS` in `battery.rs` exists to stop. The current this saves doesn't matter: the amber LED draws about 50 µA on its own.
+- **Broken sensors fail open.** An ADC stuck at 0 reads as a full, cool torch, on an unprotected cell. Main checks readings are plausible and drops to the linear channel.
+- **Channel tracking lives in a register.** Using `MUXPOS` as the record of which channel was read caused the stale `RESRDY` bug, in the one file with no host tests. Main's `sensors::Schedule` is in the library.
+- **No self-tests.** Main checks the fuses and the flash CRC and refuses the FET on a failure. Nothing here would notice a half-written flash.
+- **It trusts `ADC0.CALIB`'s reset value.** The ATDF and the datasheet disagree on it, and main writes it explicitly. Generating registers from the ATDF is safe for addresses and masks, but not for reset values.
+
+**Ideas that might be worth moving to main:**
+
+- Dropping the `PORTA` interrupt, since the PIT already wakes it every tick.
+- Generating registers from the ATDF in place of `regs.rs` and the checks in `xtask/src/atdf.rs`.
+- Comparing voltage in ADC counts, which would take `centivolts()` out of the running code. Thermal's trend logic does want kelvin, so that one stays.
+- Skipping EEPROM, because RAM survives power-down.
+- The governor's single rule for FET sag, which needs testing on a real cell.
+- Floor-then-memory, for the `fancy-ui` branch.
+
+**Thermal:** `examples/thermal_shootout.rs` runs main's `Thermal` and this `Governor` on the same plants at 45 °C.
+
+| 45 s sensor lag | Peak sensor | Peak head | Over 46 °C | Swing | Worst 1 s jump |
+|---|---|---|---|---|---|
+| Main | 49.2 °C | 59.1 °C | 146 s | 6.9× | 1.41× |
+| This | 50.9 °C | 60.1 °C | 193 s | 3.6× | 1.23× |
+| Main, no lookahead | 51.8 °C | 61.9 °C | 815 s | 8.1× | 1.37× |
+| Main, lookahead doubled | 47.1 °C | 57.3 °C | 47 s | 2.2× | 1.46× |
+
+Lookahead clearly helps main, and main peaks lower, but this gets close without it and swings about half as much. Doubling the lookahead makes the plants that were steady start to hunt, so the right value depends on the lag. That lag matters more than either controller: at 45 s the head reaches about 60 °C under a 45 °C limit with both, and at 120 s about 73 °C. The plants are guesses, so measure the lag on a real light before tuning anything.
 
 ## Running it
 
