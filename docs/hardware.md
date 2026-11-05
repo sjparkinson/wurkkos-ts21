@@ -14,7 +14,7 @@ Anduril builds model 0614 from `hw/sofirn/sp36-t1616`, which includes `hw/sofirn
 
 | Pin | Job | Notes |
 |---|---|---|
-| PA5 | Side switch | Active low with the internal pull-up, interrupt on both edges |
+| PA5 | Side switch | Active low with the internal pull-up, polled every tick, no interrupt |
 | PB0 | FET channel | TCA0 WO0 (CMP0) |
 | PB1 | Linear channel ("1×7135") | TCA0 WO1 (CMP1) |
 | PB5 | Aux LED | Single channel, likely the button LED's amber element (see [the button LED](#the-button-led)) |

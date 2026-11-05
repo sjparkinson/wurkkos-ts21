@@ -416,7 +416,7 @@ mod tests {
             (regs::addr::GPIO_GPIOR0, "GPIO", None, "GPIOR0", 1),
             (regs::addr::SLPCTRL_CTRLA, "SLPCTRL", None, "CTRLA", 1),
             (regs::addr::RTC_PITINTCTRL, "RTC", None, "PITINTCTRL", 1),
-            (regs::addr::PORTA_INTFLAGS, "PORTA", None, "INTFLAGS", 1),
+            (crate::sim::PORTA_INTFLAGS, "PORTA", None, "INTFLAGS", 1),
             (regs::addr::CRCSCAN_CTRLA, "CRCSCAN", None, "CTRLA", 1),
             (regs::addr::CRCSCAN_CTRLB, "CRCSCAN", None, "CTRLB", 1),
             (regs::addr::CRCSCAN_STATUS, "CRCSCAN", None, "STATUS", 1),
@@ -522,11 +522,6 @@ mod tests {
                 regs::PORT_PULLUPEN,
                 pinctrl.mask("PULLUPEN"),
                 "PORT.PINnCTRL.PULLUPEN",
-            ),
-            (
-                regs::PORT_ISC_BOTHEDGES,
-                pinctrl.value("ISC", "BOTHEDGES"),
-                "PORT.PINnCTRL.ISC=BOTHEDGES",
             ),
             (
                 regs::PORT_ISC_INPUT_DISABLE,
@@ -650,11 +645,6 @@ mod tests {
                 "RTC.PITINTCTRL.PI",
             ),
             (
-                regs::PORT_INT_ALL,
-                atdf.register("PORTA", None, "INTFLAGS").mask("INT"),
-                "PORT.INTFLAGS.INT",
-            ),
-            (
                 regs::SLPCTRL_SEN,
                 atdf.register("SLPCTRL", None, "CTRLA").mask("SEN"),
                 "SLPCTRL.CTRLA.SEN",
@@ -734,7 +724,7 @@ mod tests {
     fn vector_numbers_match_the_atdf() {
         let atdf = Atdf::load();
         for (ours, instance, name) in [
-            (regs::VECTOR_PORTA_PORT, "PORTA", "PORT"),
+            (crate::sim::VECTOR_PORTA_PORT, "PORTA", "PORT"),
             (regs::VECTOR_RTC_PIT, "RTC", "PIT"),
             (crate::sim::VECTOR_PORTB_PORT, "PORTB", "PORT"),
             (crate::sim::VECTOR_PORTC_PORT, "PORTC", "PORT"),

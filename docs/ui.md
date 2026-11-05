@@ -71,6 +71,6 @@ The examples break a byte of flash with `flash:corrupt`, and set a fuse byte wit
 | What | Does | Status |
 |---|---|---|
 | Button LED | The amber LED under the switch glows dimly whenever there's a cell in, on or off, so you can find the torch in the dark. It's lit by the pin's pull-up, so it costs microamps. The blue one is the charger's | Done |
-| Sleep when off | Powers down and wakes on the switch, so the light can sit in a drawer for a year | Done |
+| Sleep when off | Powers down between ticks and looks at the switch when it wakes, so the light can sit in a drawer for a year | Done |
 
 It powers down whenever the light's off and no click is being counted, and wakes 64 times a second to look at the switch and feed the watchdog. That should cost the chip around 10 µA, but it's sums from the datasheet and the simulator, not measured on a light. The button LED takes more than that, 50 to 64 µA going by the [teardown's measurements](hardware.md#the-button-led), so with it the torch should use about 600 mAh a year, before whatever the rest of the driver draws. See the [roadmap](roadmap.md).
