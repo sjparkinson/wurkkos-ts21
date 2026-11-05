@@ -45,8 +45,19 @@ const _: () = assert!(PORTB_OUTPUTS & 1 << AUX == 0);
 /// buffer, so this still lights the button LED on PB5.
 const UNUSED_PIN: u8 = regs::PORT_PULLUPEN | regs::PORT_ISC_INPUT_DISABLE;
 
-/// TCA0.CTRLB with both PWM channels on their pins.
-const TCA_DRIVING: u8 = regs::TCA_CMP0EN | regs::TCA_CMP1EN | regs::TCA_WGMODE_SINGLESLOPE;
+/// TCA0.CTRLB with the linear channel on its pin.
+const TCA_LINEAR: u8 = regs::TCA_CMP1EN | regs::TCA_WGMODE_SINGLESLOPE;
+
+/// TCA0.CTRLB for `output`. WO0 only gets the FET's pin at a level that uses
+/// it, so a stopped TCA0 holding WO0 high can't turn the FET on at a linear
+/// level, or on a chip that's refused it.
+const fn tca_driving(output: Output) -> u8 {
+    if output.fet != 0 {
+        TCA_LINEAR | regs::TCA_CMP0EN
+    } else {
+        TCA_LINEAR
+    }
+}
 
 /// The buffer valid flags of a whole row: PERBUF and both CMPnBUFs.
 const TCA_ROW: u8 = regs::TCA_PERBV | regs::TCA_CMP0BV | regs::TCA_CMP1BV;
@@ -714,6 +725,6 @@ pub fn set_output(output: Output) {
         write16(reg::TCA0_CMP0, 0);
         write16(reg::TCA0_CMP1, 0);
     } else {
-        write(reg::TCA0_CTRLB, TCA_DRIVING);
+        write(reg::TCA0_CTRLB, tca_driving(output));
     }
 }
