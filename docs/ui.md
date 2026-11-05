@@ -47,8 +47,8 @@ The light runs at the lowest of the UI's level, the thermal ceiling, the battery
 | Main clock badly wrong, on | Off within a second, for good | `1C wait:1s clk:400% wait:2s 1C` → off | Done |
 | 32 kHz oscillator badly wrong from power-on | Off for good, before a click can turn it on | `osc:200% 1C wait:2s` → off | Done |
 | TCA0 stopped, on | Off within a second, for good | `1C wait:1s tca:stopped wait:2s 1C` → off | Done |
-| TCA0 stopped, then 1C | Off as usual, and for good at the next power-on count | `1C wait:1s tca:stopped 1C wait:3s` → off | Done |
-| 32 kHz oscillator stops during a count | Off for good, as above | `1C wait:576ms osc:dead wait:3s` → off | Done |
+| TCA0 stopped, then 1C | Off as usual, and for good at the next count while it's on | `1C wait:1s tca:stopped 1C wait:3s 1C wait:2s 1C wait:1s` → off | Done |
+| 32 kHz oscillator stops during a count | Off for good, as above | `1C wait:576ms osc:dead wait:3s 1C` → off | Done |
 | TCA0 and the 32 kHz oscillator both stop during a count | Off for good, as above | `1C wait:576ms osc:dead tca:stopped wait:3s 1C` → off | Done |
 | A clock badly wrong only while the torch rests | Nothing, since nothing's counted at rest | `wait:1s osc:40% wait:1s osc:100% wait:1s 1C wait:1s` → level 50 | Done |
 | Clocks at the edge of their spread | Nothing. The 32 kHz oscillator alone can be 30% out on a good chip | `osc:130% 1C wait:2s` → level 50 | Done |

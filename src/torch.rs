@@ -374,6 +374,32 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_timer_fails_at_the_next_count_while_its_on_and_for_good() {
+        let mut rig = Rig::new();
+        rig.tick(false);
+        rig.torch.clock(306);
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        // TCA0 stops here. Off is as usual, and nothing's counted at rest.
+        rig.click();
+        assert_eq!(rig.level(), 0);
+        rig.run(false, 3 * 64);
+        assert!(!rig.torch.clock_due());
+        assert!(!rig.torch.clock_failed());
+        // The next time it's on, the count comes to nothing.
+        rig.click();
+        assert_eq!(rig.level(), LEVEL);
+        while !rig.torch.clock_due() {
+            rig.tick(false);
+        }
+        rig.torch.clock(0);
+        rig.tick(false);
+        assert_eq!(rig.level(), 0);
+        rig.click();
+        assert_eq!(rig.level(), 0, "for good");
+    }
+
+    #[test]
     fn counts_the_clock_after_the_first_tick_then_once_a_second_while_on() {
         let mut rig = Rig::new();
         assert!(!rig.torch.clock_due());
