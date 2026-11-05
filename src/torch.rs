@@ -336,6 +336,11 @@ mod tests {
             assert_eq!(rig.level(), LEVEL);
             rig.torch.clock(clocks);
             rig.tick(false);
+            // A low count gets a second go; the rest have already failed.
+            if rig.torch.clock_due() {
+                rig.torch.clock(clocks);
+                rig.tick(false);
+            }
             assert_eq!(rig.level(), 0, "{clocks}");
             assert!(rig.torch.resting(), "{clocks}");
             assert_eq!(rig.torch.convert(), None, "{clocks}");
@@ -356,10 +361,28 @@ mod tests {
             rig.tick(false);
             assert!(rig.torch.clock_due());
             rig.torch.clock(clocks);
+            rig.tick(false);
+            if rig.torch.clock_due() {
+                rig.torch.clock(clocks);
+            }
             rig.click();
             assert_eq!(rig.level(), 0, "{clocks}");
             assert!(rig.torch.resting(), "{clocks}");
         }
+    }
+
+    #[test]
+    fn one_low_count_leaves_the_light_on_if_the_next_is_good() {
+        let mut rig = Rig::new();
+        rig.click();
+        rig.torch.clock(CLOCKS_MIN / 2);
+        rig.tick(false);
+        assert_eq!(rig.level(), LEVEL);
+        assert!(rig.torch.clock_due());
+        rig.torch.clock(306 * 255);
+        rig.tick(false);
+        assert_eq!(rig.level(), LEVEL);
+        assert!(!rig.torch.clock_failed());
     }
 
     #[test]
@@ -393,6 +416,8 @@ mod tests {
         while !rig.torch.clock_due() {
             rig.tick(false);
         }
+        rig.torch.clock(0);
+        rig.tick(false);
         rig.torch.clock(0);
         rig.tick(false);
         assert_eq!(rig.level(), 0);

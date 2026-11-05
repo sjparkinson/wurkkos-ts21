@@ -191,6 +191,14 @@ const _: () = {
 /// of them, the PIT or TCA0 is broken, and the torch turns off and stays off
 /// until the cell comes out.
 ///
+/// A count under the floor gets a second go on the very next tick, and only
+/// two in a row fail. A lost long-to-short row can take up to 4,094 clocks off
+/// one count, which is more than the floor's margin at the worst corner, and
+/// the floor can't drop far enough to cover it without letting a tick at twice
+/// its rate through. A real fault fails both counts, a tick later. A count
+/// over the ceiling, or with no tick at all, fails at once: nothing good
+/// over-counts.
+///
 /// The firmware counts once at power-on and then every
 /// [`CLOCK_CHECK_TICKS`] while the light's on. It doesn't count at rest, since
 /// TCA0 stops in power-down, and a torch that's off isn't doing anything a
@@ -204,6 +212,8 @@ pub struct ClockCheck {
     /// Whether the power-on count has happened.
     counted: bool,
     due: bool,
+    /// The last count was under the floor, so the next one decides.
+    suspect: bool,
     failed: bool,
 }
 
@@ -213,6 +223,7 @@ impl ClockCheck {
             wait: 1,
             counted: false,
             due: false,
+            suspect: false,
             failed: false,
         }
     }
@@ -222,17 +233,17 @@ impl ClockCheck {
         self.due
     }
 
-    /// Call once a tick, with the torch `resting` or not.
+    /// Call once a tick, with the torch `resting` or not. A second go runs at
+    /// rest too, so a bad power-on count is settled before a click can land.
     pub fn tick(&mut self, resting: bool) {
-        let running = !resting || !self.counted;
+        let running = !resting || !self.counted || self.suspect;
         if running {
             self.wait = self.wait.saturating_sub(1);
         }
         self.due = running && self.wait == 0 && !self.failed;
     }
 
-    /// The clocks counted between two ticks, or [`NO_TICK`], with `top` the
-    /// cycle in use, in clocks.
+    /// Whether a count passes, with `top` the cycle in use, in clocks.
     ///
     /// The count is whole cycles, so it can be a part-cycle out at each end:
     /// the last cycle hadn't finished when the tick came, and the first had
@@ -241,11 +252,24 @@ impl ClockCheck {
     /// same at any level. It's 16 of the shortest cycles at the longest PWM.
     /// The ceiling doesn't move, since it already has a longest cycle to
     /// spare, and a good chip is nowhere near it.
+    pub const fn in_window(clocks: u32, top: u16) -> bool {
+        clocks <= CLOCKS_MAX && clocks + top as u32 >= CLOCKS_MIN
+    }
+
+    /// The clocks counted between two ticks, or [`NO_TICK`], with `top` the
+    /// cycle in use, in clocks.
     pub fn result(&mut self, clocks: u32, top: u16) {
         self.counted = true;
         self.due = false;
         self.wait = CLOCK_CHECK_TICKS;
-        self.failed |= clocks > CLOCKS_MAX || clocks + u32::from(top) < CLOCKS_MIN;
+        if Self::in_window(clocks, top) {
+            self.suspect = false;
+        } else if clocks > CLOCKS_MAX || self.suspect {
+            self.failed = true;
+        } else {
+            self.suspect = true;
+            self.wait = 1;
+        }
     }
 
     /// Whether any count has failed. It never clears.
@@ -395,11 +419,9 @@ mod tests {
     /// What a good chip's count comes to with nothing wrong.
     const GOOD_COUNT: u32 = 306 * SHORT as u32;
 
-    /// Whether a fresh check passes this count, with cycles of `top` clocks.
+    /// Whether this count passes, with cycles of `top` clocks.
     fn passes(clocks: u32, top: u16) -> bool {
-        let mut check = ClockCheck::new();
-        check.result(clocks, top);
-        !check.failed()
+        ClockCheck::in_window(clocks, top)
     }
 
     #[test]
@@ -477,11 +499,64 @@ mod tests {
         let mut check = ClockCheck::new();
         check.tick(true);
         check.result(0, SHORT);
+        check.tick(true);
+        check.result(0, SHORT);
         for _ in 0..2 * u16::from(CLOCK_CHECK_TICKS) {
             check.tick(false);
             assert!(!check.due());
         }
         check.result(GOOD_COUNT, SHORT);
         assert!(check.failed());
+    }
+
+    #[test]
+    fn one_low_count_is_counted_again_on_the_next_tick_even_at_rest() {
+        for resting in [false, true] {
+            let mut check = ClockCheck::new();
+            check.tick(true);
+            check.result(0, SHORT);
+            assert!(!check.failed());
+            check.tick(resting);
+            assert!(check.due(), "resting: {resting}");
+        }
+    }
+
+    #[test]
+    fn two_low_counts_in_a_row_fail() {
+        let mut check = ClockCheck::new();
+        check.tick(false);
+        check.result(CLOCKS_MIN / 2, SHORT);
+        check.tick(false);
+        check.result(CLOCKS_MIN / 2, SHORT);
+        assert!(check.failed());
+    }
+
+    #[test]
+    fn a_good_second_count_clears_a_low_one_and_goes_back_to_once_a_second() {
+        let mut check = ClockCheck::new();
+        check.tick(false);
+        check.result(CLOCKS_MIN / 2, SHORT);
+        check.tick(false);
+        check.result(GOOD_COUNT, SHORT);
+        assert!(!check.failed());
+        for _ in 0..CLOCK_CHECK_TICKS - 1 {
+            check.tick(false);
+            assert!(!check.due());
+        }
+        check.tick(false);
+        assert!(check.due());
+        // So a later low count is a first one again, not a second.
+        check.result(CLOCKS_MIN / 2, SHORT);
+        assert!(!check.failed());
+    }
+
+    #[test]
+    fn a_high_count_or_no_tick_fails_without_a_second_go() {
+        for clocks in [CLOCKS_MAX + 1, NO_TICK] {
+            let mut check = ClockCheck::new();
+            check.tick(false);
+            check.result(clocks, SHORT);
+            assert!(check.failed(), "{clocks}");
+        }
     }
 }

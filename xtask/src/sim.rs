@@ -732,9 +732,8 @@ fn pwm_probe_in(elf: &Elf, world: World, adverse: bool) -> Result<(), String> {
                      with cycles of {was} then {top}"
                 ));
             }
-            let mut check = selftest::ClockCheck::new();
-            check.result(clocks, top);
-            if check.failed() {
+            // In the window outright, so this can't lean on the second go.
+            if !selftest::ClockCheck::in_window(clocks, top) {
                 return Err(format!(
                     "a good chip failed the clock check at level {level}, on {clocks} clocks"
                 ));
