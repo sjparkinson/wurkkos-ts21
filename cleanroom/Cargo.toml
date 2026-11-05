@@ -28,3 +28,6 @@ opt-level = "s"
 lto = "fat"
 codegen-units = 1
 debug = true
+
+[dev-dependencies]
+ts21 = { path = ".." }
