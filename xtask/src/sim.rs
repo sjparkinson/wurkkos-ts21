@@ -2085,6 +2085,9 @@ fn in_step(
     Ok(rig.level())
 }
 
+/// Instructions a landed handler can take. The real ones take tens.
+const HANDLER_BUDGET: u32 = 2_000;
+
 struct Sim {
     cpu: Cpu,
     chip: Chip,
@@ -2110,6 +2113,8 @@ struct Sim {
     /// `tcb0_int`s so far that `Landings` set off, and that gave everything
     /// back.
     deadlines_landed: u32,
+    /// Steps in a row with `landing_stops_time`, for `HANDLER_BUDGET`.
+    stopped_steps: u32,
     /// Set to land interrupts on purpose, mid-pass.
     landings: Option<Landings>,
     /// What `testing` goes back to on a reset, since startup runs again.
@@ -2168,6 +2173,7 @@ impl Sim {
             mid_access: 0,
             ticks_landed: 0,
             deadlines_landed: 0,
+            stopped_steps: 0,
             landings: None,
             ram_tested: None,
             marker: SRAM.start,
@@ -2233,9 +2239,21 @@ impl Sim {
         } else {
             self.cpu.step(&mut self.chip)?;
             self.watch_handler(handling)?;
-            if awake && !self.landing_stops_time(handling) {
-                self.executed += 1;
-                self.chip.elapse()?;
+            if self.landing_stops_time(handling) {
+                // Neither time nor `executed` moves here, so nothing else
+                // would stop a handler that spins.
+                self.stopped_steps += 1;
+                if self.stopped_steps > HANDLER_BUDGET {
+                    return Err(format!(
+                        "{pc:#06x}: a handler ran past {HANDLER_BUDGET} instructions"
+                    ));
+                }
+            } else {
+                self.stopped_steps = 0;
+                if awake {
+                    self.executed += 1;
+                    self.chip.elapse()?;
+                }
             }
         }
         if let Some(flag) = self.chip.pending_reset.take() {
