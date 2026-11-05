@@ -361,6 +361,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         ram_tested: ram_tested / 2,
     };
     periodic_faults(&power_on, &late).map_err(|e| format!("periodic RAM test: {e}"))?;
+    jump_to_reset(&power_on).map_err(|e| format!("a jump to the reset vector: {e}"))?;
 
     let mut report = Report {
         stack: 0,
@@ -1474,6 +1475,29 @@ fn without_the_march(
             from * 2
         )),
     }
+}
+
+/// Instructions from the reset vector to TCA0 letting go of the pins: `jmp`,
+/// `sbi`s, the first of the register test, and a few in hand.
+const PINS_OFF_INSTRUCTIONS: u32 = 300;
+
+/// Something jumps to the reset vector with the light on. There's been no
+/// reset, so TCA0's still driving the pins, and startup has to stop that
+/// before it spends 85 ms on the RAM test, or longer.
+fn jump_to_reset(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<(), String> {
+    let mut sim = switched_on(power_on)?;
+    sim.cpu = Cpu::new(&SRAM);
+    sim.testing = sim.ram_tested;
+    for _ in 0..PINS_OFF_INSTRUCTIONS {
+        sim.step()?;
+        if sim.chip.leds() == (0, 0) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "the light's still at {:?} after {PINS_OFF_INSTRUCTIONS} instructions",
+        sim.chip.leds()
+    ))
 }
 
 /// Word addresses `periodic_faults` follows a fault through.
@@ -3036,7 +3060,8 @@ impl Bus for Chip {
                 self.io[a] = value;
             }
             reg::TCA0_CTRLB => {
-                if value & TCA_WGMODE != regs::TCA_WGMODE_SINGLESLOPE {
+                // 0 is its reset value, which startup puts back.
+                if value != 0 && value & TCA_WGMODE != regs::TCA_WGMODE_SINGLESLOPE {
                     return Err(format!(
                         "writes {value:#04x} to TCA0.CTRLB: PWM_CYCLE and the duty \
                          cycles assume single-slope"

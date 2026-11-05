@@ -102,6 +102,12 @@ global_asm!(
     // been tested yet. VPORTB.DIR sits low enough in I/O space for it.
     "  sbi {vportb_dir}, {fet}",
     "  sbi {vportb_dir}, {linear}",
+    // Something can get here without a reset at all, by jumping to the reset
+    // vector, and then everything's as it was: interrupts could still be on,
+    // and TCA0 still driving the pins, whatever `sbi` did, since CMPnEN
+    // overrides PORT (section 20.3.3.4.5). So interrupts go off here, and
+    // the channels as soon as r16 has been shown to work, below.
+    "  cli",
     //
     // # The CPU register test (AN2632 §3.1 and §5)
     //
@@ -146,6 +152,14 @@ global_asm!(
     "  cpi r\\reg, {b}",
     "  or_fail",
     ".endr",
+    // Take the channels off the pins, on every reset, since it costs nothing
+    // and nothing can tell a jump here from a reset yet. CTRLB's reset value
+    // does it, and zero's the one value a short between two of r16's bits,
+    // which this can't have seen yet, leaves alone. If a register has already
+    // failed, a jump leaves the channels on, but the watchdog's still running
+    // then too, and its reset turns TCA0 off.
+    "  ldi r16, 0",
+    "  sts {tca0_ctrlb}, r16",
     // r0 to r15 can't, so the value goes through r16, which passed above.
     // r16 gets the opposite pattern before it reads the register back, so
     // a register that reads as r16 doesn't pass by echoing it.
@@ -493,7 +507,10 @@ global_asm!(
     // low, interrupts off, and the watchdog off, since nothing has started
     // it and the factory WDTCFG fuse doesn't (a fuse that did would reset
     // the chip into the tests again, which stays just as dark), so nothing
-    // happens until the cell comes out. The button LED stays
+    // happens until the cell comes out. That's after a real reset. After a
+    // jump to the reset vector, which leaves the peripherals running, the
+    // watchdog's still counting. It resets the chip, the tests run again,
+    // and it's then that this stops for good. The button LED stays
     // dark too, since only `hw::init` turns its pull-up on, which is how to
     // tell this from a torch that's merely off. The `cli` is there for a
     // broken r16, which can put SREG's test pattern in with its I bit set.
