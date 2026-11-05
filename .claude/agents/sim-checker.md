@@ -19,7 +19,7 @@ Then look for places where the model and the datasheet (DS40002204) differ:
 - **Instructions:** in `avr.rs`, flag results (especially H, V, S and C on `sbc`/`sbci`/`cpc`, which chain Z), cycle counts if anything depends on them, and addressing modes.
 - **Tests:** each rule the sim enforces should have a test in `sim.rs`. Say which ones don't.
 
-Register addresses and masks come from `src/regs.rs`, which the ATDF already checks, so don't re-verify those. The `register-checker` agent covers how `src/hw.rs` uses them.
+Register addresses and masks come from `src/regs.rs`, which `build.rs` generates from the ATDF, so don't re-verify those. The `register-checker` agent covers how `src/hw.rs` uses them.
 
 Cite the datasheet section and revision letter for every claim about the chip. If you can't confirm a behaviour, say "can't confirm" instead of guessing; docs/hardware.md labels facts as confirmed or likely, and you should keep that split. Anduril (GPL-3.0) is fine to read for how real firmware treats a peripheral; cite it, don't copy it.
 
