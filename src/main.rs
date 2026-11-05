@@ -126,9 +126,9 @@ fn next_tick(torch: &mut ts21::torch::Torch) -> bool {
     use ts21::selftest::NO_TICK;
 
     if torch.clock_due() {
-        let overflows = hw::count_tick();
-        torch.clock(overflows);
-        return overflows != NO_TICK;
+        let clocks = hw::count_tick();
+        torch.clock(clocks);
+        return clocks != NO_TICK;
     }
     let ticked = hw::wait_for_tick(torch.resting());
     if !ticked {

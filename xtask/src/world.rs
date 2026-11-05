@@ -11,7 +11,7 @@ use std::mem;
 use std::str::FromStr;
 
 use ts21::ramp::PWM_TOP;
-use ts21::selftest::{Faults, Fuses, NO_TICK, OVERFLOWS_MAX};
+use ts21::selftest::{CLOCKS_MAX, Faults, Fuses, NO_TICK};
 use ts21::sensors::Channel;
 use ts21::testing::{Adc, temperature_reading, voltage_reading};
 use ts21::torch::Torch;
@@ -571,9 +571,9 @@ impl World {
         tca_stopped: false,
     };
 
-    /// TCA0 overflows between two ticks in this world, to the nearest below,
-    /// or `NO_TICK` with no ticks.
-    pub fn overflows(&self) -> u16 {
+    /// TCA0's clocks between two ticks in this world, in whole shortest
+    /// cycles, or `NO_TICK` with no ticks.
+    pub fn clocks(&self) -> u32 {
         if self.osc32k == 0 {
             return NO_TICK;
         }
@@ -581,13 +581,14 @@ impl World {
             return 0;
         }
         let cycles = 5_000_000 * u64::from(self.main_clock) / u64::from(self.osc32k);
-        (cycles / u64::from(PWM_TOP) / u64::from(ts21::TICKS_PER_SECOND)) as u16
+        let cycles = cycles / u64::from(ts21::TICKS_PER_SECOND);
+        (cycles / u64::from(PWM_TOP) * u64::from(PWM_TOP)) as u32
     }
 
     /// Whether the tick's so late that the firmware gives up on it, rather
     /// than waiting to count it.
     pub fn overdue(&self) -> bool {
-        self.overflows() > OVERFLOWS_MAX
+        self.clocks() > CLOCKS_MAX
     }
 
     /// Whether src/rt.rs's startup tests find a broken register or byte of
@@ -651,7 +652,7 @@ pub struct Rig {
     /// It's hung and been reset, which only happens the once.
     hung: bool,
     /// What the wait after the last tick counted, if it was a counted one.
-    counted: Option<u16>,
+    counted: Option<u32>,
 }
 
 impl Default for Rig {
@@ -697,8 +698,8 @@ impl Rig {
             self.torch = Torch::new(CALIBRATION, faults);
         }
         let pressed = pressed || mem::take(&mut self.owed_press);
-        if let Some(overflows) = self.counted.take() {
-            self.torch.clock(overflows);
+        if let Some(clocks) = self.counted.take() {
+            self.torch.clock(clocks);
         } else if world.osc32k == 0 || world.overdue() && !self.torch.resting() {
             // At rest TCB0 is stopped, so a late tick goes unseen. A dead
             // oscillator stays off that way anyway, since no tick ever comes
@@ -708,7 +709,7 @@ impl Rig {
         let event = self.torch.tick(pressed, self.adc.result());
         self.adc
             .start_with(self.torch.convert(), |channel| world.reading(channel));
-        self.counted = self.torch.clock_due().then(|| world.overflows());
+        self.counted = self.torch.clock_due().then(|| world.clocks());
         event
     }
 
@@ -1051,22 +1052,22 @@ mod tests {
     }
 
     #[test]
-    fn overflows_follow_the_two_clocks() {
+    fn clocks_follow_the_two_clocks() {
         let world = |osc32k, main_clock| World {
             osc32k,
             main_clock,
             ..World::NORMAL
         };
-        assert_eq!(World::NORMAL.overflows(), 306);
-        assert_eq!(world(50, 100).overflows(), 612);
-        assert_eq!(world(100, 200).overflows(), 612);
-        assert_eq!(world(200, 100).overflows(), 153);
-        assert_eq!(world(0, 100).overflows(), NO_TICK);
+        assert_eq!(World::NORMAL.clocks(), 306 * 255);
+        assert_eq!(world(50, 100).clocks(), 612 * 255);
+        assert_eq!(world(100, 200).clocks(), 612 * 255);
+        assert_eq!(world(200, 100).clocks(), 153 * 255);
+        assert_eq!(world(0, 100).clocks(), NO_TICK);
         let stopped = World {
             tca_stopped: true,
             ..World::NORMAL
         };
-        assert_eq!(stopped.overflows(), 0);
+        assert_eq!(stopped.clocks(), 0);
         assert!(world(0, 100).overdue() && world(50, 100).overdue());
         assert!(!World::NORMAL.overdue() && !stopped.overdue());
     }
