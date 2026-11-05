@@ -2044,8 +2044,10 @@ impl Sim {
                 pass_end.get_or_insert(self.executed);
             }
         }
-        if let Some((low, _)) = self.chip.temp {
-            return Err(format!("left {} half-written", name(low)));
+        // A counted wait polls right up to the tick, which can land between
+        // the two bytes of a read of PER. Interrupts are off, so it finishes.
+        if let (Some((low, _)), None) = (self.chip.temp, pass_end) {
+            return Err(format!("left {} half done", name(low)));
         }
         self.counted = pass_end.is_some();
         Ok(pass_end.unwrap_or(self.executed) - start)
@@ -2084,7 +2086,10 @@ struct Chip {
     ticks: u32,
     /// TCA0's 16-bit registers, in `WIDE`'s order.
     wide: [u16; 5],
-    /// TCA0's TEMP byte, and which register's low byte it holds.
+    /// TCA0's TEMP byte, and which register's access it's holding. There's
+    /// one for all the 16-bit registers (§20.5.13): a write puts the low byte
+    /// here for its high byte to meet, and a read of the low byte puts the
+    /// high byte here for the read after it. So either overwrites the other.
     temp: Option<(usize, u8)>,
     /// TCA0.CMP0 and CMP1, the live values.
     compare: [u16; 2],
@@ -2099,9 +2104,6 @@ struct Chip {
     lupd_broken: bool,
     /// In power-down, so TCA0's stopped.
     tca_frozen: bool,
-    /// The high byte of a CMPn, latched into TEMP by reading its low byte,
-    /// and which register that was.
-    compare_temp: Option<(usize, u8)>,
     /// The low byte of the TCA0 register the running handler caught halfway
     /// through an access, which is what it mustn't disturb.
     interrupted: Option<usize>,
@@ -2261,7 +2263,6 @@ impl Chip {
             lupd: false,
             lupd_broken: false,
             tca_frozen: false,
-            compare_temp: None,
             interrupted: None,
             power_downs: 0,
             world: World::NORMAL,
@@ -3415,7 +3416,7 @@ impl Chip {
     /// The low byte of the TCA0 register that's halfway through an access,
     /// with TEMP holding the other half.
     fn temp_held(&self) -> Option<usize> {
-        self.temp.or(self.compare_temp).map(|(low, _)| low)
+        self.temp.map(|(low, _)| low)
     }
 
     /// Refuses a handler's access to `a`, if it's one of TCA0's 16-bit
@@ -3428,9 +3429,9 @@ impl Chip {
         let Some(low) = self.interrupted else {
             return Ok(());
         };
-        // Beyond `WIDE`: what the firmware only reads or writes directly. CNT
-        // is in `WIDE` for its writes, and a read of it goes through TEMP too.
-        let live = [reg::TCA0_CMP0, reg::TCA0_CMP1, reg::TCA0_PER];
+        // CMP0 and CMP1 aren't in `WIDE`, since they're not plain storage. A
+        // read of CNT or PER goes through TEMP as much as a write does.
+        let live = [reg::TCA0_CMP0, reg::TCA0_CMP1];
         if WIDE.iter().chain(&live).any(|&w| w == a & !1) {
             return Err(format!(
                 "a handler touches {} with the main loop halfway through {}, and they \
@@ -3609,11 +3610,11 @@ impl Bus for Chip {
                     _ => self.compare[usize::from(a == reg::TCA0_CMP1)],
                 }
                 .to_le_bytes();
-                self.compare_temp = Some((a, hi));
+                self.temp = Some((a, hi));
                 Ok(lo)
             }
             _ if [reg::TCA0_PER, reg::TCA0_CMP0, reg::TCA0_CMP1].contains(&a.wrapping_sub(1)) => {
-                match self.compare_temp.take() {
+                match self.temp.take() {
                     Some((low, hi)) if low == a - 1 => Ok(hi),
                     _ => Err(format!(
                         "reads the high byte of {} without its low byte just before, \
@@ -4601,6 +4602,29 @@ mod tests {
             .write(reg::TCA0_CTRLESET as u16, regs::TCA_CMD_UPDATE)
             .unwrap_err();
         assert!(err.contains("UPDATE"), "{err}");
+    }
+
+    #[test]
+    fn tca0s_16_bit_registers_share_one_temp() {
+        let mut c = pwm_at(1);
+        let [perbuf, cmp0] = [reg::TCA0_PERBUF as u16, reg::TCA0_CMP0 as u16];
+        // A read's low byte overwrites a write's, and the other way round.
+        c.write(perbuf, 0x12).unwrap();
+        c.read(cmp0).unwrap();
+        let err = c.write(perbuf + 1, 0x34).unwrap_err();
+        assert!(err.contains("whatever TEMP held"), "{err}");
+
+        c.read(cmp0).unwrap();
+        c.temp = None;
+        c.write(perbuf, 0x12).unwrap();
+        let err = c.read(cmp0 + 1).unwrap_err();
+        assert!(err.contains("whatever TEMP held"), "{err}");
+
+        // One register's read doesn't finish another's.
+        let per = reg::TCA0_PER as u16;
+        c.temp = None;
+        c.read(per).unwrap();
+        assert!(c.read(cmp0 + 1).is_err());
     }
 
     #[test]
@@ -6018,7 +6042,7 @@ mod tests {
         for _ in 0..4 {
             s.step().unwrap();
         }
-        assert_eq!(s.chip.compare_temp, None);
+        assert_eq!(s.chip.temp, None);
     }
 
     /// Runs on through the handler to the error it has to end in.
