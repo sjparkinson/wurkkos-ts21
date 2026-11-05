@@ -41,6 +41,8 @@ mod probe {
 
     fn set(level: u8) {
         hw::set_output(ramp::output(level));
+        // As the next pass would, in case that row was lost.
+        hw::keep_output(ramp::output(level));
         PWM_PROBE_LEVEL.store(level, Relaxed);
         pwm_probe_landed();
     }
@@ -49,6 +51,9 @@ mod probe {
     /// output, then the counted wait for the next tick, so the first cycle
     /// counted can still be the last level's.
     fn count(level: u8) {
+        // The first can be a tick that came while the probe was busy, which
+        // is no place to start from.
+        hw::wait_for_tick(false);
         hw::wait_for_tick(false);
         hw::set_output(ramp::output(level));
         pwm_probe_counting(level);

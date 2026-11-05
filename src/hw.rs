@@ -48,6 +48,14 @@ const UNUSED_PIN: u8 = regs::PORT_PULLUPEN | regs::PORT_ISC_INPUT_DISABLE;
 /// TCA0.CTRLB with both PWM channels on their pins.
 const TCA_DRIVING: u8 = regs::TCA_CMP0EN | regs::TCA_CMP1EN | regs::TCA_WGMODE_SINGLESLOPE;
 
+/// The buffer valid flags of a whole row: PERBUF and both CMPnBUFs.
+const TCA_ROW: u8 = regs::TCA_PERBV | regs::TCA_CMP0BV | regs::TCA_CMP1BV;
+
+/// Goes at a row under LUPD before `set_output` lets it go for this pass. A
+/// go takes about 60 cycles, and BOTTOMs are at least 255 apart, so one or two
+/// is all it should ever need.
+const ROW_TRIES: u8 = 4;
+
 /// WDT clocks in a WDT.CTRLA WINDOW or PERIOD setting `n`, 1 to 11.
 const fn wdt_clocks(n: u8) -> u16 {
     8 << (n - 1)
@@ -296,15 +304,16 @@ const TICK: u8 = 1 << 0;
 const OVERDUE: u8 = 1 << 0;
 
 /// Whether both PWM channels are really at 0, not only their BUF registers,
-/// which reach CMPn at the next BOTTOM. The buffers have to be empty too, or
-/// the chip would freeze with an update still pending, as the datasheet only
-/// promises TCA0 runs in idle (section 20.3.6). `set_output`'s UPDATE command
-/// empties them as the output goes off, so this is normally true on that pass.
-/// If TCA0 ignores the command, it stays false, and the chip idles with the
-/// compares at 0, which is still off.
+/// which reach CMPn at the next BOTTOM. No BV can be set either, or the chip
+/// would freeze with an update still pending, as the datasheet only promises
+/// TCA0 runs in idle (section 20.3.6), and PER has to be the off row's, in
+/// case a row was lost. `set_output`'s UPDATE command clears BV as the output
+/// goes off, so this is normally true on that pass. If TCA0 ignores the
+/// command, it stays false, and the chip idles with the pins off TCA0, which
+/// is still off.
 fn output_settled() -> bool {
-    const PENDING: u8 = regs::TCA_PERBV | regs::TCA_CMP0BV | regs::TCA_CMP1BV;
-    read(reg::TCA0_CTRLFSET) & PENDING == 0
+    read(reg::TCA0_CTRLFSET) & TCA_ROW == 0
+        && read16(reg::TCA0_PER).wrapping_add(1) == Output::OFF.top
         && read16(reg::TCA0_CMP0) == 0
         && read16(reg::TCA0_CMP1) == 0
 }
@@ -622,6 +631,42 @@ pub fn switch_pressed() -> bool {
     read(reg::VPORTA_IN) & (1 << SWITCH) == 0
 }
 
+/// Writes `output` to the buffers, with LUPD set, and says whether all three
+/// are valid at the end of it. A BOTTOM can land between these writes. Section
+/// 20.5.6 says of LUPD that nothing's updated "even though an UPDATE condition
+/// has occurred", and section 20.3.3.2 says BV clears on an UPDATE condition,
+/// so the buffers written so far may lose their BV with nothing copied. Letting
+/// go of a part of a row then would be the tear LUPD is there to stop, so the
+/// flags get read back while it's still locked, and it goes again. If it never
+/// gets all three, it clears them, so that none of the row lands.
+fn write_row(output: Output) -> bool {
+    for _ in 0..ROW_TRIES {
+        write16(reg::TCA0_PERBUF, output.top - 1);
+        write16(reg::TCA0_CMP1BUF, output.linear);
+        write16(reg::TCA0_CMP0BUF, output.fet);
+        if read(reg::TCA0_CTRLFSET) & TCA_ROW == TCA_ROW {
+            return true;
+        }
+    }
+    write(reg::TCA0_CTRLFCLR, TCA_ROW);
+    false
+}
+
+/// Puts `output` right if it's been lost. A locked BOTTOM after `write_row`
+/// checked its flags can clear all three, which tears nothing, but it drops
+/// the row, and so does `write_row` giving up. So each pass compares what's
+/// live with what was asked for, unless an update's still on its way. A TCA0
+/// that's stopped leaves its flags up, so this leaves that alone.
+pub fn keep_output(output: Output) {
+    if read(reg::TCA0_CTRLFSET) & TCA_ROW == 0
+        && (read16(reg::TCA0_PER).wrapping_add(1) != output.top
+            || read16(reg::TCA0_CMP0) != output.fet
+            || read16(reg::TCA0_CMP1) != output.linear)
+    {
+        set_output(output);
+    }
+}
+
 /// Writes one level's period and compares. LUPD holds them all back until
 /// they're all written, so they land on the same UPDATE (section 20.5.6).
 /// Without it a BOTTOM between two writes would run a compare against the
@@ -631,7 +676,9 @@ pub fn switch_pressed() -> bool {
 /// BOTTOM comes while it's locked, the update waits for the next one, up to
 /// [`ts21::ramp::MAX_TOP`] clocks later. That the buffers stay valid over a
 /// locked BOTTOM is likely, not stated: section 20.5.2's ALUPD can't work
-/// otherwise. LUPD clears before CNT's written, in case that counts as BOTTOM.
+/// otherwise. This doesn't depend on it, though: see [`write_row`] and
+/// [`keep_output`]. LUPD clears before CNT's written, in case that counts as
+/// BOTTOM.
 ///
 /// Going off starts by handing the pins to PORT, whose OUT is 0, by clearing
 /// CMPnEN. That's what really turns the light off. A waveform output is a
@@ -656,10 +703,8 @@ pub fn set_output(output: Output) {
         write(reg::TCA0_CTRLB, regs::TCA_WGMODE_SINGLESLOPE);
     }
     write(reg::TCA0_CTRLESET, regs::TCA_LUPD);
-    write16(reg::TCA0_PERBUF, output.top - 1);
-    write16(reg::TCA0_CMP1BUF, output.linear);
-    write16(reg::TCA0_CMP0BUF, output.fet);
-    if off {
+    let whole = write_row(output);
+    if off && whole {
         write(reg::TCA0_CTRLESET, regs::TCA_CMD_UPDATE);
     }
     write(reg::TCA0_CTRLECLR, regs::TCA_LUPD);

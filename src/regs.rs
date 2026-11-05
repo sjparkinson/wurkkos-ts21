@@ -95,6 +95,8 @@ pub mod addr {
     pub const TCA0_CTRLESET: usize = 0x0A05;
     /// TCA0.CTRLFSET: reads the buffer valid flags.
     pub const TCA0_CTRLFSET: usize = 0x0A07;
+    /// TCA0.CTRLFCLR: writing a 1 clears that buffer valid flag.
+    pub const TCA0_CTRLFCLR: usize = 0x0A06;
     /// 16-bit: write through `write16`, low byte first.
     pub const TCA0_CNT: usize = 0x0A20;
     /// 16-bit, the live period, which PERBUF only reaches at BOTTOM. Resets to

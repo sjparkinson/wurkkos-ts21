@@ -381,6 +381,7 @@ mod tests {
             (regs::addr::TCA0_CTRLECLR, "TCA0", single, "CTRLECLR", 1),
             (regs::addr::TCA0_CTRLESET, "TCA0", single, "CTRLESET", 1),
             (regs::addr::TCA0_CTRLFSET, "TCA0", single, "CTRLFSET", 1),
+            (regs::addr::TCA0_CTRLFCLR, "TCA0", single, "CTRLFCLR", 1),
             (regs::addr::TCA0_CNT, "TCA0", single, "CNT", 2),
             (regs::addr::TCA0_PER, "TCA0", single, "PER", 2),
             (regs::addr::TCA0_CMP0, "TCA0", single, "CMP0", 2),
@@ -610,6 +611,24 @@ mod tests {
                 atdf.register("TCA0", Some("SINGLE"), "CTRLFSET")
                     .mask("CMP1BV"),
                 "TCA0.CTRLFSET.CMP1BV",
+            ),
+            (
+                regs::TCA_PERBV,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLFCLR")
+                    .mask("PERBV"),
+                "TCA0.CTRLFCLR.PERBV",
+            ),
+            (
+                regs::TCA_CMP0BV,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLFCLR")
+                    .mask("CMP0BV"),
+                "TCA0.CTRLFCLR.CMP0BV",
+            ),
+            (
+                regs::TCA_CMP1BV,
+                atdf.register("TCA0", Some("SINGLE"), "CTRLFCLR")
+                    .mask("CMP1BV"),
+                "TCA0.CTRLFCLR.CMP1BV",
             ),
             (
                 regs::TCA_CMD_UPDATE,
