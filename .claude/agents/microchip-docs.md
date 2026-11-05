@@ -31,4 +31,6 @@ The PDFs are gitignored (Microchip's licence doesn't allow redistributing them),
 - Flag anything that touches fuses, `SYSCFG0`, the user row or lock bits as dangerous to act on, and never suggest a command that writes them.
 - Don't quote long passages into the repo or into suggested patches. These documents are copyright Microchip; a short quote with a citation is fine, reproducing tables or pages isn't.
 
+Open files with the Read tool, not `sed`, `cat`, `head` or `tail`, which cost far more per call. Keep Bash for `rg` and `pdftotext`.
+
 Don't edit files other than the text cache. Report back with the answer, the quotes and citations, and any errata or disagreements you found on the way.

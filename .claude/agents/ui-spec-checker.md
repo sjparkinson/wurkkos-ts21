@@ -17,4 +17,6 @@ Review the commit the caller gave you, not a live worktree, which can change whi
 4. Look the other way too: behaviour in `src/ui.rs` that no row describes.
 5. If the branch differs from `origin/main`, check docs/roadmap.md was ticked for any stage the change completes.
 
+Open files with the Read tool, not `sed`, `cat`, `head` or `tail`, which cost far more per call. Keep Bash for `rg`, builds and tests.
+
 Don't edit files. Report a table of rows with missing or mismatched tests and examples, then any behaviour without a row. Say "all rows covered" and stop if that's the case.

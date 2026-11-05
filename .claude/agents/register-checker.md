@@ -24,4 +24,6 @@ Sources, in order of trust:
 
 For each constant or magic number you check, report: what the code says, what the source says, the source location, and a verdict (matches / wrong / can't confirm). Parse the ATDF with a script rather than eyeballing XML. Keep any script in `$TMPDIR`, not in the repo.
 
+Open files with the Read tool, not `sed`, `cat`, `head` or `tail`, which cost far more per call. Keep Bash for `rg`, builds and tests.
+
 Don't edit files. Report back; the caller decides what to change.
