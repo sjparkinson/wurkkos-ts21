@@ -11,7 +11,7 @@ use crate::temp::Calibration;
 
 /// A temperature sensor calibration for tests and the simulated chip's
 /// signature row. Made up, but in the range real parts have: about 0.55 K a
-/// count, so 25 °C reads 531.
+/// count, so 25 °C reads 531 a conversion, 2124 over four.
 pub const CALIBRATION: Calibration = Calibration {
     offset: -10,
     gain: 141,
@@ -29,11 +29,11 @@ pub fn voltage_reading(cell: u16) -> u16 {
         .unwrap_or(guess)
 }
 
-/// The 10-bit temperature sensor reading closest to `kelvin` with
-/// [`CALIBRATION`].
+/// The temperature sensor reading, four accumulated 10-bit conversions,
+/// closest to `kelvin` with [`CALIBRATION`].
 pub fn temperature_reading(kelvin: u16) -> u16 {
-    (0..=1023)
-        .min_by_key(|&raw| (CALIBRATION.kelvin(raw).abs_diff(kelvin), raw))
+    (0..=4 * 1023)
+        .min_by_key(|&raw| (CALIBRATION.sixteenths(raw).abs_diff(kelvin * 16), raw))
         .unwrap_or(0)
 }
 
@@ -62,7 +62,7 @@ impl Adc {
     pub const fn new() -> Self {
         Self {
             voltage: 1731,
-            temperature: 531,
+            temperature: 2124,
             pending: None,
         }
     }
@@ -105,7 +105,7 @@ mod tests {
         let mut adc = Adc::new();
         assert_eq!(adc.result(), None);
         adc.start(convert(Channel::Temperature));
-        assert_eq!(adc.result(), Some(531));
+        assert_eq!(adc.result(), Some(2124));
         assert_eq!(adc.result(), None);
         adc.start(convert(Channel::Voltage));
         assert_eq!(adc.result(), Some(1731));
@@ -124,8 +124,18 @@ mod tests {
     #[test]
     fn the_defaults_are_a_good_cell_at_room_temperature() {
         assert_eq!(battery::centivolts(Adc::new().voltage), 380);
-        assert_eq!(temperature_reading(crate::thermal::celsius(25)), 531);
-        assert_eq!(CALIBRATION.kelvin(531), crate::thermal::celsius(25));
+        let room = crate::thermal::celsius(25);
+        assert_eq!(temperature_reading(room), 2124);
+        assert_eq!(CALIBRATION.sixteenths(2124), room * 16);
+    }
+
+    #[test]
+    fn a_stuck_adc_is_garbage_to_thermal_regulation() {
+        use crate::thermal::plausible;
+        for raw in [0, 1, 7, 1023, 4 * 1023] {
+            assert!(!plausible(CALIBRATION.sixteenths(raw)), "{raw}");
+        }
+        assert!(plausible(CALIBRATION.sixteenths(Adc::new().temperature)));
     }
 
     #[test]
@@ -134,8 +144,9 @@ mod tests {
             assert_eq!(battery::centivolts(voltage_reading(cell)), cell, "{cell}");
         }
         for kelvin in [273, 298, 318, 343, 373] {
-            let got = CALIBRATION.kelvin(temperature_reading(kelvin));
-            assert!(got.abs_diff(kelvin) <= 1, "{kelvin} K reads as {got}");
+            let got = CALIBRATION.sixteenths(temperature_reading(kelvin));
+            // A count of the sum is a little over two sixteenths.
+            assert!(got.abs_diff(kelvin * 16) <= 2, "{kelvin} K reads as {got}");
         }
     }
 }

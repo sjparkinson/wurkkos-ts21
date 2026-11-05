@@ -32,9 +32,9 @@
 //!   puts every register back and restarts the CPU, but leaves SRAM alone.
 //!   The datasheet doesn't promise that; AN2632 §6 leans on it.
 //! - ADC0 only converts when it's set up for one of the two measurements the
-//!   firmware makes (the 1.5 V reference against VDD, four accumulated, or
-//!   the temperature sensor against 1.1 V with the datasheet's delays and
-//!   clock), and then reads the scripted world (`world.rs`). Starting a
+//!   firmware makes (the 1.5 V reference against VDD, or the temperature
+//!   sensor against 1.1 V with the datasheet's delays and clock, each four
+//!   accumulated), and then reads the scripted world (`world.rs`). Starting a
 //!   conversion mid-conversion, changing its setup mid-conversion, reading
 //!   RES before RESRDY or its high byte first are errors. The first
 //!   conversion after a change of reference or input reads 0, which the
@@ -2966,7 +2966,7 @@ impl Chip {
                 regs::ADC_MUXPOS_TEMPSENSE,
                 regs::ADC_REFSEL_INTREF,
                 regs::VREF_ADC0REFSEL_1V1,
-                regs::ADC_SAMPNUM_ACC1,
+                regs::ADC_SAMPNUM_ACC4,
             ) => {
                 // Section 30.3.2.6: SAMPCAP, and INITDLY and SAMPLEN each at
                 // least 32 µs of ADC clock.
@@ -6788,7 +6788,7 @@ mod tests {
                 regs::VREF_ADC0REFSEL_1V1,
                 regs::ADC_REFSEL_INTREF,
                 regs::ADC_MUXPOS_TEMPSENSE,
-                regs::ADC_SAMPNUM_ACC1,
+                regs::ADC_SAMPNUM_ACC4,
             ),
         };
         w(c, reg::VREF_CTRLA, vref);
@@ -6823,7 +6823,11 @@ mod tests {
 
         adc_setup(&mut c, Channel::Temperature);
         assert_eq!(convert(&mut c), Ok(UNSETTLED));
-        assert_eq!(CALIBRATION.kelvin(convert(&mut c).unwrap()), 298);
+        assert_eq!(
+            CALIBRATION.sixteenths(convert(&mut c).unwrap()),
+            298 * 16,
+            "four conversions' worth, in sixteenths",
+        );
     }
 
     #[test]
@@ -6909,6 +6913,12 @@ mod tests {
             c.write(register as u16, value).unwrap();
             assert!(convert(&mut c).is_err(), "{what}");
         }
+        // `temp::sixteenths` wants a sum of four, not one conversion.
+        let mut c = chip();
+        adc_setup(&mut c, Channel::Temperature);
+        c.write(reg::ADC0_CTRLB as u16, regs::ADC_SAMPNUM_ACC1)
+            .unwrap();
+        assert!(convert(&mut c).is_err(), "one temperature conversion");
         // The temperature sensor needs its delays and SAMPCAP.
         for (register, value) in [
             (reg::ADC0_CTRLD, 0),

@@ -265,8 +265,8 @@ pub fn init(watchdog: u8) -> bool {
 
     // ADC0 in single-conversion mode at 625 kHz, with the delays the
     // temperature sensor needs (DS40002204A, section 30.3.2.6). Both
-    // channels use the same timing, so only the reference, the input and the
-    // accumulation change between them (`adc_start`).
+    // channels use the same timing and accumulate four conversions, so only
+    // the reference and the input change between them (`adc_start`).
     // Turning it and the reference on waits for `adc_start`.
     // The ATDF says CALIB resets to 50% duty, the datasheet says 25%, and
     // 25% is what it wants at this clock (section 30.5.17), so say so.
@@ -581,7 +581,8 @@ pub fn fuses() -> Fuses {
 
 /// Starts an ADC conversion, setting the ADC up for its channel first if
 /// asked. The setups are Anduril's (`arch/attiny1616.c`) for the voltage and
-/// the datasheet's (section 30.3.2.6) for the temperature.
+/// the datasheet's (section 30.3.2.6) for the temperature, plus accumulating
+/// four conversions, which that section doesn't mention either way.
 /// `sensors::Schedule` only asks when the channel changes, or after a rest.
 ///
 /// Setting up also turns the ADC on, and forces its reference on, rather
@@ -605,12 +606,12 @@ pub fn adc_start(convert: Convert) {
                 regs::ADC_MUXPOS_INTREF,
                 regs::ADC_SAMPNUM_ACC4,
             ),
-            // The sensor against the 1.1 V reference, one conversion.
+            // The sensor against the 1.1 V reference, four conversions.
             Channel::Temperature => (
                 regs::VREF_ADC0REFSEL_1V1,
                 regs::ADC_REFSEL_INTREF,
                 regs::ADC_MUXPOS_TEMPSENSE,
-                regs::ADC_SAMPNUM_ACC1,
+                regs::ADC_SAMPNUM_ACC4,
             ),
         };
         write(reg::VREF_CTRLB, regs::VREF_ADC0REFEN);

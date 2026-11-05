@@ -135,9 +135,9 @@ impl Limits {
                 }
             }
             Some(Reading::Temperature(raw)) => {
-                let kelvin = self.calibration.kelvin(raw);
+                let sixteenths = self.calibration.sixteenths(raw);
                 if on {
-                    self.thermal.sample(kelvin, level);
+                    self.thermal.sample(sixteenths, level);
                 }
             }
             None => {}
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn garbage_from_power_on_shows_nothing_from_off() {
-        for (voltage, temperature) in [(0, 531), (1731, 0), (0, 0), (4 * 1023, 1023)] {
+        for (voltage, temperature) in [(0, 2124), (1731, 0), (0, 0), (4 * 1023, 4 * 1023)] {
             let mut run = Run::new();
             run.adc.voltage = voltage;
             run.adc.temperature = temperature;
