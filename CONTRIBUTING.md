@@ -31,7 +31,7 @@ src/ui.rs         the state machine docs/ui.md describes
 src/torch.rs      one pass of the firmware loop: switch sample and ADC result in, level out
 src/watchdog.rs   the watchdog's window, which ticks feed it, and the proof that it works
 src/main.rs       the firmware loop (a stub on the host)
-src/regs.rs       register addresses and bit values, checked against the ATDF
+src/regs.rs       register addresses and bit values, generated from the ATDF by build.rs
 src/hw.rs         pins and register access (AVR only)
 src/rt.rs         vector table and startup (AVR only)
 src/bin/link_probe.rs  a program with one static of each kind, so xtask can check link.x (never flashed)
@@ -47,11 +47,11 @@ Keep logic in the library, where `cargo test` can reach it. `src/main.rs` should
 
 ## Registers
 
-There's no PAC. When you need a register, add its address or bitfield value to `src/regs.rs`, taken from the ATtiny1616 ATDF in `vendor/ATtiny1616.atdf`, with a comment naming the register and bitfield. `src/hw.rs` uses the constant, not the number.
+There's no PAC, and nothing to add when you need a register. `build.rs` generates a constant for every register, bitfield, named value, memory segment and vector in `vendor/ATtiny1616.atdf`, and `src/regs.rs` includes them, so use the one you want: `regs::addr::RTC_PITCTRLA`, `regs::RTC_PITEN`, `regs::RTC_PERIOD_CYC512`, `regs::mem::EEPROM_START`, `regs::VECTOR_RTC_PIT`. The names are the ATDF's, and the comment at the top of `src/regs.rs` has the rules. `src/hw.rs` uses the constant, not the number. xtask gets the same constants through `ts21::regs`. The firmware pays nothing for the ones it doesn't use.
 
-Then add a row for it to the tests in `xtask/src/atdf.rs`, which parse the ATDF and compare every constant in `src/regs.rs` against it. You can't forget: a constant no test reads is dead code in the xtask build, and clippy fails on it. The NVM and memory-map constants in `xtask/src/updi.rs` get the same check in that file's tests.
+The generator is `generate` in `xtask/src/atdf.rs`, which `build.rs` loads by path, and its tests are in that file. Those also check what generating can't: what `src/hw.rs` assumes about the ATDF's layout, and `link.x`. If you need a number that isn't in the ATDF, like `ADC_SAMPLEN_32US`, it goes in `src/regs.rs` by hand, with a comment saying why and a check against whatever the ATDF does say about it. Reset values stay out on purpose, because the ATDF's disagree with the datasheet on `ADC0.CALIB` and the factory `OSCCFG` and `SYSCFG0`.
 
-The tests only cover what the ATDF can say: addresses, widths, masks and named values. Write order, timing and which flags set without their interrupt enabled are in the datasheet, so have someone (or the `register-checker` agent in `.claude/agents/`) read those against it. A wrong address compiles fine and does something to the hardware you didn't ask for.
+The ATDF only says so much: addresses, widths, masks and named values. Picking the wrong constant still compiles, and write order, timing and which flags set without their interrupt enabled are in the datasheet, so have someone (or the `register-checker` agent in `.claude/agents/`) read those against it. A wrong register does something to the hardware you didn't ask for.
 
 The simulator in `xtask/src/sim.rs` refuses any register it doesn't model, so the first `cargo xtask hex` after you touch a new one fails until you teach the fake chip about it. Model what the datasheet says the register does, including any rule the real chip enforces by quietly ignoring a write, and add a test for it in `sim.rs`.
 

@@ -7,7 +7,7 @@ How Rust gets onto an ATtiny1616 here, and why it's put together this way.
 - rustc's built-in `avr-none` target with `-C target-cpu=attiny1616`.
 - A pinned nightly (`rust-toolchain.toml`), because `core` has to be rebuilt for AVR with `-Zbuild-std=core`, and inline assembly on AVR still needs `#![feature(asm_experimental_arch)]`.
 - Linked by the `rust-lld` that rustup ships, against this repo's own linker script (`link.x`) and startup code (`src/rt.rs`).
-- Registers written out by hand in `src/hw.rs`, with zero crate dependencies. (Rebuilding `core` pulls a few crates of its own, see [First build](#first-build).)
+- Register constants generated from Microchip's ATDF at build time, with zero crate dependencies. (Rebuilding `core` pulls a few crates of its own, see [First build](#first-build).)
 - The UPDI programmer lives in `xtask`, so rustup is the only thing to install.
 
 `cargo xtask hex` builds `target/avr-none/release/wurkkos-ts21-0614.elf` and turns it into Intel HEX, padded to all 16 KB of flash with the CRC the firmware checks at power-on in the last two bytes. Cargo has no post-build step, so the hex can't come out of `cargo build` itself, and making `avr-none` the default target would break `cargo test` for the library.
@@ -43,9 +43,9 @@ So for now, keep runtime multiplication to 16 bits, and divide a `u16` only by a
 
 If the link ever fails with an undefined `__*` symbol, this is why.
 
-## Registers by hand
+## Registers from the ATDF
 
-[avr-device](https://github.com/Rahix/avr-device) has the ATtiny1614 and 1617 but not the 1616, and [avr-hal](https://github.com/Rahix/avr-hal) has no tinyAVR 1-series support. Using the 1617's PAC would probably work, since it's the same die, but this firmware touches about fifteen registers. Writing them out by hand with a comment pointing at the ATDF is less code than the dependency, and the `register-checker` agent in `.claude/agents/` can verify them.
+[avr-device](https://github.com/Rahix/avr-device) has the ATtiny1614 and 1617 but not the 1616, and [avr-hal](https://github.com/Rahix/avr-hal) has no tinyAVR 1-series support. Using the 1617's PAC would probably work, since it's the same die, but this firmware touches about fifteen registers and takes no dependencies. Instead `build.rs` generates plain constants from the vendored ATDF into `OUT_DIR`, and `src/regs.rs` includes them. It reuses the small XML parser in `xtask/src/atdf.rs`, by path, so there's no extra crate, and the constants fold away at compile time, so the firmware's the same size as it was with them typed out. The `register-checker` agent in `.claude/agents/` covers what the ATDF can't say.
 
 ## Workarounds in use
 

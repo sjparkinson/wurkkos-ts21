@@ -15,11 +15,9 @@
 #![cfg_attr(target_arch = "avr", feature(asm_experimental_arch))]
 #![cfg_attr(target_arch = "avr", feature(abi_avr_interrupt))]
 
-// rt.rs needs a few of regs.rs's constants, not all of them.
+// rt.rs reaches the library's registers as `crate::regs`.
 #[cfg(target_arch = "avr")]
-#[allow(dead_code)]
-#[path = "../regs.rs"]
-mod regs;
+use ts21::regs;
 #[cfg(target_arch = "avr")]
 #[path = "../rt.rs"]
 mod rt;

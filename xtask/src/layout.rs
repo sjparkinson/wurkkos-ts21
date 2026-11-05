@@ -9,17 +9,15 @@
 //! The opcodes come from Microchip's AVR Instruction Set Manual. Only the
 //! handful the checks look for are decoded.
 
+use ts21::regs::{VECTORS, addr};
+
 use crate::elf::{DATA_SPACE, Elf, RAM, Segment};
 use crate::updi::map;
 
-/// Vector slots on the ATtiny1616, reset included. atdf.rs checks this
-/// against `regs::VECTORS` and the ATDF.
-pub const VECTORS: usize = 31;
-/// CPU.CCP's I/O address. atdf.rs checks this against `regs::addr::CPU_CCP`.
-pub const CPU_CCP: u16 = 0x34;
+/// CPU.CCP's I/O address, the same number as its data-space one.
+const CPU_CCP: u16 = addr::CPU_CCP as u16;
 
 /// Where tinyAVR maps flash into data space, and how much of it there is.
-/// updi.rs checks both against the ATDF.
 const MAPPED_FLASH: u32 = map::FLASH as u32;
 const FLASH_SIZE: u32 = map::FLASH_SIZE as u32;
 /// `reti`: 1001 0101 0001 1000.

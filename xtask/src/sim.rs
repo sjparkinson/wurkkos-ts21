@@ -179,20 +179,20 @@ use crate::switching::RandomSwitching;
 use crate::updi::map;
 use crate::world::{self, CALIBRATION, RamFault, Register, RegisterFault, Rig, WdtFault, World};
 
-// The fake chip uses the addresses and the fields it models, not all of them.
-// atdf.rs loads this file again for its tests on purpose: there, an unused
-// constant is a warning, which is how an unchecked one gets caught.
-// world.rs reads the fuse addresses from here too.
-#[allow(dead_code, clippy::duplicate_mod)]
-#[path = "../../src/regs.rs"]
-pub(crate) mod regs;
-
-use regs::addr as reg;
+use ts21::regs::{self, addr as reg};
+// Beyond what the firmware uses, for the simulator to refuse or to time.
+use ts21::regs::{
+    PORT_INVEN, PORT_ISC as ISC, PORT_ISC_BOTHEDGES as ISC_BOTHEDGES,
+    PORT_ISC_FALLING as ISC_FALLING, PORT_ISC_INPUT_DISABLE as ISC_INPUT_DISABLE,
+    PORT_ISC_INTDISABLE as ISC_INTDISABLE, PORT_ISC_LEVEL as ISC_LEVEL,
+    PORT_ISC_RISING as ISC_RISING, TCA_WGMODE, VECTOR_PORTA_PORT, VECTOR_PORTB_PORT,
+    VECTOR_PORTC_PORT, WDT_LOCK, WDT_PERIOD, WDT_PERIOD_8KCLK as WDT_PERIOD_MAX, WDT_WINDOW,
+    addr::PORTA_INTFLAGS,
+};
 
 /// SRAM as data-space addresses.
 const SRAM: Range<u16> = (RAM.start - DATA_SPACE) as u16..(RAM.end - DATA_SPACE) as u16;
-/// Where flash appears in data space, and how much of it there is. updi.rs
-/// checks both against the ATDF.
+/// Where flash appears in data space, and how much of it there is.
 const MAPPED: u16 = map::FLASH;
 const FLASH_SIZE: usize = map::FLASH_SIZE;
 
@@ -227,16 +227,6 @@ const PIT_SYNC_READS: u8 = 2;
 /// Reads of WDT.STATUS that report SYNCBUSY after a write to CTRLA, like
 /// `PIT_SYNC_READS`.
 const WDT_SYNC_READS: u8 = 2;
-/// WDT.STATUS.LOCK. Only the simulator needs it (to refuse it), so it isn't
-/// in regs.rs, where an unused constant fails the firmware clippy. atdf.rs
-/// checks it.
-pub(crate) const WDT_LOCK: u8 = 0x80;
-/// WDT.CTRLA.PERIOD's mask, and its largest value, 8KCLK. atdf.rs checks both.
-pub(crate) const WDT_PERIOD: u8 = 0x0F;
-pub(crate) const WDT_PERIOD_MAX: u8 = 11;
-/// WDT.CTRLA.WINDOW's mask. It takes the same values as PERIOD, shifted up
-/// four, which atdf.rs checks too.
-pub(crate) const WDT_WINDOW: u8 = 0xF0;
 /// WDT clocks in a tick: the PIT divides the same oscillator by 512, and
 /// the WDT by 32. Only at CYC512, so a tick refuses any other PIT period
 /// while the WDT's on.
@@ -247,30 +237,6 @@ const WDT_TIMED_OUT: &str = "without wdr";
 // The WDT model counts whole ticks, which only works while a pass can't
 // overrun one and drop a tick unseen.
 const _: () = assert!(TICK_BUDGET < TICK_CYCLES / 2);
-
-/// PORTx.PINnCTRL.ISC, the mask and its values (DS40002204A §16.5.11),
-/// for anything that sets them. atdf.rs checks them.
-pub const ISC: u8 = 0x07;
-pub const ISC_INTDISABLE: u8 = 0x0;
-pub const ISC_BOTHEDGES: u8 = 0x1;
-pub const ISC_RISING: u8 = 0x2;
-pub const ISC_FALLING: u8 = 0x3;
-pub const ISC_INPUT_DISABLE: u8 = regs::PORT_ISC_INPUT_DISABLE;
-pub const ISC_LEVEL: u8 = 0x5;
-/// TCA0.CTRLB.WGMODE's mask. atdf.rs checks it.
-pub(crate) const TCA_WGMODE: u8 = 0x07;
-/// TCA0.CTRLB.ALUPD, which the simulator refuses. atdf.rs checks it.
-pub(crate) const TCA_ALUPD: u8 = 0x08;
-/// PORTx.PINnCTRL.INVEN, which the simulator refuses on PA5.
-pub const PORT_INVEN: u8 = 0x80;
-/// PORTA.INTFLAGS: a pin-change flag per pin, cleared by writing 1. The
-/// firmware doesn't use it. atdf.rs checks it.
-pub const PORTA_INTFLAGS: usize = 0x0409;
-/// The ports' pin-change vectors, which the firmware has no handlers for.
-/// atdf.rs checks them.
-pub const VECTOR_PORTA_PORT: usize = 3;
-pub const VECTOR_PORTB_PORT: usize = 4;
-pub const VECTOR_PORTC_PORT: usize = 5;
 
 /// TCA0's 16-bit registers the firmware writes, by the low byte's address.
 const WIDE: [usize; 5] = [
@@ -2944,16 +2910,16 @@ impl Chip {
             return Err("starts a conversion without ADC0.CALIB at 25% duty".into());
         }
         let ctrlc = io(reg::ADC0_CTRLC);
-        let clk_adc = CLK_PER >> (1 + u32::from(ctrlc & 0x07));
+        let clk_adc = CLK_PER >> (1 + u32::from(ctrlc & regs::ADC_PRESC));
         if !(200_000..=1_500_000).contains(&clk_adc) {
             return Err(format!(
                 "runs the ADC at {clk_adc} Hz, outside 200 kHz to 1.5 MHz (table 36-26)"
             ));
         }
-        let vref = io(reg::VREF_CTRLA) & 0x70;
-        let refsel = ctrlc & 0x30;
+        let vref = io(reg::VREF_CTRLA) & regs::VREF_ADC0REFSEL;
+        let refsel = ctrlc & regs::ADC_REFSEL;
         let muxpos = io(reg::ADC0_MUXPOS);
-        let sampnum = io(reg::ADC0_CTRLB) & 0x07;
+        let sampnum = io(reg::ADC0_CTRLB) & regs::ADC_SAMPNUM;
         let sampcap = ctrlc & regs::ADC_SAMPCAP != 0;
         let channel = match (muxpos, refsel, vref, sampnum) {
             (
@@ -2974,7 +2940,7 @@ impl Chip {
                     0 => 0,
                     n => 8u32 << n,
                 };
-                let samplen = u32::from(io(reg::ADC0_SAMPCTRL) & 0x1F);
+                let samplen = u32::from(io(reg::ADC0_SAMPCTRL) & regs::ADC_SAMPLEN);
                 let need = clk_adc.div_ceil(1_000_000 / 32);
                 if !sampcap || initdly < need || samplen < need {
                     return Err(format!(
@@ -4081,7 +4047,7 @@ impl Bus for Chip {
                          cycles assume single-slope"
                     ));
                 }
-                if value & TCA_ALUPD != 0 {
+                if value & regs::TCA_ALUPD != 0 {
                     return Err(format!(
                         "writes {value:#04x} to TCA0.CTRLB: ALUPD would take LUPD out of \
                          the firmware's hands (section 20.5.2)"
@@ -4923,7 +4889,7 @@ mod tests {
     #[test]
     fn refuses_alupd() {
         let mut c = chip();
-        let value = TCA_ALUPD | regs::TCA_WGMODE_SINGLESLOPE;
+        let value = regs::TCA_ALUPD | regs::TCA_WGMODE_SINGLESLOPE;
         let err = c.write(reg::TCA0_CTRLB as u16, value).unwrap_err();
         assert!(err.contains("ALUPD"), "{err}");
     }

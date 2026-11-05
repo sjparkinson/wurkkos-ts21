@@ -1,8 +1,7 @@
 //! The TS21 driver's pins and the ATtiny1616 registers that drive them.
 //!
-//! No PAC: the handful of registers we touch are written out by hand in
-//! `src/regs.rs`, and xtask's tests check them against Microchip's ATDF.
-//! docs/hardware.md has the pin map and where it comes from.
+//! No PAC: `src/regs.rs` has plain constants, generated from Microchip's ATDF
+//! at build time. docs/hardware.md has the pin map and where it comes from.
 //!
 //! | Pin | Job                                   |
 //! |-----|---------------------------------------|
@@ -75,7 +74,9 @@ const fn wdt_clocks(n: u8) -> u16 {
 // The window `hw::init` sets is the one `ts21::watchdog` counts on.
 const _: () = {
     use ts21::watchdog::{CLOSED_CLOCKS, OPEN_CLOCKS};
-    assert!(wdt_clocks(regs::WDT_WINDOW_32CLK >> 4) == CLOSED_CLOCKS);
+    assert!(
+        wdt_clocks(regs::WDT_WINDOW_32CLK >> regs::WDT_WINDOW.trailing_zeros()) == CLOSED_CLOCKS
+    );
     assert!(wdt_clocks(regs::WDT_PERIOD_32CLK) == OPEN_CLOCKS);
 };
 
@@ -248,7 +249,7 @@ pub fn init(watchdog: u8) -> bool {
     write(reg::VPORTB_DIR, PORTB_OUTPUTS);
 
     // Single-slope PWM on WO0 (FET) and WO1 (linear), straight off the
-    // 5 MHz clock. The BUF registers apply at the end of a cycle, so level
+    // 5 MHz clock, in TCA's single mode: CTRLD.SPLITM stays at 0. The BUF registers apply at the end of a cycle, so level
     // changes never glitch. A compare of 0 holds the pin low and one over
     // PER holds it high (section 20.3.3.4.3), so PER is one under the top
     // duty. PER goes in directly, with the timer stopped, or it'd run its
@@ -269,9 +270,15 @@ pub fn init(watchdog: u8) -> bool {
     // the reference and the input change between them (`adc_start`).
     // Turning it and the reference on waits for `adc_start`.
     // The ATDF says CALIB resets to 50% duty, the datasheet says 25%, and
-    // 25% is what it wants at this clock (section 30.5.17), so say so.
+    // 25% is what it wants at ADC clocks of 1.5 MHz and under (section
+    // 30.5.17), so say so.
     write(reg::ADC0_CALIB, regs::ADC_DUTYCYC_DUTY25);
+    // 5 MHz / 8 is 625 kHz, inside the 200 kHz to 1.5 MHz the datasheet wants
+    // for 10 bits (table 36-26). SAMPCAP is the smaller sample capacitor, for
+    // references of 1 V and up.
     write(reg::ADC0_CTRLC, regs::ADC_SAMPCAP | regs::ADC_PRESC_DIV8);
+    // 32 ADC clocks, 51 µs at 625 kHz, over the 32 µs the temperature sensor
+    // needs (section 30.3.2.6).
     write(reg::ADC0_CTRLD, regs::ADC_INITDLY_DLY32);
     write(reg::ADC0_SAMPCTRL, regs::ADC_SAMPLEN_32US);
 
@@ -344,6 +351,8 @@ fn output_settled() -> bool {
 /// Otherwise it's idle, which stops only the CPU and flash, so TCA0 keeps the
 /// PWM going and the ADC keeps converting. Standby would stop TCA0, which has
 /// no RUNSTDBY (section 11.3.2.1).
+///
+/// SEN has to stay set in both: with it clear, `sleep` does nothing.
 fn prepare_sleep(rest: bool) {
     if rest && output_settled() {
         write(reg::ADC0_CTRLA, 0);
@@ -547,6 +556,9 @@ pub fn temperature_calibration() -> Calibration {
 /// cycles count from the end of the `sts`; the datasheet doesn't say, so
 /// there's a fourth. Then it waits for BUSY to clear, which it should
 /// already have done, since the CPU was stalled.
+///
+/// SRC = FLASH is the only choice with BOOTEND and APPEND at 0, and PRIORITY
+/// the only mode. Writing ENABLE starts a scan even when it's already 1.
 pub fn flash_ok() -> bool {
     write(
         reg::CRCSCAN_CTRLB,
@@ -614,6 +626,9 @@ pub fn adc_start(convert: Convert) {
                 regs::ADC_SAMPNUM_ACC4,
             ),
         };
+        // Keep the reference on between conversions, so a single conversion
+        // never catches it starting up (section 18.5.2). A cold 1.5 V
+        // reference reads low, which reads as a fuller cell.
         write(reg::VREF_CTRLB, regs::VREF_ADC0REFEN);
         // Nothing else uses VREF, so DAC0REFSEL's bits can stay zero.
         write(reg::VREF_CTRLA, vref);

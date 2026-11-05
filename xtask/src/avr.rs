@@ -35,11 +35,13 @@
 
 use std::ops::Range;
 
+use ts21::regs::addr;
+
 /// CPU.SPL, CPU.SPH and CPU.SREG. The CPU keeps these itself rather than
-/// passing them to the bus. atdf.rs checks the addresses.
-pub const SPL: u16 = 0x3D;
-pub const SPH: u16 = 0x3E;
-pub const SREG: u16 = 0x3F;
+/// passing them to the bus.
+pub const SPL: u16 = addr::CPU_SPL as u16;
+pub const SPH: u16 = addr::CPU_SPH as u16;
+pub const SREG: u16 = addr::CPU_SREG as u16;
 
 // SREG bits.
 const C: u8 = 0;
@@ -661,9 +663,11 @@ fn unknown(w: u16) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ts21::regs::mem;
+
     use super::*;
 
-    const RAM: Range<u16> = 0x3800..0x4000;
+    const RAM: Range<u16> = mem::INTERNAL_SRAM_START as u16..mem::INTERNAL_SRAM_END as u16;
 
     /// A data address the test programs' handlers write to: each write is
     /// logged, and clears those bits of `pending`, like an INTFLAGS.

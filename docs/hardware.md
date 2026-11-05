@@ -112,7 +112,7 @@ These are the bits that matter for this firmware.
 - **There's a two-cycle 8×8 hardware multiplier** (DS40002204A, page 1, under CPU features), with `mul`, `muls`, `mulsu`, `fmul`, `fmuls` and `fmulsu`. `rustc --print cfg --target avr-none -C target-cpu=attiny1616` lists `target_feature="mul"` too, and LLVM uses it for 8- and 16-bit products. Confirmed. It doesn't help with 32-bit maths, see [toolchain.md](toolchain.md#32-bit-multiplication).
 - **The factory fuses are fine.** Anduril never writes fuses on the t1616, so the defaults (20 MHz oscillator, UPDI enabled on the reset pin, EESAVE off) are what's on a stock TS21. Don't change `SYSCFG0` to turn the UPDI pin into a GPIO or reset pin unless you own a high-voltage programmer, because that's the only way back.
 
-The register addresses, bit values and vector count in `src/regs.rs`, and the memory map and NVM constants in `xtask/src/updi.rs`, are checked by `cargo test` (`xtask/src/atdf.rs`) against Microchip's ATtiny1616 ATDF in [`vendor/`](../vendor/README.md), from their ATtiny device pack. None of it has met a real board yet.
+The register addresses, bit values and vector count in `src/regs.rs`, and the memory map and NVM constants in `xtask/src/updi.rs`, are generated at build time (`build.rs`, `xtask/src/atdf.rs`) from Microchip's ATtiny1616 ATDF in [`vendor/`](../vendor/README.md), from their ATtiny device pack. None of it has met a real board yet.
 
 ## The rest of the light
 
