@@ -254,16 +254,52 @@ global_asm!(
     // a broken byte of RAM after.
     ".global __registers_tested",
     "__registers_tested:",
-    // The RAM test runs on a power-on or UPDI reset, and on nothing else. It
-    // overwrites all of SRAM, `.noinit` included, and the watchdog's proof
-    // needs the marker there to get through its deliberate resets
-    // (src/watchdog.rs). It would also put 85 ms on each of them. RSTFR is
-    // still as the reset left it, since only `main` clears it.
+    // Which resets get the RAM test. RSTFR is still as the reset left it,
+    // since only `main` clears it.
+    //
+    // - Power-on or UPDI: always. Nothing in SRAM is worth keeping, and the
+    //   marker goes back as 0, which is no step at all.
+    // - A hang, which is `Proof::after_reset`'s meaning: WDRF, or no flag at
+    //   all. Yes, unless the marker says the proof's going. This is how a
+    //   failed `__ram_section` ends in `__selftest_failed`, for good, with a
+    //   fault that's still there.
+    // - The proof's own bites, which that marker check picks out: no. They'd
+    //   take 85 ms each.
+    // - Brown-out, external or software, with no WDRF: no. Nothing says RAM's
+    //   suspect, and the marker's left as it is.
+    //
+    // The test overwrites all of SRAM, `.noinit` included, so r2 and r3 hold
+    // the marker across it. It doesn't use them, and the register test above
+    // has just passed them. A one-bit fault in either marker byte breaks the
+    // complement, so it can't pass for a proof that's going, and gets the test.
+    "  clr r2",
+    "  clr r3",
     "  lds r16, {rstfr}",
-    "  andi r16, {new_start}",
-    "  brne 9f",
+    "  mov r17, r16",
+    "  andi r17, {new_start}",
+    "  brne 7f",
+    "  cpi r16, 0",
+    "  breq 6f",
+    "  andi r16, {wdrf}",
+    "  brne 6f",
     "  rjmp __ram_tested",
-    "9:",
+    "6:",
+    ".global __march_after_hang",
+    "__march_after_hang:",
+    "  ldi r26, lo8(__noinit_start)",
+    "  ldi r27, hi8(__noinit_start)",
+    "  ld r2, X+",
+    "  ld r3, X",
+    "  mov r16, r2",
+    "  com r16",
+    "  cp r16, r3",
+    "  brne 7f",
+    "  mov r16, r2",
+    "  andi r16, {step_bits}",
+    "  cpi r16, {proving_steps}",
+    "  brsh 7f",
+    "  rjmp __ram_tested",
+    "7:",
     //
     // # The RAM test (AN2632 §9.2)
     //
@@ -287,8 +323,8 @@ global_asm!(
     // The test is destructive, which is why it runs before .data and .bss
     // exist and before anything's on the stack. AN2632 tests SRAM in
     // sections, saving each one first, so it can run while the application
-    // does. That's not needed at power-on; `__ram_section` further down
-    // does it for the main loop.
+    // does. That's not needed here, where only the marker has to survive;
+    // `__ram_section` further down does it for the main loop.
     //
     // AN2632 runs it with D = 0x00, which can't tell two bits in a byte
     // apart, since they always hold the same value. Its option for that is
@@ -373,6 +409,12 @@ global_asm!(
     "  mov r22, r23",
     "  dec r19",
     "  brne 5b",
+    // The marker goes back, for `main` to read. The `rjmp`s above that skip
+    // the test skip this too, since they never touched it.
+    "  ldi r26, lo8(__noinit_start)",
+    "  ldi r27, hi8(__noinit_start)",
+    "  st X+, r2",
+    "  st X, r3",
     // The registers and SRAM passed. xtask's simulator stops here to look
     // at what the tests did, and finds the .data and .bss setup after it.
     ".global __ram_tested",
@@ -586,14 +628,24 @@ global_asm!(
     // Interrupts stay off, and nothing here touches the watchdog, which is
     // only fed from the main loop. So it resets the chip about 67 WDT clocks
     // after the last `wdr` at most: the 64 of the two windows, and up to
-    // three for that `wdr` to sync (§19.3.6), about 65 ms nominal. That
-    // reruns the power-on test, and a fault that's still there stops in
-    // `__selftest_failed` with the watchdog off, for good. One that's gone
-    // leaves a working torch, off.
+    // three for that `wdr` to sync (§19.3.6), about 65 ms nominal, or about
+    // 8 s after a failed proof. That's a hang, so startup runs the RAM test,
+    // and a fault that's still there stops in `__selftest_failed` with the
+    // watchdog off, for good. One that's gone comes back off with the FET
+    // refused, as after any hang.
+    //
+    // The section goes back before the spin, since it can hold the watchdog's
+    // marker, and a marker left full of test patterns would read as a failed
+    // proof rather than a hang. r2 to r17 and Z are as the test left them, so
+    // the pins' value goes through r18, which only held D.
     ".global __ram_section_failed",
     "__ram_section_failed:",
-    "  ldi r16, {tca_pins_off}",
-    "  sts {tca0_ctrlb}, r16",
+    "  ldi r18, {tca_pins_off}",
+    "  sts {tca0_ctrlb}, r18",
+    "  movw r26, r30",
+    ".irp reg, 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17",
+    "  st X+, r\\reg",
+    ".endr",
     "1:",
     "  rjmp 1b",
     // The unhandled slots: from 1 up to RTC_PIT, and from there to the end.
@@ -626,6 +678,9 @@ global_asm!(
     // Which resets run the RAM test.
     rstfr = const regs::addr::RSTCTRL_RSTFR,
     new_start = const regs::RSTCTRL_PORF | regs::RSTCTRL_UPDIRF,
+    wdrf = const regs::RSTCTRL_WDRF,
+    step_bits = const ts21::watchdog::STEP_BITS,
+    proving_steps = const ts21::watchdog::PROVING_STEPS,
     // What the RAM test walks.
     sram_start = const regs::addr::SRAM_START,
     sram_end = const regs::addr::SRAM_END,

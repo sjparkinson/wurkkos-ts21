@@ -352,8 +352,15 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     };
     periodic_passes(&power_on, section).map_err(|e| format!("periodic RAM test: {e}"))?;
     periodic_checks(&power_on, &section_marks).map_err(|e| format!("periodic RAM test: {e}"))?;
-    periodic_faults(&power_on, section, section_failed)
-        .map_err(|e| format!("periodic RAM test: {e}"))?;
+    let late = LateMarks {
+        section,
+        section_failed,
+        main,
+        selftest_failed: failed,
+        march_after_hang: symbol("__march_after_hang")? / 2,
+        ram_tested: ram_tested / 2,
+    };
+    periodic_faults(&power_on, &late).map_err(|e| format!("periodic RAM test: {e}"))?;
 
     let mut report = Report {
         stack: 0,
@@ -954,19 +961,24 @@ fn run_until(sim: &mut Sim, failed: u32, ticks: u32) -> Result<Option<u32>, Stri
     Ok(None)
 }
 
+/// Instructions `__ram_section_failed` may take to reach its spin, after the
+/// two that hand the pins back: a `movw` and a store for each byte of the
+/// section, and a few in hand.
+const PUT_BACK_STEPS: u32 = selftest::RAM_SECTION as u32 + 4;
+
 /// Checks a chip that's just reached `__ram_section_failed` turns the light
 /// off straight away and stays there, with interrupts off and without
 /// feeding the watchdog, until the watchdog resets it, on the tick the
 /// last feed's windows run out (§19.3.3.2). A feed in the closed window would
 /// reset it too, but that's a fault, and one in the open window pushes the
-/// reset past that tick.
+/// reset past that tick. It stops at the bite, so the reset itself is the
+/// caller's to do.
 fn held_low_until_reset(sim: &mut Sim) -> Result<(), String> {
     let timeout = (sim.chip.wdt_closed() + sim.chip.wdt_open()).div_ceil(WDT_CLOCKS_PER_TICK);
     let left = timeout.saturating_sub(sim.chip.wdt.ticks);
     let reset_on = sim.chip.ticks + left;
     sim.step()?; // ldi
     sim.step()?; // sts
-    let stopped = sim.cpu.pc;
     if sim.chip.leds() != (0, 0) {
         return Err(format!(
             "failed the periodic RAM test with the LEDs at {:?}",
@@ -978,6 +990,15 @@ fn held_low_until_reset(sim: &mut Sim) -> Result<(), String> {
     }
     if sim.cpu.flag(I) {
         return Err("failed the periodic RAM test with interrupts on".into());
+    }
+    // Putting the section back, up to the spin.
+    let mut stopped = sim.cpu.pc;
+    for _ in 0..PUT_BACK_STEPS {
+        sim.step()?;
+        if sim.cpu.pc == stopped {
+            break;
+        }
+        stopped = sim.cpu.pc;
     }
     // A whole timeout past that, so a late reset gets called late.
     for _ in 0..u64::from(left + timeout + 1) * PIT_PERIOD {
@@ -1222,7 +1243,13 @@ struct SectionMarks {
 /// and coupling, at the ends of SRAM and either side of where sections start,
 /// in the live stack too. Each has to be found by `__ram_section` within a
 /// sweep, hold the light off and let the watchdog reset the chip, and then
-/// stop in `__selftest_failed` when the power-on test finds it.
+/// stop in `__selftest_failed` when the RAM test startup runs after a hang
+/// finds it, rather than come back up and cycle.
+///
+/// A fault that's gone by the time of the reset has to come back off and
+/// marked as a hang, which refuses the FET, even in the section holding the
+/// marker. And with `__march_after_hang` patched out, a fault that's still
+/// there has to reach `main`, so that's what stops it.
 ///
 /// The coupling fault's two bytes straddle a multiple of `RAM_SECTION`,
 /// so only the sections overlapping brings them together.
@@ -1233,9 +1260,9 @@ struct SectionMarks {
 /// mustn't run.
 fn periodic_faults(
     power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
-    section: u32,
-    failed: u32,
+    marks: &LateMarks,
 ) -> Result<(), String> {
+    let section = marks.section;
     let (first, last) = (SRAM.start, SRAM.end - 1);
     let middle = SRAM.start + (SRAM.end - SRAM.start) / 2;
     let step = selftest::RAM_STEP;
@@ -1258,7 +1285,7 @@ fn periodic_faults(
         force: None,
     });
     for fault in faults {
-        late_fault(power_on, fault, section, failed)?;
+        late_fault(power_on, fault, marks)?;
     }
 
     // A byte the firmware's using, stuck at what it holds now. That's only
@@ -1275,7 +1302,7 @@ fn periodic_faults(
         for bit in [0, 7] {
             let high = sim.chip.sram(&(addr..addr + 1))[0] & 1 << bit != 0;
             let fault = RamFault::Stuck { addr, bit, high };
-            late_fault(power_on, fault, section, failed)?;
+            late_fault(power_on, fault, marks)?;
         }
     }
 
@@ -1284,6 +1311,19 @@ fn periodic_faults(
         bit: 0,
         high: true,
     };
+
+    // Bit 0 of the marker's first byte reads high in `Step::Passed` anyway,
+    // so the section's copy of it is good and only the test's patterns show
+    // the fault.
+    let in_marker = RamFault::Stuck {
+        addr: sim.marker,
+        bit: 0,
+        high: true,
+    };
+    for gone in [fault, in_marker] {
+        passing_fault(power_on, gone, marks)?;
+    }
+    without_the_march(power_on, fault, marks)?;
 
     let mut sim = switched_on(power_on)?;
     let at = section as usize * 2;
@@ -1345,28 +1385,105 @@ fn steady_stack(
 fn late_fault(
     power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
     fault: RamFault,
-    section: u32,
-    failed: u32,
+    marks: &LateMarks,
 ) -> Result<(), String> {
     let at = |e: String| format!("{fault}: {e}");
-    let mut sim = switched_on(power_on).map_err(at)?;
-    sim.chip.world.ram = Some(fault);
-    let Some(from) = run_until(&mut sim, failed, SWEEP_TICKS).map_err(at)? else {
-        return Err(at(format!("not found within {SWEEP_TICKS} ticks")));
+    let mut sim = found_late(power_on, fault, marks).map_err(at)?;
+    sim.reset(regs::RSTCTRL_WDRF);
+    let boot = sim.boot(marks.main, marks.selftest_failed).map_err(at)?;
+    let Boot::Failed { from } = boot else {
+        return Err(at(
+            "came back up with the fault still there, so it would cycle".into(),
+        ));
     };
-    if !(section..failed).contains(&from) {
-        return Err(at(format!("found from {:#06x}", from * 2)));
-    }
-    held_low_until_reset(&mut sim).map_err(at)?;
-    let world = World {
-        ram: Some(fault),
-        ..World::NORMAL
-    };
-    let (mut sim, boot) = power_on(&world).map_err(at)?;
-    if !matches!(boot, Boot::Failed { .. }) {
-        return Err(at("gone after the reset".into()));
+    if !(marks.march_after_hang..marks.ram_tested).contains(&from) {
+        return Err(at(format!(
+            "stopped by the wrong test, at {:#06x}",
+            from * 2
+        )));
     }
     stays_dark(&mut sim).map_err(at)
+}
+
+/// Breaks `fault` into a torch that's on, and runs it until `__ram_section`
+/// has found it and the watchdog is about to reset the chip.
+fn found_late(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    fault: RamFault,
+    marks: &LateMarks,
+) -> Result<Sim, String> {
+    let mut sim = switched_on(power_on)?;
+    sim.chip.world.ram = Some(fault);
+    let Some(from) = run_until(&mut sim, marks.section_failed, SWEEP_TICKS)? else {
+        return Err(format!("not found within {SWEEP_TICKS} ticks"));
+    };
+    if !(marks.section..marks.section_failed).contains(&from) {
+        return Err(format!("found from {:#06x}", from * 2));
+    }
+    held_low_until_reset(&mut sim)?;
+    Ok(sim)
+}
+
+/// A fault that `__ram_section` finds and that's gone by the reset: the RAM
+/// test after the hang passes, and the torch comes back off, with the marker
+/// saying it hung, which is what refuses the FET.
+fn passing_fault(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    fault: RamFault,
+    marks: &LateMarks,
+) -> Result<(), String> {
+    let at = |e: String| format!("{fault}, gone by the reset: {e}");
+    let mut sim = found_late(power_on, fault, marks).map_err(at)?;
+    sim.chip.world.ram = None;
+    sim.reset(regs::RSTCTRL_WDRF);
+    let boot = sim.boot(marks.main, marks.selftest_failed).map_err(at)?;
+    if boot != Boot::Main {
+        return Err(at(format!("stopped: {boot:?}")));
+    }
+    sim.tick(false).map_err(at)?;
+    if sim.proved() != Some(Step::Hung) {
+        return Err(at(format!(
+            "the marker says {:?}, not that it hung",
+            sim.marker()
+        )));
+    }
+    if sim.chip.leds() != (0, 0) {
+        return Err(at(format!("came back on, at {:?}", sim.chip.leds())));
+    }
+    Ok(())
+}
+
+/// With startup jumping over the RAM test after a hang, a fault that's still
+/// there reaches `main`, so it's that test that stops it, and nothing else
+/// would. The patch breaks the flash's CRC, which only refuses the FET.
+fn without_the_march(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    fault: RamFault,
+    marks: &LateMarks,
+) -> Result<(), String> {
+    let mut sim = found_late(power_on, fault, marks)?;
+    let at = marks.march_after_hang as usize * 2;
+    let jump = rjmp(marks.march_after_hang, marks.ram_tested)?;
+    sim.chip.flash[at..at + 2].copy_from_slice(&jump.to_le_bytes());
+    sim.reset(regs::RSTCTRL_WDRF);
+    match sim.boot(marks.main, marks.selftest_failed)? {
+        Boot::Main => Ok(()),
+        Boot::Failed { from } => Err(format!(
+            "{fault}: stopped at {:#06x} with the RAM test after a hang gone, \
+             so that isn't what stops it",
+            from * 2
+        )),
+    }
+}
+
+/// Word addresses `periodic_faults` follows a fault through.
+struct LateMarks {
+    section: u32,
+    section_failed: u32,
+    main: u32,
+    selftest_failed: u32,
+    march_after_hang: u32,
+    ram_tested: u32,
 }
 
 /// Word addresses of the labels in src/rt.rs's self-tests.
@@ -3177,6 +3294,7 @@ impl Sim {
         self.chip.reset(flag);
         self.testing = self.ram_tested;
         self.booted = self.executed;
+        self.landed = None;
     }
 
     /// What's in the marker right now, if it's a marker at all.
@@ -3268,6 +3386,14 @@ impl Sim {
             ));
         }
         self.chip.bites = false;
+        // The RAM test that a hang gets is far longer than any pass, so
+        // startup runs outside the pass's budget.
+        for _ in 0..BOOT_BUDGET {
+            if self.proved().is_some() {
+                break;
+            }
+            self.step().map_err(|e| format!("after a hang: {e}"))?;
+        }
         self.tick(false).map_err(|e| format!("after a hang: {e}"))?;
         let want = if verdict == Step::Passed {
             Step::Hung

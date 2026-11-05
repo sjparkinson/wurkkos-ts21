@@ -35,9 +35,9 @@ SECTIONS {
   __data_load = LOADADDR(.data) + 0x8000;
 
   /*
-   * What has to survive a reset. src/rt.rs doesn't touch it, and only runs
-   * its RAM test on a power-on or UPDI reset, so nothing else does either.
-   * It goes before .bss so the stack checks still see .bss's end as the top
+   * What has to survive a reset. src/rt.rs doesn't copy or zero it, and keeps
+   * it in registers across a RAM test after a hang. It goes before .bss so
+   * the stack checks still see .bss's end as the top
    * of everything that isn't stack.
    */
   .noinit (NOLOAD) : {
