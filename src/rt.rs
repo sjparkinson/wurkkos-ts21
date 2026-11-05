@@ -91,9 +91,13 @@ global_asm!(
     ".global __reset",
     "__reset:",
     // The FET and linear pins are inputs after reset, so their gates float
-    // until `hw::init` drives them. That used to be microseconds; the
-    // self-tests below take tens of milliseconds, and a failure stops here
-    // for good. So drive both low first. PORTB.OUT is 0 from reset, and
+    // until something drives them. Nothing can before the first instruction:
+    // every pin tri-states through a reset and its start-up time (DS40002204A
+    // §12.3.2.2, and likely 64 ms from the factory `SYSCFG1.SUT`; nobody's
+    // read one off this light). After that it's up to this code. Left to
+    // `hw::init`, the float would run on through the self-tests below, tens
+    // of milliseconds more, and forever if one fails and stops here. So
+    // drive both low first. PORTB.OUT is 0 from reset, and
     // `sbi` (set bit in I/O register) needs no CPU register, which hasn't
     // been tested yet. VPORTB.DIR sits low enough in I/O space for it.
     "  sbi {vportb_dir}, {fet}",
