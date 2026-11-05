@@ -14,7 +14,7 @@ Watch the pad spacing before you rely on a fixed probe. gchart's standard three-
 
 Use a short USB cable. JLHawaii808 notes failures with 1 m ones.
 
-Adafruit's High Voltage UPDI Friend is a serial UPDI adapter too, but it puts a 12 V pulse on the UPDI line on every falling edge of RTS, which probably means every time a tool opens the port. Nothing turns that off. [bench-plan.md](bench-plan.md#the-high-voltage-updi-friends-12-v-pulse) has the details, and they matter before you press one onto a torch. With that adapter, the "changes nothing" below about `ping` is unproven.
+Adafruit's High Voltage UPDI Friend is a serial UPDI adapter too, but it puts a 12 V pulse on the UPDI line on every falling edge of RTS, which probably means every time a tool opens the port. Nothing turns that off. Keep it for a breakout and use a plain adapter on the torch: [bench-plan.md](bench-plan.md#the-high-voltage-updi-friends-12-v-pulse) has why. With that adapter, the "changes nothing" below about `ping` is unproven.
 
 ## Getting to the pads
 

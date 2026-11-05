@@ -1,6 +1,6 @@
 # Bench plan
 
-Every hardware check the roadmap is waiting on, in one place and in the order to do them, for a bench with the torch, a Fluke 107, a UPDI programmer, and the [spare chip kit](#the-spare-chip-kit): an Adafruit ATtiny1616 breakout, an Adafruit High Voltage UPDI Friend, a breadboard, jumpers, tactile switches and blue LEDs. Nothing here has run on a real light yet, so treat each expected result as a prediction. [flashing.md](flashing.md) has how to reach the pads and use the programmer.
+Every hardware check the roadmap is waiting on, in one place and in the order to do them, for a bench with the torch, a Fluke 107, [JLHawaii808's 4.5 V UPDI kit](https://jlhawaii808.com/products/updi-programmer-driver-reflashling-kit) for the torch, and the [spare chip kit](#the-spare-chip-kit): an Adafruit ATtiny1616 breakout, an Adafruit High Voltage UPDI Friend, a breadboard, jumpers, tactile switches and blue LEDs. Nothing here has run on a real light yet, so treat each expected result as a prediction. [flashing.md](flashing.md) has how to reach the pads and use the programmer.
 
 Each check says what it needs:
 
@@ -69,7 +69,7 @@ What the datasheet says about that (DS40002204A):
 - It only describes the pulse as a way into UPDI from another pin function (§33.3.2.1.3). What it does to a chip already set to UPDI, like these, isn't stated. It says the rising edge resets UPDI, and that UPDI then stays in reset until the line's driven low. That's probably harmless, and the tool's retry with a double break covers it. Whether it disturbs the running firmware is what 0.6 finds out.
 - It's only rated for the RESET pin. On any other pin the limit is VDD + 0.5 V. **Never put the Friend's UPDI line on another pin**, which rules out using it as a serial console on the breakout's TX pin for T2.
 
-The torch adds a question the breakout can't answer: what else is on the R pad. hardware.md doesn't know.
+The torch adds a question the breakout can't answer: what else is on the R pad. hardware.md doesn't know. So the Friend stays off the torch, and the JLHawaii808 kit does that job. Its listing doesn't mention high voltage or RTS.
 
 ## Rules
 
@@ -78,7 +78,7 @@ The torch adds a question the breakout can't answer: what else is on the R pad. 
 - **Stay with it above level 75, in short bursts.** The thermal constants are tuned on a made-up head, and the cell's unprotected. A hand on the head is the only thermometer here, so stop when it's uncomfortable.
 - **Don't take the cell under 2.8 V.** The firmware should turn off at 2.99 V, but that's one of the things being tested.
 - **Nothing here writes fuses.** If a fuse looks wrong, stop and decide with the datasheet open. Having a high-voltage programmer on the bench doesn't change that: `xtask` still can't write them, and the Friend's rescue for a bad `SYSCFG0` is untested.
-- **Use an adapter without the 12 V pulse on the torch if you have one.** If the Friend is the only programmer, use it on the torch only after Stage 0 has passed, and accept that what's on the R pad is unknown (see [the pulse](#the-high-voltage-updi-friends-12-v-pulse)).
+- **The Friend never touches the torch.** It's for the breakout, and the JLHawaii808 kit is for the torch (see [the pulse](#the-high-voltage-updi-friends-12-v-pulse)). The one reason to break this would be a torch that's lost UPDI, and nothing in this plan can cause that.
 - **Get the breakout's backup out of `backup/` before Stage 1.** `xtask` always uses that one directory. If it's left there, the torch's backup refuses to run, and a later `restore` would put seesaw on the torch. Stage 0 moves it.
 
 Any firmware problem below is recoverable: flash and EEPROM are all that ever change, so `cargo xtask restore` puts the stock light back whatever state it's in.
@@ -89,6 +89,8 @@ Every step of the first flash, rehearsed on a chip that doesn't matter. Wired as
 
 The breakout ships running seesaw, so if the chip's locked, 0.1 or 0.2 will say it didn't enter programming mode. Stop there: the programmer won't unlock a chip.
 
+This stage proves `xtask` against a real chip, using the Friend. It doesn't prove the JLHawaii808 kit, whose probe is made for 1.27 mm pads and won't fit the breakout's headers. A failure here might also be the Friend's pulse rather than `xtask`, so a flaky result isn't a verdict on the torch's adapter.
+
 | # | Do | Needs | Expect | Rehearses |
 |---|---|---|---|---|
 | 0.1 | `cargo xtask ping <port>`, ten times | Now | `found tinyAVR P:0D:1-3` every time. A first attempt that only works on the retry would be the pulse holding UPDI in reset | 1.4 |
@@ -96,7 +98,7 @@ The breakout ships running seesaw, so if the chip's locked, 0.1 or 0.2 will say 
 | 0.3 | Read `backup/fuses.hex` against `selftest::Fuses::ok`, as 1.6 | Now | Seesaw might not use the factory fuses. If this fails, the firmware refuses the FET here for a good reason, so 0.9 to 0.11 can't work. Don't write the fuses | 1.6 |
 | 0.4 | `cargo xtask flash <port>`, then `restore`, then `flash` again | Now | All verify. Seesaw comes back in the middle, which proves `restore` before the torch needs it | 2.1, and `restore`, which nothing else tests |
 | 0.5 | Move `backup/` out of the repo, somewhere like `~/ts21-breakout-backup` | | `ls backup` finds nothing. Don't skip this | |
-| 0.6 | LED on SDA. 1C on, then `cargo xtask ping <port>` ten times with the light on, then 1C off | Now | Stays on throughout, and clicks still work. `ping` claims to change nothing, so the light going out means the pulse or the port opening resets the chip. It's no danger on this board, but it's the datasheet's gap answered, so write it down | The pulse |
+| 0.6 | LED on SDA. 1C on, then `cargo xtask ping <port>` ten times with the light on, then 1C off | Now | Stays on throughout, and clicks still work. `ping` claims to change nothing, so the light going out means the pulse or the port opening resets the chip. It's no danger on this board, and the torch never gets this adapter, so all this decides is how far to trust Stage 0's results. Write it down | The pulse |
 | 0.7 | Switch and LED, as 3.5: 1C on, 1C off, a few dozen times | Now | Clicks feel right. Power-cycling the Friend brings it up in about half a second. The LED glows through the proof's resets, thanks to the pull-up, which shows they happen | 3.5 |
 | 0.8 | LED off. Level 50: meter on frequency from SDA to GND, then on DC volts | Now | 19.4 kHz, a clean signal, so 3.8's "may not trigger" doesn't apply. A wrong clock is unmistakable: 10 MHz would read double. DC volts should be 29.1% of VCC, 75 / 258, since the meter averages the PWM | 3.6, 3.8, "Check 5 MHz" on silicon |
 | 0.9 | T1 at level 100, right after a flash: DC volts on SCL | T1 | 3.5% of VCC, 9 / 255, about 116 mV at 3.3 V. Zero means capped, so go through the suspects in 4.1 here, where it costs nothing. Covers the CRC, the proof and SRAM surviving a watchdog reset | 4.1 |
@@ -109,14 +111,14 @@ Stop at anything unexplained. What goes wrong here would've gone wrong on the to
 
 ## Stage 1: stock, before flashing
 
-The last chance to measure Anduril, which is what the 5 MHz checks compare against, and the first time the programmer meets the torch. Stage 0 goes first.
+The last chance to measure Anduril, which is what the 5 MHz checks compare against, and the first run of the JLHawaii808 kit on any chip. Stage 0 goes first.
 
 | # | Do | Expect | Closes |
 |---|---|---|---|
 | 1.1 | Cell voltage on the Fluke, out of the light | 3.6 to 4.2 V. Write it down | |
 | 1.2 | Tail current on stock: cap off, meter from cell negative to the tube, at the top of the linear channel | About 350 mA, which is the forum figure this firmware's sums rest on. Start low and ramp up slowly: past about 0.4 A you're onto the FET, so stop | Confirms the linear channel's current |
 | 1.3 | Note how bright that level looks, and whether the light whines | For comparison at 4.4 | |
-| 1.4 | `cargo xtask ping <port>` | `found tinyAVR P:0D:1-3` | First half of "ping, back up and flash" |
+| 1.4 | `cargo xtask ping <port>`, first with the probe touching nothing, then on the pads | In the air: "no reply from the chip", which proves the port and the adapter's echo with no chip at risk. "Nothing echoed back" means the adapter's the problem. On the pads: `found tinyAVR P:0D:1-3` | First half of "ping, back up and flash" |
 | 1.5 | `cargo xtask backup <port>`, then copy `backup/` somewhere safe | `flash.hex`, `eeprom.hex`, `fuses.hex` | Second half |
 | 1.6 | Read `backup/fuses.hex` against `selftest::Fuses::ok` | `WDTCFG` 0, `OSCCFG.FREQSEL` 20 MHz with `OSCLOCK` clear, `SYSCFG0.RSTPINCFG` UPDI, `APPEND` and `BOOTEND` 0 | "`backup/fuses.hex` passes" |
 | 1.7 | Read `BODCFG` and `SYSCFG1.SUT` from the same file | `BODCFG` 0x00 (BOD off), `SUT` 64 ms | "Find out whether the BOD's on", and the start-up time in the watchdog item |
