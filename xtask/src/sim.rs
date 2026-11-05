@@ -428,6 +428,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     }
     lock_taken_out(&power_on)?;
     off_with_tca0_dead(&power_on).map_err(|e| format!("off with TCA0 dead: {e}"))?;
+    linear_with_wo0_high(&power_on).map_err(|e| format!("a linear level, WO0 high: {e}"))?;
     adverse_bv(&power_on).map_err(|e| format!("with BV cleared under LUPD: {e}"))?;
     Ok(report)
 }
@@ -452,6 +453,7 @@ fn off_with_tca0_dead(
             sim.chip.compare = [row.fet, row.linear];
             sim.chip.wide[1] = row.top - 1;
             sim.chip.next_bottom = sim.chip.now;
+            sim.chip.io[reg::TCA0_CTRLB] |= regs::TCA_CMP0EN;
         }
         // A cycle at the most, to catch the outputs high.
         let want = |c: &Chip| if top_level { c.wo[0] } else { c.wo[1] };
@@ -486,6 +488,31 @@ fn off_with_tca0_dead(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+/// TCA0 stops with WO0 high at a linear level. WO0 doesn't have the FET's pin
+/// there, so that mustn't light it, whatever the count does after.
+fn linear_with_wo0_high(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+) -> Result<(), String> {
+    let mut sim = switched_on(power_on)?;
+    if sim.chip.leds().0 == 0 {
+        return Err("the linear channel isn't on".into());
+    }
+    let world = World {
+        tca_stopped: true,
+        ..sim.chip.world
+    };
+    sim.chip.set_world(world);
+    sim.chip.tca_deaf = true;
+    sim.chip.wo[0] = true;
+    for _ in 0..ts21::TICKS_PER_SECOND {
+        if sim.chip.leds().1 != 0 {
+            return Err(format!("the FET's on, at {:?}", sim.chip.leds()));
+        }
+        sim.tick(false)?;
     }
     Ok(())
 }
