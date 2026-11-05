@@ -141,15 +141,15 @@ const LEAST_CLOCKS: u32 = NOMINAL_CLOCKS * 95 / 130;
 /// The longest pass of the main loop the sums here allow for. `cargo xtask hex`
 /// fails if it measures one longer, so raising this means rechecking
 /// [`CLOCKS_MIN`], which the assert below does.
-pub const PASS_INSTRUCTIONS: u32 = 3_500;
+pub const PASS_INSTRUCTIONS: u32 = 3_700;
 /// Clocks the count can miss. It starts when the pass before it ends, not on
 /// the tick, and a pass is at most this if every instruction took four. Most
 /// take one or two, so that's pessimistic by about a factor of three. It
-/// leaves 43,091 as the least a good chip can count, whole cycles aside.
+/// leaves 42,291 as the least a good chip can count, whole cycles aside.
 const PASS_CLOCKS: u32 = PASS_INSTRUCTIONS * 4;
 
 /// The fewest clocks that pass, give or take the cycle in use: see
-/// [`ClockCheck::result`]. It's 3,566 under that 43,091, or 8%. A count at the
+/// [`ClockCheck::result`]. It's 2,766 under that 42,291, or 7%. A count at the
 /// shortest cycle has to reach 154 of them, which is one over T/2 below, so
 /// a tick at twice its rate fails at power-on, when the cycle's short.
 pub const CLOCKS_MIN: u32 = 155 * PWM_TOP as u32;

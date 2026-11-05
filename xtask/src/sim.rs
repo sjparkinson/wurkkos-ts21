@@ -295,6 +295,9 @@ pub struct Report {
     pub off_instructions: u64,
     /// Handlers that landed with a TCA0 16-bit access half done.
     pub mid_access: u32,
+    /// The longest pass of the runs with something extra in them, which
+    /// `loop_instructions` leaves out.
+    pub worst_pass: u64,
     /// Real ticks that `Landings` put on `hw::wait_for_tick`'s loop.
     pub ticks_landed: u32,
     /// `tcb0_int`s that `Landings` set off.
@@ -399,6 +402,7 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
         loop_budget: TICK_BUDGET,
         off_instructions: 0,
         mid_access: 0,
+        worst_pass: 0,
         ticks_landed: 0,
         deadlines_landed: 0,
         bv_cleared: 0,
@@ -417,19 +421,20 @@ pub fn check(elf: &Elf) -> Result<Report, String> {
     if report.off_instructions == 0 {
         return Err("never powered down".into());
     }
-    // The clock check's floor allows for this much of a tick going uncounted.
-    if report.loop_instructions > u64::from(selftest::PASS_INSTRUCTIONS) {
-        return Err(format!(
-            "a pass took {} instructions, and `selftest::PASS_INSTRUCTIONS` is {}, \
-             so the clock check's floor doesn't cover a good chip",
-            report.loop_instructions,
-            selftest::PASS_INSTRUCTIONS
-        ));
-    }
     lock_taken_out(&power_on)?;
     off_with_tca0_dead(&power_on).map_err(|e| format!("off with TCA0 dead: {e}"))?;
     linear_with_wo0_high(&power_on).map_err(|e| format!("a linear level, WO0 high: {e}"))?;
-    adverse_bv(&power_on).map_err(|e| format!("with BV cleared under LUPD: {e}"))?;
+    adverse_bv(&power_on, &mut report).map_err(|e| format!("with BV cleared under LUPD: {e}"))?;
+    // The clock check's floor allows for this much of a tick going uncounted,
+    // on any run.
+    let longest = report.loop_instructions.max(report.worst_pass);
+    if longest > u64::from(selftest::PASS_INSTRUCTIONS) {
+        return Err(format!(
+            "a pass took {longest} instructions, and `selftest::PASS_INSTRUCTIONS` is {}, \
+             so the clock check's floor doesn't cover a good chip",
+            selftest::PASS_INSTRUCTIONS
+        ));
+    }
     Ok(report)
 }
 
@@ -528,7 +533,10 @@ const LOST_ROW_TICKS: u32 = 8;
 /// a locked BOTTOM the other way (`Chip::locked_bottom`). Nothing may tear, and
 /// the output has to catch up with the library, and it fails unless those
 /// BOTTOMs did land.
-fn adverse_bv(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Result<(), String> {
+fn adverse_bv(
+    power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>,
+    out: &mut Report,
+) -> Result<(), String> {
     let mut report = Report::default();
     for example in spec::examples(spec::UI_MD)? {
         let samples = simulate::samples(&example.actions);
@@ -542,6 +550,7 @@ fn adverse_bv(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> Resu
     let (mut sim, _) = power_on(&World::NORMAL)?;
     sim.chip.bv_adverse = true;
     against_the_library(sim, &mut report).map_err(|e| format!("random switching: {e}"))?;
+    out.worst_pass = out.worst_pass.max(report.loop_instructions);
     match report.bv_cleared {
         0 => Err("no BOTTOM ever landed under LUPD".into()),
         _ => Ok(()),
@@ -560,6 +569,7 @@ fn lock_taken_out(power_on: &impl Fn(&World) -> Result<(Sim, Boot), String>) -> 
         loop_budget: TICK_BUDGET,
         off_instructions: 0,
         mid_access: 0,
+        worst_pass: 0,
         ticks_landed: 0,
         deadlines_landed: 0,
         bv_cleared: 0,
@@ -3708,6 +3718,7 @@ fn mid_pass(
         return Err("`tcb0_int` never landed mid-pass".into());
     }
     report.stack = report.stack.max(landed.stack);
+    report.worst_pass = report.worst_pass.max(landed.loop_instructions);
     report.mid_access = landed.mid_access;
     Ok(())
 }
