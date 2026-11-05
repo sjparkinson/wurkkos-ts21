@@ -30,7 +30,7 @@ A newer revision will fail the check. That's fine if you want it, but rename the
 | File | Document | What it's for here |
 |---|---|---|
 | `AN1982B-interrupt-system.pdf` | [The tinyAVR 0/1 interrupt system](https://ww1.microchip.com/downloads/en/AppNotes/40001982B.pdf) | The CPUINT controller, for the first real interrupt handler (sleep, roadmap stage 2) |
-| `AN1983A-writing-flash-and-eeprom.pdf` | [Writing flash and EEPROM on the tinyAVR 1-series](https://ww1.microchip.com/downloads/en/AppNotes/AN1983%20Writing%20to%20Flash%20and%20EEPROM%20on%20the%20tinyAVR%201-series%2040001983A.pdf) | Remembering the level in EEPROM, and the NVM controller the UPDI programmer drives |
+| `AN1983A-writing-flash-and-eeprom.pdf` | [Writing flash and EEPROM on the tinyAVR 1-series](https://ww1.microchip.com/downloads/en/AppNotes/AN1983%20Writing%20to%20Flash%20and%20EEPROM%20on%20the%20tinyAVR%201-series%2040001983A.pdf) | The NVM controller the UPDI programmer drives |
 | `AN2447A-measure-vcc-without-io-pin.pdf` | [Measuring VCC without an I/O pin](https://ww1.microchip.com/downloads/en/AppNotes/00002447A.pdf) | The battery reading method `src/battery.rs` uses |
 | `AN2515C-low-power-techniques.pdf` | [AVR low-power techniques](https://ww1.microchip.com/downloads/en/Appnotes/AN2515-AVR-Low-Power-Techniques-00002515C.pdf) | Sleeping when off |
 | `AN2519B-hardware-design-considerations.pdf` | [AVR hardware design considerations](https://ww1.microchip.com/downloads/en/Appnotes/AN2519-AVR-Microcontroller-Hardware-Design-Considerations-00002519B.pdf) | Reading the driver board: decoupling, reset and UPDI pin |
