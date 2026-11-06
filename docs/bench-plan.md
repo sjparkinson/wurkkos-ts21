@@ -93,7 +93,7 @@ This stage proves `xtask` against a real chip, using the Friend. It doesn't prov
 
 | # | Do | Needs | Expect | Rehearses |
 |---|---|---|---|---|
-| 0.1 | `cargo xtask ping <port>`, ten times | Now | `found tinyAVR P:0D:1-3` every time. A first attempt that only works on the retry would be the pulse holding UPDI in reset | 1.4 |
+| 0.1 | `cargo xtask ping <port>`, ten times | Now | `found tinyAVR` and the same string every time (a TS21 says `P:0D:0-3`). A first attempt that only works on the retry would be the pulse holding UPDI in reset | 1.4 |
 | 0.2 | `cargo xtask backup <port> backup/breakout` | Now | `flash.hex`, `eeprom.hex`, `fuses.hex` | 1.5 |
 | 0.3 | Read `backup/breakout/fuses.hex` against `selftest::Fuses::ok`, as 1.6 | Now | Seesaw might not use the factory fuses. If this fails, the firmware refuses the FET here for a good reason, so 0.9 to 0.11 can't work. Don't write the fuses | 1.6 |
 | 0.4 | `cargo xtask flash <port>`, then `cargo xtask restore <port> backup/breakout`, then `flash` again | Now | All verify. Seesaw comes back in the middle, which proves `restore` before the torch needs it | 2.1, and `restore`, which nothing else tests |
@@ -116,9 +116,9 @@ The last chance to measure Anduril, which is what the 5 MHz checks compare again
 | # | Do | Expect | Closes |
 |---|---|---|---|
 | 1.1 | Cell voltage on the Fluke, out of the light | 3.6 to 4.2 V. Write it down | |
-| 1.2 | Tail current on stock: cap off, meter from cell negative to the tube, at the top of the linear channel | About 350 mA, which is the forum figure this firmware's sums rest on. Start low and ramp up slowly: past about 0.4 A you're onto the FET, so stop | Confirms the linear channel's current |
+| 1.2 | Tail current on stock: cap off, meter from cell negative to the tube, at the top of the linear channel, which on the 2022-02-08 build is level 65 of 150 | About 350 mA, which is the forum figure this firmware's sums rest on. Start low and ramp up slowly: the button LED should go from low to high at level 66 (read from the firmware, not seen yet), and past about 0.4 A you're onto the FET, so stop | Confirms the linear channel's current |
 | 1.3 | Note how bright that level looks, and whether the light whines | For comparison at 4.4 | |
-| 1.4 | `cargo xtask ping <port>`, first with the probe touching nothing, then on the pads | In the air: "no reply from the chip", which proves the port and the adapter's echo with no chip at risk. "Nothing echoed back" means the adapter's the problem. On the pads: `found tinyAVR P:0D:1-3` | First half of "ping, back up and flash" |
+| 1.4 | `cargo xtask ping <port>`, first with the probe touching nothing, then on the pads | In the air: "no reply from the chip", which proves the port and the adapter's echo with no chip at risk. "Nothing echoed back" means the adapter's the problem. On the pads: `found tinyAVR P:0D:0-3` | First half of "ping, back up and flash" |
 | 1.5 | `cargo xtask backup <port> backup/torch`, then copy that directory somewhere safe | `flash.hex`, `eeprom.hex`, `fuses.hex` | Second half |
 | 1.6 | Read `backup/torch/fuses.hex` against `selftest::Fuses::ok` | `WDTCFG` 0, `OSCCFG.FREQSEL` 20 MHz with `OSCLOCK` clear, `SYSCFG0.RSTPINCFG` UPDI, `APPEND` and `BOOTEND` 0 | "`backup/torch/fuses.hex` passes" |
 | 1.7 | Read `BODCFG` and `SYSCFG1.SUT` from the same file | `BODCFG` 0x00 (BOD off), `SUT` 64 ms | "Find out whether the BOD's on", and the start-up time in the watchdog item |
@@ -161,7 +161,7 @@ The cap is the only way a failed proof, flash CRC or fuse check shows at all, an
 | 4.1 | T1 at level 100, right after a flash | Clearly brighter than a T1 at 75. If they look the same, it's capped: suspect `xtask/src/crc.rs`, then the fuses, then SRAM not surviving a watchdog reset | "Goes above level 75", the CRC convention, and the whole proof, starting with SRAM surviving |
 | 4.2 | Leave that build off for an hour, then on | Still level 100. Capped means a `wdr` got lost in power-down and it took the bite for a hang | "`wdr` survives power-down" |
 | 4.3 | T1 at level 76 and 75, side by side by eye | 76 a touch brighter, since a compare of 1 is where an off-by-one in the duty would show | "Check 5 MHz" |
-| 4.4 | T1 at 75 and 150, against your notes from 1.3 | As bright as stock. Whine is no worse | "Check 5 MHz" |
+| 4.4 | T1 at 75 and 150, against your notes from 1.3 | As bright as stock, where this firmware's 75 is stock's 65: both are the linear channel full and the FET off. Whine is no worse | "Check 5 MHz" |
 | 4.5 | T1 at 150: cell volts across the cell, for a few seconds | Write down the sag | "How far the cell sags on the FET at turbo" |
 | 4.6 | Same run, in the dark, turn it off and on a few times | No blip on either edge | "Switching off repeatedly", "a change of level shows no blip" |
 
@@ -220,4 +220,8 @@ Fill this in as you go, with the commit you flashed.
 
 | # | Date | Commit | Result |
 |---|---|---|---|
+| 1.4 | 2026-11-06 | 6831a1a | In the air, "no reply from the chip". On the pads, `found tinyAVR P:0D:0-3`, not the `D:1` this plan expected, which came from the fake chip. One ping only, on the torch, with stage 0 not done |
+| 1.5 | 2026-11-06 | 6831a1a | Worked first time in 4 seconds, so the signature check passed and the chip isn't locked. Stock is Anduril `2022-02-08` `0614`. Read once, not compared with a second read |
+| 1.6 | 2026-11-06 | 6831a1a | Passes, by hand. Fuses are `00 00 02 FF 00 F6 07 00 00 FF C5` |
+| 1.7 | 2026-11-06 | 6831a1a | `BODCFG` 0x00, BOD off. `SYSCFG1` 0x07, `SUT` 64 ms |
 | | | | |

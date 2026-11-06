@@ -10,13 +10,17 @@
 //! reading = 4 × 1024 × 1.5 V / VCC   so   VCC = 6144 / reading volts
 //! ```
 //!
-//! That's the scaling Anduril uses (`mcu_vdd_raw2cooked16` in
+//! That's the scaling trunk Anduril uses (`mcu_vdd_raw2cooked16` in
 //! `arch/attiny1616.c`), with 1024 counts to full scale where the datasheet
 //! says 1023. The 0614 calibration (`VOLTAGE_SLOPE` 1010 and
 //! `VOLTAGE_OFFSET` 30 in `hw/sofirn/blf-q8-t1616/hwdef.h`) was fitted against
 //! Anduril's scaling, so this keeps it: the difference is 0.1%, about 0.4 cV
 //! at 4.2 V, and the calibration is a guess for this light anyway. The slope
 //! applies to the VCC term and the offset goes on after, as in Anduril.
+//!
+//! The 2022-02-08 build on a real TS21 is older: the 1.1 V reference, one
+//! conversion, +0.25 V and no slope. Those land within about 0.015 V of this
+//! on paper, but through a different reference (see docs/hardware.md).
 //!
 //! The numerator is 606,000, which needs 20 bits. A `u32` division links
 //! fine, but `compiler_builtins`' 32-bit divide costs about 1.3 KB of flash,
@@ -27,11 +31,11 @@
 use crate::TICKS_PER_SECOND;
 use crate::ramp::{LEVELS, LINEAR_MAX};
 
-/// The 0614 build's voltage slope, out of 1024. A starting point, not a
+/// Trunk Anduril's 0614 voltage slope, out of 1024. A starting point, not a
 /// measurement of this light.
 pub const SLOPE: u16 = 1010;
 
-/// The 0614 build's voltage offset in centivolts, added after the slope. It's
+/// Trunk Anduril's 0614 voltage offset in centivolts, added after the slope. It's
 /// most likely the drop between the cell and the MCU's supply.
 pub const OFFSET: u16 = 30;
 
