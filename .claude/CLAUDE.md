@@ -40,7 +40,7 @@ The `avr-codegen` skill in `.claude/skills/` runs in the session itself: use it 
 
 - **No dependencies.** Not in the firmware, not in xtask. If something seems to need a crate, write the small part you need, or ask first.
 - **Never write fuses, and never suggest a command that does.** A wrong `SYSCFG0` disables UPDI, and only a high-voltage programmer gets it back. `cargo xtask flash` writes flash only.
-- **Never run `cargo xtask ping`, `backup`, `flash` or `restore` yourself.** They drive real hardware on a serial port, and `.claude/settings.json` denies them. Give the user the command. Test UPDI changes against the fake chip in `xtask/src/updi.rs`, and add a case there for any new sequence.
+- **`cargo xtask ping`, `backup`, `flash` and `restore` drive real hardware on a serial port.** Run `ping` and `backup` when they help. Only run `flash` or `restore` when the user asks for that write, because they change what's on the chip. Test UPDI changes against the fake chip in `xtask/src/updi.rs`, and add a case there for any new sequence.
 - **The UPDI programmer never writes fuses, the user row or a locked chip.** Don't add any of that without the user asking for it explicitly.
 - **Every register address and bit mask comes from the ATDF** (`vendor/ATtiny1616.atdf`), through the constants `build.rs` generates into `src/regs.rs`. No bare register numbers in `src/hw.rs` or `src/rt.rs`. Don't type a constant the ATDF can give you. If it isn't in there, it goes in `src/regs.rs` by hand with a comment saying why. Use the `register-checker` agent on branches that touch `src/regs.rs`, `src/hw.rs` or `src/rt.rs`, for what the ATDF can't express.
 - **16-bit peripheral registers: low byte first.** Use `write16` in `src/hw.rs`.
