@@ -592,7 +592,7 @@ pub fn fuses() -> Fuses {
 }
 
 /// Starts an ADC conversion, setting the ADC up for its channel first if
-/// asked. The setups are Anduril's (`arch/attiny1616.c`) for the voltage and
+/// asked. The setups are trunk Anduril's (`arch/attiny1616.c`) for the voltage and
 /// the datasheet's (section 30.3.2.6) for the temperature, plus accumulating
 /// four conversions, which that section doesn't mention either way.
 /// `sensors::Schedule` only asks when the channel changes, or after a rest.

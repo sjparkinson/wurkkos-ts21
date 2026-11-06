@@ -23,9 +23,10 @@
 //! - Never step down below a floor, by default the top of the linear
 //!   channel. The linear regulator tops out around 350 mA, which can't
 //!   overheat the head, so that's the brightest level that's always safe.
-//!   Anduril's build for this light (model 0614) floors at 60, with the
-//!   linear channel full at 75 (`MIN_THERM_STEPDOWN` and `MAX_1x7135` in
-//!   `hw/sofirn/blf-q8-t1616/anduril.h`), so it's on the linear channel too.
+//!   Anduril's builds for this light (model 0614) floor on the linear
+//!   channel too: 65 on the 2022-02-08 build backed up from a real TS21, and
+//!   60 with the channel full at 75 on trunk (`MIN_THERM_STEPDOWN` and
+//!   `MAX_1x7135` in `hw/sofirn/blf-q8-t1616/anduril.h`).
 //!
 //! Only sample while the light's on. Anduril leaves the temperature alone
 //! in standby because the ADC costs about 250 µA against about 20 µA asleep

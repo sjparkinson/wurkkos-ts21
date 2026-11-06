@@ -30,7 +30,7 @@ Run `ls /dev/cu.*` before and after plugging the adapter in. On macOS it's somet
 cargo xtask ping /dev/cu.usbserial-XXXX
 ```
 
-This reads the chip's System Information Block and changes nothing, not even a reset. You should see something like `found tinyAVR P:0D:1-3`. If you don't, see [If it doesn't talk](#if-it-doesnt-talk).
+This reads the chip's System Information Block and changes nothing, not even a reset. You should see something like `found tinyAVR P:0D:0-3`. If you don't, see [If it doesn't talk](#if-it-doesnt-talk).
 
 ## Back up the factory firmware first
 
