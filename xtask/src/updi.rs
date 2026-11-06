@@ -458,6 +458,13 @@ mod tests {
     }
 
     #[test]
+    fn reads_data_space_while_the_firmware_runs() {
+        let mut p = Programmer::connect(Tiny::new()).unwrap();
+        assert_eq!(p.read(map::SIGNATURE, 3).unwrap(), map::ATTINY1616);
+        p.disconnect().unwrap();
+    }
+
+    #[test]
     fn retries_with_a_double_break() {
         let mut tiny = Tiny::new();
         tiny.asleep = true;

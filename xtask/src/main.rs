@@ -37,6 +37,8 @@ commands:
   hex                     build the firmware, write target/wurkkos-ts21-0614.hex
                           and print flash, RAM, stack and loop use
   ping <port>             check the programmer can see the chip, change nothing
+  peek <port>             read the running chip's registers and SRAM, change
+                          nothing, to see how far the firmware got
   backup <port> <dir>     save the chip's flash, EEPROM and fuses into <dir>
   flash <port> [file.hex] build and flash the firmware, or flash file.hex
   restore <port> <dir>    put <dir>/flash.hex and <dir>/eeprom.hex back
@@ -61,6 +63,7 @@ fn main() -> ExitCode {
     let result = match args.as_slice() {
         ["hex"] => hex(),
         ["ping", port] => ping(port),
+        ["peek", port] => peek(port),
         ["backup", port, dir] => backup(port, Path::new(dir)),
         ["flash", port] => build()
             .and_then(|(elf, _)| crc::sign(&elf.flash_image()))
@@ -214,6 +217,54 @@ fn ping(port: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Reads what the running firmware has left behind, without a reset or a
+/// write: UPDI reaches data space while the CPU runs. Only `hw::init` sets the
+/// clock, the pin controls and the PIT, so those say whether it ran, and the
+/// self-tests leave their patterns in SP and SRAM.
+fn peek(port: &str) -> Result<(), String> {
+    use ts21::regs::{addr, mem};
+
+    let registers = [
+        ("RSTCTRL.RSTFR", addr::RSTCTRL_RSTFR),
+        ("CLKCTRL.MCLKCTRLB", addr::CLKCTRL_MCLKCTRLB),
+        ("WDT.CTRLA", addr::WDT_CTRLA),
+        ("CPU.SPL", addr::CPU_SPL),
+        ("CPU.SPH", addr::CPU_SPH),
+        ("CPU.SREG", addr::CPU_SREG),
+        ("VPORTB.DIR", addr::VPORTB_DIR),
+        ("PORTB.PIN5CTRL", addr::PORTB_PIN0CTRL + 5),
+        ("TCA0.CTRLA", addr::TCA0_CTRLA),
+        ("RTC.PITCTRLA", addr::RTC_PITCTRLA),
+    ];
+
+    let mut p = connect(port)?;
+    for (name, at) in registers {
+        println!("{name:18} {:02X}", p.read(at as u16, 1)?[0]);
+    }
+    let start = mem::INTERNAL_SRAM_START as u16;
+    let sram = p.read(start, mem::INTERNAL_SRAM_SIZE)?;
+    p.disconnect()?;
+
+    println!("SRAM");
+    for line in runs(start, &sram) {
+        println!("  {line}");
+    }
+    Ok(())
+}
+
+/// `bytes` as one line per run of equal bytes, so a RAM test's pattern and
+/// where it stopped stand out from the 2 KB around it.
+fn runs(start: u16, bytes: &[u8]) -> Vec<String> {
+    bytes
+        .chunk_by(|a, b| a == b)
+        .scan(start, |at, run| {
+            let line = format!("{at:04X} {:02X} x{}", run[0], run.len());
+            *at += run.len() as u16;
+            Some(line)
+        })
+        .collect()
+}
+
 fn backup(port: &str, dir: &Path) -> Result<(), String> {
     let flash_path = dir.join("flash.hex");
     if flash_path.exists() {
@@ -325,7 +376,7 @@ fn run(command: &mut Command) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{commas, row};
+    use super::{commas, row, runs};
 
     #[test]
     fn rows_line_up_with_and_without_a_total() {
@@ -346,5 +397,13 @@ mod tests {
         assert_eq!(commas(3978), "3,978");
         assert_eq!(commas(39062), "39,062");
         assert_eq!(commas(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn runs_show_where_a_pattern_stops() {
+        assert_eq!(
+            runs(0x3800, &[0xAA, 0xAA, 0xAA, 0x55, 0x00, 0x00]),
+            ["3800 AA x3", "3803 55 x1", "3804 00 x2"]
+        );
     }
 }
