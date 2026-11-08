@@ -3,6 +3,6 @@
 # run every check in CONTRIBUTING.md, because AVR is a tier 3 target and
 # nightlies do break it.
 [toolchain]
-channel = "nightly-2026-11-04"
+channel = "nightly-2026-11-08"
 components = ["rust-src", "rustfmt", "clippy", "llvm-tools"]
 profile = "minimal"
